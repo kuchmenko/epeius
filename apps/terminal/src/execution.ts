@@ -104,6 +104,7 @@ export function verifyReceipt(
 export function validatePreparation(
   p: PrepareExecutionResponse,
   signer: string,
+  expectedChainId: string,
   now = Math.floor(Date.now() / 1000),
 ) {
   if (
@@ -124,8 +125,10 @@ export function validatePreparation(
     !same(tx.from, signer)
   )
     throw new Error("Signer, transaction sender, and recipient must match.");
-  if (tx.chainId !== "84532")
-    throw new Error("Execution only supports chain ID 84532.");
+  if (tx.chainId !== expectedChainId)
+    throw new Error(
+      `Prepared transaction chain ID must match configured chain ID ${expectedChainId}.`,
+    );
   if (
     !address.test(tx.to) ||
     !/^0x(?:[0-9a-fA-F]{2})+$/.test(tx.data) ||
@@ -174,6 +177,7 @@ export function validatePreparation(
 
 export type ExecutionIO = {
   signer: string;
+  expectedChainId: string;
   chainId: () => Promise<string>;
   prepare: (preparationId?: string) => Promise<PrepareExecutionResponse>;
   confirm: (
@@ -186,10 +190,19 @@ export type ExecutionIO = {
 };
 
 export async function executePrepared(io: ExecutionIO, preview = false) {
-  if ((await io.chainId()) !== "0x14a34")
-    throw new Error("RPC network must be chain ID 84532.");
+  const rpcMatchesExpectedChain = async () => {
+    const chainId = await io.chainId();
+    return (
+      /^0x[0-9a-f]+$/.test(chainId) &&
+      BigInt(chainId).toString() === io.expectedChainId
+    );
+  };
+  if (!(await rpcMatchesExpectedChain()))
+    throw new Error(
+      `RPC network must match configured chain ID ${io.expectedChainId}.`,
+    );
   const prepared = await io.prepare();
-  const tx = validatePreparation(prepared, io.signer);
+  const tx = validatePreparation(prepared, io.signer, io.expectedChainId);
   const snapshot = toJsonString(PrepareExecutionResponseSchema, prepared);
   const kind =
     prepared.status === PreparationStatus.APPROVAL_REQUIRED
@@ -204,7 +217,7 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     return 1;
   }
   const checked = await io.prepare(prepared.preparationId);
-  validatePreparation(checked, io.signer);
+  validatePreparation(checked, io.signer, io.expectedChainId);
   // Compare all executable terms, including route, minimum, deadline and approval.
   // A newer simulation block and output estimate do not change signed terms.
   const immutable = (p: PrepareExecutionResponse) =>
@@ -221,9 +234,9 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     throw new Error(
       "Preparation changed after confirmation. Nothing sent; rerun quote.",
     );
-  if ((await io.chainId()) !== "0x14a34")
+  if (!(await rpcMatchesExpectedChain()))
     throw new Error("RPC network changed. Nothing sent.");
-  validatePreparation(prepared, io.signer);
+  validatePreparation(prepared, io.signer, io.expectedChainId);
   let hash: string;
   try {
     hash = (await io.send(tx)).trim();
@@ -285,6 +298,7 @@ export async function executionCommand(
   values: Record<string, string | undefined>,
   configPath: string,
   chain: string,
+  remoteChainId: string,
   client: ReturnType<typeof quoteClient>,
   signal: AbortSignal,
 ) {
@@ -313,12 +327,20 @@ export async function executionCommand(
   };
   const localChain = config.chains?.[chain];
   if (
-    localChain?.chain_id !== 84532 ||
+    !localChain ||
+    !Number.isSafeInteger(localChain.chain_id) ||
+    (localChain.chain_id ?? 0) <= 0 ||
     localChain.execution_enabled !== true ||
-    !localChain.rpc_url_env
+    typeof localChain.rpc_url_env !== "string" ||
+    !localChain.rpc_url_env.trim()
   )
     throw new Error(
-      "Local chain must explicitly enable execution on chain ID 84532 and set rpc_url_env.",
+      "Local chain must set a safe positive chain_id, explicitly enable execution, and set rpc_url_env.",
+    );
+  const expectedChainId = String(localChain.chain_id);
+  if (remoteChainId !== expectedChainId)
+    throw new Error(
+      `Engine chain ID must match configured chain ID ${expectedChainId}.`,
     );
   const rpcUrl = process.env[localChain.rpc_url_env];
   if (!rpcUrl)
@@ -380,6 +402,7 @@ export async function executionCommand(
   return executePrepared(
     {
       signer,
+      expectedChainId,
       chainId: async () => String(await rpc("eth_chainId")).toLowerCase(),
       prepare: async (preparationId) => {
         const response = await client.prepareExecution(
@@ -444,7 +467,7 @@ export async function executionCommand(
           const receipt = (await rpc("eth_getTransactionReceipt", [
             hash,
           ])) as Receipt | null;
-          // Base preconfirmations may report success with a zero or missing block hash.
+          // Preconfirmations may report success with a zero or missing block hash.
           if (
             receipt?.blockHash &&
             hashPattern.test(receipt.blockHash) &&

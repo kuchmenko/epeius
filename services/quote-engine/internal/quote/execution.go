@@ -133,7 +133,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		key = saved.request.Chain
 	}
 	chain, ok := h.Chains[key]
-	if !ok || chain.ChainID != "84532" || !chain.Config.ExecutionEnabled {
+	if !ok || !chain.Config.ExecutionEnabled {
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "execution is disabled")
 	}
 	reader, ok := chain.Client.(executionReader)
@@ -265,7 +265,7 @@ func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, min
 	var path []byte
 	for i, leg := range route.Legs {
 		fee, ok := leg.Selector.(*quotev1.RouteLeg_FeePips)
-		if !ok || fee.FeePips == 0 || fee.FeePips >= 1000000 || !address.MatchString(leg.TokenIn) || !address.MatchString(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
+		if !ok || fee.FeePips >= 1000000 || !address.MatchString(leg.TokenIn) || !address.MatchString(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
 			return nil, errors.New("invalid path")
 		}
 		path = append(path, common.HexToAddress(leg.TokenIn).Bytes()...)

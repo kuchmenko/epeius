@@ -12,14 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const zero = `0x${"0".repeat(40)}`;
-const weth = "0x4200000000000000000000000000000000000006";
-export const uni = {
-  factory: "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",
-  quoter: "0xC5290058841028F1614F3A6F0F5816cAd0df5E27",
-  router: "0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4",
-  npm: "0x27F971cb582BF9E50F397e4d29a5C7A34f11faA2",
-};
-const decimals = { A: 18, B: 6, C: 8 };
+const defaultConfig = resolve(root, "scripts/testnet/harness.toml");
 const same = (a, b) => a.toLowerCase() === b.toLowerCase();
 const confirmedHash = (hash) =>
   /^0x[\da-fA-F]{64}$/.test(hash ?? "") && !/^0x0{64}$/.test(hash);
@@ -60,12 +53,14 @@ export function options(args) {
   const result = {
     command: args[0],
     broadcast: false,
+    config: defaultConfig,
     manifest: resolve(root, ".testnet/manifest.json"),
     recipients: [],
   };
   if (!["deploy", "seed", "check", "config"].includes(result.command))
     throw new Error("Expected deploy, seed, check, or config");
   const names = {
+    "--config": "config",
     "--manifest": "manifest",
     "--sender": "sender",
     "--keystore": "keystore",
@@ -83,7 +78,7 @@ export function options(args) {
     if (!value || value.startsWith("--"))
       throw new Error(`Missing value for ${name}`);
     if (name === "--recipient") result.recipients.push(address(value));
-    else if (result[names[name]] && name !== "--manifest")
+    else if (result[names[name]] && !["--manifest", "--config"].includes(name))
       throw new Error(`Duplicate option ${name}`);
     else result[names[name]] = value;
   }
@@ -101,6 +96,76 @@ export function options(args) {
       "Broadcast requires encrypted --keystore and --password-file",
     );
   return result;
+}
+export async function loadProfile(path) {
+  let raw;
+  try {
+    raw = Bun.TOML.parse(await Bun.file(path).text());
+  } catch {
+    throw new Error(`Cannot read harness config: ${path}`);
+  }
+  const chain = raw.chain;
+  const uni = raw.uniswap;
+  const fixtures = raw.fixtures;
+  const artifacts = raw.artifacts;
+  if (
+    typeof chain?.key !== "string" ||
+    !/^[a-z][a-z0-9-]*$/.test(chain.key) ||
+    !Number.isSafeInteger(chain.id) ||
+    chain.id <= 0 ||
+    typeof chain.rpc_url_env !== "string" ||
+    !/^[A-Za-z_][A-Za-z0-9_]*$/.test(chain.rpc_url_env) ||
+    !fixtures?.tokens ||
+    !fixtures.pairs ||
+    Array.isArray(fixtures.pairs) ||
+    !Number.isInteger(fixtures.broad_fee) ||
+    !Array.isArray(fixtures.uniswap_fees) ||
+    !Array.isArray(fixtures.pancake_fees) ||
+    !artifacts ||
+    [
+      "token",
+      "seeder",
+      "pancake_bootstrap",
+      "pancake_router",
+      "pancake_quoter",
+    ].some((name) => typeof artifacts[name] !== "string" || !artifacts[name])
+  )
+    throw new Error("Malformed harness config");
+  const addresses = {
+    weth: chain.weth,
+    factory: uni?.factory,
+    quoter: uni?.quoter,
+    router: uni?.router,
+    npm: uni?.npm,
+  };
+  for (const [name, value] of Object.entries(addresses)) {
+    try {
+      address(value);
+    } catch {
+      throw new Error(`Invalid harness config address: ${name}`);
+    }
+  }
+  const decimals = fixtures.tokens;
+  if (
+    !Object.keys(decimals).length ||
+    Object.keys(decimals).some((symbol) => !symbol) ||
+    Object.values(decimals).some(
+      (value) => !Number.isInteger(value) || value < 0 || value > 255,
+    ) ||
+    Object.entries(fixtures.pairs).some(
+      ([id, pair]) =>
+        !id ||
+        !Array.isArray(pair) ||
+        pair.length !== 2 ||
+        pair[0] === pair[1] ||
+        pair.some((symbol) => !(symbol in decimals)),
+    ) ||
+    [...fixtures.uniswap_fees, ...fixtures.pancake_fees].some(
+      (fee) => !Number.isInteger(fee) || fee < 0 || fee >= 1000000,
+    )
+  )
+    throw new Error("Malformed harness fixture config");
+  return { chain, uni, fixtures, decimals, artifacts };
 }
 function cast(args) {
   try {
@@ -171,9 +236,13 @@ export function fixture(
 }
 
 export async function run(o) {
-  const url = process.env.BASE_SEPOLIA_RPC_URL;
+  const { chain, uni, fixtures, decimals, artifacts } = await loadProfile(
+    o.config,
+  );
+  const weth = chain.weth;
+  const url = process.env[chain.rpc_url_env];
   if (!url || !/^https?:\/\//.test(url))
-    throw new Error("BASE_SEPOLIA_RPC_URL must be an HTTP(S) URL");
+    throw new Error(`${chain.rpc_url_env} must be an HTTP(S) URL`);
   async function rpc(method, params = []) {
     let response;
     try {
@@ -191,8 +260,41 @@ export async function run(o) {
       throw new Error(`${method}: RPC rejected request (details withheld)`);
     return body.result;
   }
-  if (BigInt(await rpc("eth_chainId")) !== 84532n)
-    throw new Error("Chain guard: expected Base Sepolia 84532");
+  if (BigInt(await rpc("eth_chainId")) !== BigInt(chain.id))
+    throw new Error(`Chain guard: expected ${chain.key} ${chain.id}`);
+  const manifestExists = existsSync(o.manifest);
+  const manifest = manifestExists
+    ? JSON.parse(readFileSync(o.manifest))
+    : {
+        version: 1,
+        chainId: chain.id,
+        sender: o.sender,
+        transactions: {},
+        tokens: {},
+        pancake: {},
+        pools: [],
+      };
+  if (
+    manifest.version !== 1 ||
+    manifest.chainId !== chain.id ||
+    !manifest.transactions ||
+    !manifest.tokens ||
+    !manifest.pancake ||
+    !Array.isArray(manifest.pools)
+  )
+    throw new Error("Malformed deployment manifest");
+  if (
+    manifestExists &&
+    (!manifest.uni ||
+      Object.entries(uni).some(
+        ([name, target]) =>
+          typeof manifest.uni[name] !== "string" ||
+          !same(manifest.uni[name], target),
+      ))
+  )
+    throw new Error(
+      "Manifest deployment identity does not match harness config",
+    );
   const call = async (to, signature, args = []) =>
     rpc("eth_call", [{ to, data: encode(signature, args) }, "latest"]);
   const addr = async (to, signature, args = []) =>
@@ -217,28 +319,8 @@ export async function run(o) {
       throw new Error(`Official ${name} WETH link mismatch`);
   }
   console.log(
-    "Base Sepolia guard and official Uniswap bytecode/factory/WETH links verified.",
+    `${chain.key} guard and configured Uniswap bytecode/factory/WETH links verified.`,
   );
-  const manifest = existsSync(o.manifest)
-    ? JSON.parse(readFileSync(o.manifest))
-    : {
-        version: 1,
-        chainId: 84532,
-        sender: o.sender,
-        transactions: {},
-        tokens: {},
-        pancake: {},
-        pools: [],
-      };
-  if (
-    manifest.version !== 1 ||
-    manifest.chainId !== 84532 ||
-    !manifest.transactions ||
-    !manifest.tokens ||
-    !manifest.pancake ||
-    !Array.isArray(manifest.pools)
-  )
-    throw new Error("Malformed deployment manifest");
   if (o.sender && manifest.sender && !same(o.sender, manifest.sender))
     throw new Error("Manifest signer mismatch");
   manifest.sender ??= o.sender;
@@ -345,7 +427,7 @@ export async function run(o) {
         "mktx",
         "--legacy",
         "--chain",
-        "84532",
+        String(chain.id),
         "--nonce",
         String(BigInt(nonce)),
         "--gas-limit",
@@ -396,20 +478,17 @@ export async function run(o) {
       manifest.tokens[symbol] = {
         address: await deploy(
           `token-${symbol}`,
-          "contracts/out/TestToken.sol/TestToken.json",
+          artifacts.token,
           "constructor(string,uint8)",
           [symbol, d],
         ),
         decimals: d,
       };
     }
-    manifest.seeder = await deploy(
-      "seeder",
-      "contracts/out/LiquiditySeeder.sol/LiquiditySeeder.json",
-    );
+    manifest.seeder = await deploy("seeder", artifacts.seeder);
     const bootstrap = await deploy(
       "pancake-bootstrap",
-      ".testnet/PancakeBootstrap.json",
+      artifacts.pancake_bootstrap,
     );
     manifest.pancake.bootstrap = bootstrap;
     // CREATE nonces in a contract start at one. These predictions are used only in dry-run.
@@ -423,13 +502,13 @@ export async function run(o) {
     const args = [manifest.pancake.deployer, manifest.pancake.factory, weth];
     manifest.pancake.router = await deploy(
       "pancake-router",
-      "scripts/testnet/node_modules/@pancakeswap/v3-periphery/artifacts/contracts/SwapRouter.sol/SwapRouter.json",
+      artifacts.pancake_router,
       "constructor(address,address,address)",
       args,
     );
     manifest.pancake.quoter = await deploy(
       "pancake-quoter",
-      "scripts/testnet/node_modules/@pancakeswap/v3-periphery/artifacts/contracts/lens/QuoterV2.sol/QuoterV2.json",
+      artifacts.pancake_quoter,
       "constructor(address,address,address)",
       args,
     );
@@ -494,16 +573,12 @@ export async function run(o) {
       );
     }
     for (const [provider, factory, fees] of [
-      ["uni", uni.factory, [500, 3000]],
-      ["pancake", manifest.pancake.factory, [500, 2500]],
+      ["uni", uni.factory, fixtures.uniswap_fees],
+      ["pancake", manifest.pancake.factory, fixtures.pancake_fees],
     ]) {
-      for (const pair of [
-        ["A", "B"],
-        ["B", "C"],
-        ["A", "C"],
-      ])
+      for (const [pairID, pair] of Object.entries(fixtures.pairs))
         for (const fee of fees) {
-          const key = `${provider}-${pair.join("")}-${fee}`;
+          const key = `${provider}-${pairID}-${fee}`;
           const [t0, t1] = pair
             .map((s) => manifest.tokens[s])
             .sort((a, b) =>
@@ -519,7 +594,7 @@ export async function run(o) {
             );
             if (!o.broadcast) {
               console.log(
-                `DRY ${key}: initialize and seed after creation (narrow=${fee !== 500})`,
+                `DRY ${key}: initialize and seed after creation (narrow=${fee !== fixtures.broad_fee})`,
               );
               continue;
             }
@@ -532,7 +607,12 @@ export async function run(o) {
           const spacing = Number(
             BigInt(await call(factory, "feeAmountTickSpacing(uint24)", [fee])),
           );
-          const f = fixture(t0.decimals, t1.decimals, spacing, fee !== 500);
+          const f = fixture(
+            t0.decimals,
+            t1.decimals,
+            spacing,
+            fee !== fixtures.broad_fee,
+          );
           const slot = await call(pool, "slot0()");
           if (BigInt(`0x${slot.slice(2, 66)}`) === 0n)
             await write(`initialize-${key}`, pool, "initialize(uint160)", [
@@ -553,7 +633,7 @@ export async function run(o) {
             token0: t0.address,
             token1: t1.address,
             ...f,
-            narrow: fee !== 500,
+            narrow: fee !== fixtures.broad_fee,
           };
           manifest.pools = manifest.pools
             .filter((p) => p.key !== key)
@@ -575,33 +655,38 @@ export async function run(o) {
   if (o.command === "config") {
     const lines = [
       "[terminal]",
-      'default_chain = "base-sepolia"',
+      `default_chain = "${chain.key}"`,
       'engine_url = "http://127.0.0.1:8080"',
       "search_budget_ms = 3000",
       "",
       "[engine]",
       'listen_addr = "127.0.0.1:8080"',
       "",
-      "[chains.base-sepolia]",
-      "chain_id = 84532",
-      'rpc_url_env = "BASE_SEPOLIA_RPC_URL"',
+      `[chains.${chain.key}]`,
+      `chain_id = ${chain.id}`,
+      `rpc_url_env = "${chain.rpc_url_env}"`,
       "execution_enabled = true",
     ];
     for (const [symbol, token] of Object.entries(manifest.tokens))
       lines.push(
         "",
-        "[[chains.base-sepolia.tokens]]",
+        `[[chains.${chain.key}.tokens]]`,
         `address = "${token.address}"`,
-        `symbol = "${symbol}"`,
+        `symbol = ${JSON.stringify(symbol)}`,
         `decimals = ${token.decimals}`,
       );
     for (const [name, deployment, kind, fees] of [
-      ["uni", uni, "uniswap-v3", "[500, 3000]"],
-      ["pancake", manifest.pancake, "pancake-v3", "[500, 2500]"],
+      ["uni", uni, "uniswap-v3", JSON.stringify(fixtures.uniswap_fees)],
+      [
+        "pancake",
+        manifest.pancake,
+        "pancake-v3",
+        JSON.stringify(fixtures.pancake_fees),
+      ],
     ]) {
       lines.push(
         "",
-        `[chains.base-sepolia.deployments.${name}]`,
+        `[chains.${chain.key}.deployments.${name}]`,
         `kind = "${kind}"`,
         ...["factory", "quoter", "router"].map(
           (key) => `${key} = "${deployment[key]}"`,

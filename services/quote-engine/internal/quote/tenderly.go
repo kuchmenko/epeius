@@ -78,7 +78,7 @@ type simulationResult struct {
 func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, route *quotev1.RouteQuote, snapshot rpc.Snapshot, amount, minimum *big.Int) (string, error) {
 	fail := errors.New("simulation verification failed")
 	slug := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	if t.key == "" || !slug.MatchString(t.account) || !slug.MatchString(t.project) || tx.ChainId != "84532" || tx.ChainId != snapshot.ChainID || tx.ValueAtomic != "0" || len(route.Legs) < 1 || len(route.Legs) > 2 {
+	if t.key == "" || !slug.MatchString(t.account) || !slug.MatchString(t.project) || !positiveInteger.MatchString(tx.ChainId) || tx.ChainId != snapshot.ChainID || tx.ValueAtomic != "0" || len(route.Legs) < 1 || len(route.Legs) > 2 {
 		return "", fail
 	}
 	number, err := strconv.ParseUint(snapshot.BlockNumber, 10, 64)

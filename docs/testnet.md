@@ -1,8 +1,8 @@
 # Testnet harness and contracts
 
-The harness creates disposable A/B/C fixtures on Base Sepolia, validates official Uniswap deployment links, deploys authentic Pancake contracts plus local test contracts, seeds pools, and writes a runtime config. Network writes require explicit `--broadcast`.
+The harness creates disposable A/B/C fixtures using the checked-in Base Sepolia profile, validates configured official Uniswap deployment links, deploys authentic Pancake contracts plus local test contracts, seeds pools, and writes a runtime config. Network writes require explicit `--broadcast`.
 
-For execution guarantees and the partial-input limitation, read [Testnet execution contract](execution.md). Detailed dependency provenance remains beside the harness in [`scripts/testnet/README.md`](../scripts/testnet/README.md).
+For execution guarantees and the partial-input limitation, read [Execution contract](execution.md). Detailed dependency provenance remains beside the harness in [`scripts/testnet/README.md`](../scripts/testnet/README.md).
 
 ## Requirements and setup
 
@@ -21,9 +21,15 @@ Preparation clones pinned Pancake source to `.testnet/pancake`, rejects checkout
 
 Foundry downloads native solc 0.7.6 and 0.8.24 when missing. Pancake uses its own `contracts/pancake/foundry.toml`; its build artifacts and cache stay under `.testnet/pancake-out` and `.testnet/pancake-cache`. Bun runs the scripts, not a WebAssembly compiler.
 
-## Environment and wallets
+## Harness profile, environment, and wallets
 
-Put `BASE_SEPOLIA_RPC_URL` in a private environment file. Bun 1.3.9 does not provide `process.loadEnvFile`, so the harness has no `--env` option. Prefix every harness invocation:
+[`scripts/testnet/harness.toml`](../scripts/testnet/harness.toml) is the default harness profile. It selects the chain key and ID, RPC environment-variable name, WETH address, official Uniswap factory, quoter, router, and position manager, fixture token decimals and pairs, deployment fee lists, and artifact paths. Use `--config PATH` to select another profile. These values are not hidden defaults in harness code; deployment addresses and fee lists used by generated runtime TOML come from the profile or deployment manifest.
+
+The profile is loaded when each harness process starts, not hot-reloaded. A different profile does not establish support for its network or providers. Validate chain capabilities, official contract links, and simulation support before live use. Base Sepolia remains the verified default profile.
+
+Fixture token symbols and decimals are configured in `fixtures.tokens`; there is no A/B/C-only restriction in deployment or seeding. `fixtures.pairs` maps stable journal identifiers to two distinct token symbols, for example `AB = ["A", "B"]`. Keep existing identifiers unchanged when resuming a deployment. The live E2E script still tests the A/C scenario of the default fixture; it is not a general token discovery tool.
+
+Put the environment variable named by `chain.rpc_url_env` in a private environment file. The default profile names `BASE_SEPOLIA_RPC_URL`. Bun 1.3.9 does not provide `process.loadEnvFile`, so the harness has no `--env` option. Prefix every harness invocation:
 
 ```bash
 bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs COMMAND ...
@@ -31,7 +37,7 @@ bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs COMMAND ...
 
 Use separate encrypted harness and terminal wallets. Keep keystores and password files outside Git with file permissions that exclude group and world access. The harness address must match the harness keystore. Include it as a seed recipient because it pays liquidity token amounts. Terminal wallet receives tokens for swaps.
 
-RPC URL values are not printed or passed to subprocess arguments. Only password-file path reaches Foundry. There is no private-key option or implicit environment wallet. Signing is local with `cast mktx`; submission occurs only with `--broadcast` after chain ID 84532, signer, contract links, balance, and gas checks pass.
+RPC URL values are not printed or passed to subprocess arguments. Only password-file path reaches Foundry. There is no private-key option or implicit environment wallet. Signing is local with `cast mktx`; submission occurs only with `--broadcast` after configured chain ID, signer, contract links, balance, and gas checks pass.
 
 ## Deploy and seed
 
@@ -90,17 +96,19 @@ Base may expose a preliminary successful receipt with a zero block hash. The har
 
 ## Fixtures
 
-Tokens A, B, and C use 18, 6, and 8 decimals. Each explicit recipient receives 1,000,000 whole units of each token once. Initial prices represent one whole token for one whole token, not equal atomic amounts.
+The default profile's tokens A, B, and C use 18, 6, and 8 decimals. A/B/C are named harness fixtures for seeded scenarios, not the product token allowlist. Product token and contract allowlists come from generated runtime TOML. Each explicit recipient receives 1,000,000 whole units of each token once. Initial prices represent one whole token for one whole token, not equal atomic amounts.
 
-Both venues receive A/B, B/C, and A/C pools. Fee-500 pools use a broad range for normal swaps. Narrow pools use Uniswap fee 3000 and Pancake fee 2500 for exhaustion tests. Public testnet trades change pool state; reruns are new trades, not resets, and sequential outputs need not match.
+Under the default profile, both venues receive A/B, B/C, and A/C pools. Fee-500 pools use a broad range for normal swaps. Narrow pools use Uniswap fee 3000 and Pancake fee 2500 for exhaustion tests. These pairs and fee lists come from `harness.toml`. Public testnet trades change pool state; reruns are new trades, not resets, and sequential outputs need not match.
 
 ## Live E2E runner
 
-List all eight venue, direction, and hop scenarios without RPC calls, signer access, or sends:
+List four direction-and-hop scenarios per configured deployment without RPC calls, signer access, or sends. A and C remain the named seeded scenario inputs; they are not a general product allowlist:
 
 ```bash
 bun scripts/e2e.ts --config .testnet/runtime.toml
 ```
+
+Pass `--chain KEY` to select a configured runtime chain. Without it, the runner uses TOML `terminal.default_chain`.
 
 After starting the engine and reviewing the plan:
 
@@ -109,6 +117,6 @@ bun scripts/e2e.ts --config .testnet/runtime.toml --broadcast \
   --keystore /local/path/terminal --password-file /local/path/password
 ```
 
-Broadcast mode creates `.testnet/e2e-<timestamp>.jsonl` with mode 0600, or uses `--report PATH`. It prints the same JSONL events to stdout. Event order is `start`, then per-scenario `quote`, `preparation_preview`, terminal `approval` when needed, fresh `quote` after approval, terminal `swap`, and `scenario_passed`; final success is `passed` with count 8.
+Broadcast mode creates `.testnet/e2e-<timestamp>.jsonl` with mode 0600, or uses `--report PATH`. It prints the same JSONL events to stdout. Event order is `start`, then per-scenario `quote`, `preparation_preview`, terminal `approval` when needed, fresh `quote` after approval, terminal `swap`, and `scenario_passed`; final success is `passed` with count equal to four times the configured deployment count.
 
 Each terminal send records the submitted hash before waiting for receipt verification. Swap success requires `verification.outcome: "passed"`; approval requires `receipt_success`. Any missing route, rejected preparation, nonzero child exit, inconclusive receipt, malformed remaining output, or failed verification stops the run at the first scenario. Provider diagnostics are suppressed in the final runner error. Inspect the JSONL report and wallet transactions before rerunning; there is no automatic resend.

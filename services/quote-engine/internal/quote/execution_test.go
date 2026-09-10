@@ -97,6 +97,24 @@ type executionFake struct {
 	canonical func(context.Context, rpc.Snapshot) error
 }
 
+func TestSwapCalldataAcceptsConfiguredZeroFee(t *testing.T) {
+	route := testRoute()
+	route.Legs = route.Legs[:1]
+	route.Legs[0].Selector = &quotev1.RouteLeg_FeePips{FeePips: 0}
+	data, err := swapData("pancake-v3", route, wallet, big.NewInt(17), big.NewInt(3), 1777777777)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tuple := data[36:]
+	offset := new(big.Int).SetBytes(tuple[:32]).Int64()
+	length := new(big.Int).SetBytes(tuple[offset : offset+32]).Int64()
+	expected := append(common.HexToAddress(tokenA).Bytes(), 0, 0, 0)
+	expected = append(expected, common.HexToAddress(tokenB).Bytes()...)
+	if !bytes.Equal(tuple[offset+32:offset+32+length], expected) {
+		t.Fatal("zero fee changed in router path")
+	}
+}
+
 func (r executionFake) Canonical(ctx context.Context, s rpc.Snapshot) error {
 	return r.canonical(ctx, s)
 }
@@ -113,16 +131,16 @@ func executionFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, 
 	timestamp := uint64(1777777000)
 	simulations := 0
 	reader := executionFake{readerFake: readerFake{snapshot: func(context.Context) (rpc.Snapshot, error) {
-		return rpc.Snapshot{ChainID: "84532", BlockNumber: "112233", BlockHash: blockHash, Timestamp: timestamp}, nil
+		return rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: timestamp}, nil
 	}, call: func(ctx context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
 		if to != common.HexToAddress(tokenA) || hash != common.HexToHash(blockHash) || !bytes.Equal(data[:4], crypto.Keccak256([]byte("allowance(address,address)"))[:4]) || common.BytesToAddress(data[4:36]) != common.HexToAddress(wallet) || common.BytesToAddress(data[36:68]) != common.HexToAddress(router) {
 			t.Fatal("wrong allowance read")
 		}
 		return uintWord(allowance), nil
 	}}, canonical: func(context.Context, rpc.Snapshot) error { return nil }}
-	h := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "84532", Client: reader, Config: config.Chain{ExecutionEnabled: true, Deployments: map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Router: router}}}}}, Simulator: simulationFake(func(ctx context.Context, tx *quotev1.UnsignedTransaction, r *quotev1.RouteQuote, s rpc.Snapshot, a, m *big.Int) (string, error) {
+	h := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "11155111", Client: reader, Config: config.Chain{ExecutionEnabled: true, Deployments: map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Router: router}}}}}, Simulator: simulationFake(func(ctx context.Context, tx *quotev1.UnsignedTransaction, r *quotev1.RouteQuote, s rpc.Snapshot, a, m *big.Int) (string, error) {
 		simulations++
-		if tx.From != wallet || tx.To != router || tx.ValueAtomic != "0" || tx.GasLimit != "1500000" || a.String() != "123456789" || m.String() != "9927" {
+		if tx.ChainId != "11155111" || s.ChainID != "11155111" || tx.From != wallet || tx.To != router || tx.ValueAtomic != "0" || tx.GasLimit != "1500000" || a.String() != "123456789" || m.String() != "9927" {
 			t.Fatal("simulation terms changed")
 		}
 		if _, ok := ctx.Deadline(); !ok {
@@ -130,7 +148,7 @@ func executionFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, 
 		}
 		return "9991", nil
 	})}
-	h.Store.saveQuote(&quotev1.QuoteRequest{Chain: "test", ChainId: "84532", TokenIn: tokenA, TokenOut: tokenC, AmountInAtomic: "123456789"}, &quotev1.QuoteFinal{QuoteId: "q", Routes: []*quotev1.RouteQuote{testRoute()}, Block: &quotev1.BlockContext{Number: "112230", Hash: blockHash}}, time.Now())
+	h.Store.saveQuote(&quotev1.QuoteRequest{Chain: "test", ChainId: "11155111", TokenIn: tokenA, TokenOut: tokenC, AmountInAtomic: "123456789"}, &quotev1.QuoteFinal{QuoteId: "q", Routes: []*quotev1.RouteQuote{testRoute()}, Block: &quotev1.BlockContext{Number: "112230", Hash: blockHash}}, time.Now())
 	return h, &quotev1.PrepareExecutionRequest{QuoteId: "q", RouteId: testRoute().RouteId, Sender: wallet, SlippageBps: 75}, &allowance, &timestamp, &simulations
 }
 
@@ -158,6 +176,23 @@ func TestPreparationRecheckPreservesEveryTransactionTerm(t *testing.T) {
 	expired := prepare(t, h, &quotev1.PrepareExecutionRequest{PreparationId: first.PreparationId})
 	if expired.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || expired.Transaction != nil || *count != 2 {
 		t.Fatal("deadline boundary executed")
+	}
+}
+
+func TestExecutionStillRequiresExplicitEnablementAndMatchingNetwork(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		h, r, _, _, count := executionFixture(t)
+		chain := h.Chains["test"]
+		if mismatch {
+			chain.ChainID = "84532"
+		} else {
+			chain.Config.ExecutionEnabled = false
+		}
+		h.Chains["test"] = chain
+		response := prepare(t, h, r)
+		if response.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED || response.Transaction != nil || *count != 0 {
+			t.Fatalf("unsafe execution accepted: %+v", response)
+		}
 	}
 }
 

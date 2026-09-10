@@ -12,7 +12,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/ethereum/go-ethereum/common"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
-	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv3"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
@@ -29,12 +29,26 @@ func (f readerFake) Call(ctx context.Context, to common.Address, data []byte, bl
 
 const blockHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+var (
+	testFactory = common.HexToAddress("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
+	testQuoter  = common.HexToAddress("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")
+	testWETH    = common.HexToAddress("0x4200000000000000000000000000000000000006")
+	testUSDC    = common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
+)
+
+func testChainConfig() config.Chain {
+	return config.Chain{
+		Tokens:      []config.Token{{Address: testWETH.Hex(), Symbol: "WETH", Decimals: 18}, {Address: testUSDC.Hex(), Symbol: "USDC", Decimals: 6}},
+		Deployments: map[string]config.Deployment{"uniswap-v3": {Kind: "uniswap-v3", Factory: testFactory.Hex(), Quoter: testQuoter.Hex(), Fees: []uint32{100, 500, 3000, 10000}}},
+	}
+}
+
 func snapshot() rpc.Snapshot { return rpc.Snapshot{BlockNumber: "19283746", BlockHash: blockHash} }
 
 func validRequest() *quotev1.QuoteRequest {
 	return &quotev1.QuoteRequest{
 		Chain: "base", ChainId: "8453",
-		TokenIn: uniswapv3.WETH.Hex(), TokenOut: uniswapv3.USDC.Hex(),
+		TokenIn: testWETH.Hex(), TokenOut: testUSDC.Hex(),
 		AmountInAtomic: "1606938044258990275541962092341162602522202993782793822955697",
 		SearchBudgetMs: 500,
 	}
@@ -65,7 +79,7 @@ func calldataFee(data []byte) uint32 {
 }
 
 func callHandler(ctx context.Context, client Reader, request *quotev1.QuoteRequest) (*quotev1.QuoteFinal, error) {
-	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client}}}).GetQuote(ctx, connect.NewRequest(request))
+	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: testChainConfig()}}}).GetQuote(ctx, connect.NewRequest(request))
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +98,7 @@ func TestHandlerDeterministicFeeOrderPinnedHashMissingPoolsAndErrors(t *testing.
 				t.Errorf("call block = %s", block)
 			}
 			fee := calldataFee(data)
-			if to == uniswapv3.Factory {
+			if to == testFactory {
 				time.Sleep(delays[fee])
 				switch fee {
 				case 500:
@@ -130,7 +144,7 @@ func TestHandlerPartialBudgetKeepsFinishedRouteAndStopsPending(t *testing.T) {
 		call: func(ctx context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
 			fee := calldataFee(data)
 			if fee == 100 {
-				if to == uniswapv3.Factory {
+				if to == testFactory {
 					return poolResponse(pool), nil
 				}
 				return quoteResponse(424242), nil
@@ -309,25 +323,31 @@ func TestHandlerEmptyResultsDistinguishMissingPoolsFromFailures(t *testing.T) {
 	}
 }
 
-func TestStatusSortedWithStartupStateAndBaseTokens(t *testing.T) {
+func TestStatusUsesOnlyExplicitChainConfig(t *testing.T) {
 	client := readerFake{}
+	alternate := testChainConfig()
+	alternate.ExecutionEnabled = true
 	handler := Handler{Chains: map[string]Chain{
 		"z-test": {ChainID: "84532", Error: "RPC unavailable"},
 		"base":   {ChainID: "8453", Client: client, Snapshot: snapshot()},
+		"other":  {ChainID: "1", Client: client, Config: alternate},
 	}}
 	response, err := handler.GetStatus(context.Background(), connect.NewRequest(&quotev1.GetStatusRequest{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	chains := response.Msg.Chains
-	if len(chains) != 2 || chains[0].Key != "base" || chains[1].Key != "z-test" {
+	if len(chains) != 3 || chains[0].Key != "base" || chains[1].Key != "other" || chains[2].Key != "z-test" {
 		t.Fatalf("chains not sorted: %+v", chains)
 	}
-	if !chains[0].Connected || !chains[0].QuotingSupported || len(chains[0].Tokens) != 2 || chains[0].Tokens[0].Symbol != "WETH" || chains[0].Block.Hash != blockHash {
+	if !chains[0].Connected || chains[0].QuotingSupported || chains[0].ExecutionEnabled || len(chains[0].Tokens) != 0 || chains[0].Block.Hash != blockHash {
 		t.Fatalf("wrong Base status: %+v", chains[0])
 	}
-	if chains[1].Connected || chains[1].QuotingSupported || chains[1].Error != "RPC unavailable" || chains[1].Block != nil {
-		t.Fatalf("wrong unavailable status: %+v", chains[1])
+	if !chains[1].Connected || !chains[1].QuotingSupported || !chains[1].ExecutionEnabled || len(chains[1].Tokens) != 2 {
+		t.Fatalf("wrong explicitly configured alternate status: %+v", chains[1])
+	}
+	if chains[2].Connected || chains[2].QuotingSupported || chains[2].Error != "RPC unavailable" || chains[2].Block != nil {
+		t.Fatalf("wrong unavailable status: %+v", chains[2])
 	}
 }
 

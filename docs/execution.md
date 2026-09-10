@@ -1,14 +1,16 @@
-# Testnet execution contract
+# Execution contract
 
-Epeius's first execution milestone uses direct Uniswap V3 and Pancake V3 router calls on Base Sepolia (chain ID 84532). The Go engine builds and simulates unsigned transactions. The terminal owns the local signer, confirmation, submission, and receipt checks. Mainnet execution is disabled.
+Epeius uses direct Uniswap V3 and Pancake V3 router calls on chains explicitly enabled in TOML. Any configured positive chain ID can be enabled, but local TOML, engine status, terminal RPC, and prepared transaction identities must all match. The Go engine builds and simulates unsigned transactions. The terminal owns the local signer, confirmation, submission, and receipt checks. The checked-in root TOML keeps execution disabled on every chain.
+
+This policy supersedes the earlier milestone restriction to Base Sepolia (chain ID 84532). Base Sepolia remains the verified and default test setup. Every new network or provider needs separate capability and simulation-support validation; current tests are not multi-network live proof.
 
 ## Routes and deployments
 
-A route uses one configured deployment and one or two pools. Each hop names the pool, input token, output token, and pool selector. Uniswap V3 and Pancake V3 use `fee_pips`, measured in millionths. Slipstream uses signed `tick_spacing`, which is not a fee; its execution is outside this milestone.
+A route uses one configured deployment and one or two pools. Arbitrary-length routes are not supported. Each hop names the pool, input token, output token, and pool selector. Uniswap V3 and Pancake V3 use `fee_pips`, measured in millionths. Configured fees may range from 0 through 999,999; fee 0 is usable only when the configured factory has that pool. Slipstream uses signed `tick_spacing`, which is not a fee; its execution is outside this milestone.
 
 For example, an A-to-C quote can offer a direct Uniswap A/C pool, a two-hop Uniswap A/B and B/C route, and a separate Pancake route. These are alternatives, not sequential trades. The second hop consumes the actual output of the first hop, not an independently fixed estimate. Split execution across venues is deferred.
 
-Pool addresses and parameters must match the configured factory. Router addresses come from configuration, not user-supplied transaction targets. Native ETH swaps, transfer-tax tokens, rebasing tokens, Permit2, and arbitrary calldata execution are unsupported.
+Token addresses, factory, quoter, router, and deployment fee lists come only from TOML. There are no implicit Base WETH, USDC, Uniswap, or provider defaults. Pool addresses and parameters must match the configured factory. `uniswap-v3` and `pancake-v3` choose supported implementations; they do not make arbitrary ABIs configurable. Router addresses come from configuration, not user-supplied transaction targets. Native ETH swaps, transfer-tax tokens, rebasing tokens, Permit2, and arbitrary calldata execution are unsupported.
 
 ## Quotes and immutable preparations
 
@@ -60,7 +62,7 @@ The executor will support fixed allocations across two venues without arbitrary 
 
 ## Public testnet checks
 
-Use separate harness and terminal wallets, with small Base Sepolia-only balances. Keep encrypted keystores and password files outside Git. Local file permissions and encryption do not protect against compromise of the same OS account when the password is stored on that machine.
+Use separate harness and terminal wallets, with small testnet-only balances. Keep encrypted keystores and password files outside Git. Local file permissions and encryption do not protect against compromise of the same OS account when the password is stored on that machine.
 
 The harness uses standard mintable tokens with 18, 6, and 8 decimals. Real one-hop and two-hop swaps on both venues, approval handling, opposite directions, partial consumption, and intermediate residues are separate checks. Network transactions require explicit opt-in; credential-free checks must not deploy or spend test ETH.
 

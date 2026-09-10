@@ -92,7 +92,7 @@ func TestTenderlySequentialBundleExactBalancesAndFailClosed(t *testing.T) {
 				outputs := []uint64{1000, 37, 9, 0, 889, 240, 9}
 				results := make([]simulationResult, 7)
 				for i, call := range payload.Simulations {
-					if call.From != wallet || call.BlockNumber != 112233 || call.NetworkID != "84532" || call.SimulationType != "full" || call.Save || call.SaveIfFails || call.Value != "0" || call.Gas != 1500000 {
+					if call.From != wallet || call.BlockNumber != 112233 || call.NetworkID != "11155111" || call.SimulationType != "full" || call.Save || call.SaveIfFails || call.Value != "0" || call.Gas != 1500000 {
 						t.Fatalf("unsafe call: %+v", call)
 					}
 					if call.TransactionIndex != -1 {
@@ -134,7 +134,7 @@ func TestTenderlySequentialBundleExactBalancesAndFailClosed(t *testing.T) {
 				body, _ := json.Marshal(map[string]any{"simulation_results": results})
 				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 			})
-			output, err := tenderly.Simulate(context.Background(), &quotev1.UnsignedTransaction{ChainId: "84532", From: wallet, To: router, Data: "0xaabbccdd", ValueAtomic: "0", GasLimit: "1500000"}, testRoute(), rpc.Snapshot{ChainID: "84532", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(111), big.NewInt(200))
+			output, err := tenderly.Simulate(context.Background(), &quotev1.UnsignedTransaction{ChainId: "11155111", From: wallet, To: router, Data: "0xaabbccdd", ValueAtomic: "0", GasLimit: "1500000"}, testRoute(), rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(111), big.NewInt(200))
 			if test.reject {
 				if err == nil || output != "" {
 					t.Fatal("unsafe simulation accepted")

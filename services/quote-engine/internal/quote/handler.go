@@ -58,7 +58,6 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	if chain.Client == nil {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("chain is unavailable"))
 	}
-	chain = configured(chain)
 	if len(chain.Config.Deployments) == 0 {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no quoting deployments configured"))
 	}
@@ -179,9 +178,8 @@ func (h Handler) GetStatus(_ context.Context, _ *connect.Request[quotev1.GetStat
 }
 
 func Status(key string, chain Chain) *quotev1.ChainStatus {
-	chain = configured(chain)
 	supported := len(chain.Config.Deployments) > len(chain.DeploymentErrors)
-	status := &quotev1.ChainStatus{Key: key, ChainId: chain.ChainID, Connected: chain.Client != nil, Error: chain.Error, QuotingSupported: supported, ExecutionEnabled: supported && chain.Config.ExecutionEnabled && chain.ChainID == "84532"}
+	status := &quotev1.ChainStatus{Key: key, ChainId: chain.ChainID, Connected: chain.Client != nil, Error: chain.Error, QuotingSupported: supported, ExecutionEnabled: supported && chain.Config.ExecutionEnabled}
 	if status.QuotingSupported {
 		for _, token := range chain.Config.Tokens {
 			status.Tokens = append(status.Tokens, &quotev1.Token{Address: token.Address, Symbol: token.Symbol, Decimals: token.Decimals})
@@ -198,15 +196,6 @@ func contextCode(err error) connect.Code {
 		return connect.CodeDeadlineExceeded
 	}
 	return connect.CodeCanceled
-}
-
-// Legacy Base configuration remains read-only. Explicit configuration wins.
-func configured(chain Chain) Chain {
-	if chain.ChainID == "8453" && len(chain.Config.Tokens) == 0 && len(chain.Config.Deployments) == 0 {
-		chain.Config.Tokens = []config.Token{{Address: uniswapv3.WETH.Hex(), Symbol: "WETH", Decimals: 18}, {Address: uniswapv3.USDC.Hex(), Symbol: "USDC", Decimals: 6}}
-		chain.Config.Deployments = map[string]config.Deployment{"uniswap-v3": {Kind: "uniswap-v3", Factory: uniswapv3.Factory.Hex(), Quoter: uniswapv3.Quoter.Hex(), Fees: []uint32{100, 500, 3000, 10000}}}
-	}
-	return chain
 }
 
 type candidate struct {

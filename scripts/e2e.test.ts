@@ -59,3 +59,44 @@ kind = "pancake-v3"
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("E2E selects --chain and supports any configured deployment count", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "epeius-e2e-chain-"));
+  try {
+    const path = join(temporary, "runtime.toml");
+    await writeFile(
+      path,
+      `
+[terminal]
+default_chain = "wrong-default"
+engine_url = "http://127.0.0.1:1"
+search_budget_ms = 2000
+[chains.test]
+chain_id = 12345
+execution_enabled = true
+[chains.test.deployments.one]
+kind = "uniswap-v3"
+[chains.test.deployments.two]
+kind = "pancake-v3"
+[chains.test.deployments.three]
+kind = "uniswap-v3"
+`,
+    );
+    const child = Bun.spawn(
+      [
+        "bun",
+        join(import.meta.dir, "e2e.ts"),
+        "--config",
+        path,
+        "--chain",
+        "test",
+      ],
+      { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
+    );
+    const output = await new Response(child.stdout).text();
+    expect(await child.exited).toBe(0);
+    expect(JSON.parse(output).scenarios).toHaveLength(12);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});

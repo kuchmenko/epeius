@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,7 +48,6 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 	tests := []struct{ name, old, replacement string }{
 		{"unknown field", "search_budget_ms = 2500", "search_budget_ms = 2500\nunknown = true"},
 		{"bad chain key", "[chains.test-net]", "[chains.Test_net]"},
-		{"duplicate chain ID", "chain_id = 84532", "chain_id = 8453"},
 		{"missing default chain", `default_chain = "base"`, `default_chain = "missing"`},
 		{"zero chain ID", "chain_id = 84532", "chain_id = 0"},
 		{"unsafe integer", "chain_id = 84532", "chain_id = 9007199254740992"},
@@ -96,7 +96,6 @@ fees = [500, 2500]
 		t.Fatalf("%+v %v", got, err)
 	}
 	for _, test := range []struct{ old, new string }{
-		{"chain_id = 84532", "chain_id = 1"},
 		{"decimals = 6", "decimals = 256"},
 		{"fees = [500, 2500]", "fees = [500, 500]"},
 		{"fees = [500, 2500]", "fees = [1000000]"},
@@ -108,5 +107,37 @@ fees = [500, 2500]
 		if _, err := loadText(t, strings.Replace(text, test.old, test.new, 1)); err == nil {
 			t.Fatalf("accepted %s", test.new)
 		}
+	}
+}
+
+func TestConfiguredNetworkTokensAndFeesHaveNoHiddenAllowlist(t *testing.T) {
+	text := strings.Replace(validConfig, "chain_id = 84532", "chain_id = 11155111", 1) + "execution_enabled = true\n"
+	for i := 1; i <= 7; i++ {
+		text += fmt.Sprintf("[[chains.test-net.tokens]]\naddress = \"0x%040x\"\nsymbol = \"T%d\"\ndecimals = 18\n", i, i)
+	}
+	text += `[chains.test-net.deployments.custom]
+kind = "uniswap-v3"
+factory = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+quoter = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+router = "0xcccccccccccccccccccccccccccccccccccccccc"
+fees = [0, 1, 2, 3, 4, 5, 6, 7, 8, 999999]
+`
+	got, err := loadText(t, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := got.Chains["test-net"]
+	if chain.ChainID != 11155111 || !chain.ExecutionEnabled || len(chain.Tokens) != 7 || len(chain.Deployments["custom"].Fees) != 10 {
+		t.Fatalf("configured policy changed: %+v", chain)
+	}
+}
+
+func TestChainProfilesMayShareNetworkID(t *testing.T) {
+	got, err := loadText(t, strings.Replace(validConfig, "chain_id = 84532", "chain_id = 8453", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Chains) != 2 || got.Chains["base"].RPCURLEnv != "BASE_RPC_URL" || got.Chains["test-net"].RPCURLEnv != "TEST_RPC_URL" {
+		t.Fatalf("profiles merged despite distinct keys: %+v", got.Chains)
 	}
 }

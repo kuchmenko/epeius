@@ -87,7 +87,6 @@ func (c Config) validate() error {
 	if err != nil || !net.ParseIP(host).IsLoopback() {
 		return errors.New("engine.listen_addr must use a loopback IP and port")
 	}
-	ids := make(map[int64]bool, len(c.Chains))
 	for key, chain := range c.Chains {
 		if !chainKey.MatchString(key) {
 			return errors.New("chain keys must start with a lowercase letter and contain only lowercase letters, digits, or hyphens")
@@ -95,15 +94,8 @@ func (c Config) validate() error {
 		if chain.ChainID < 1 || chain.ChainID > 9007199254740991 {
 			return errors.New("chains.*.chain_id must be between 1 and 9007199254740991")
 		}
-		if ids[chain.ChainID] {
-			return errors.New("chain IDs must be unique")
-		}
-		ids[chain.ChainID] = true
-		if chain.ExecutionEnabled && chain.ChainID != 84532 {
-			return errors.New("execution is allowed only on Base Sepolia")
-		}
-		if len(chain.Tokens) > 5 || (chain.ExecutionEnabled && (len(chain.Tokens) < 2 || len(chain.Deployments) == 0)) {
-			return errors.New("execution needs tokens and deployments; at most five tokens are supported")
+		if chain.ExecutionEnabled && (len(chain.Tokens) < 2 || len(chain.Deployments) == 0) {
+			return errors.New("execution needs at least two tokens and a deployment")
 		}
 		seen := map[common.Address]bool{}
 		for _, token := range chain.Tokens {
@@ -114,7 +106,7 @@ func (c Config) validate() error {
 			seen[a] = true
 		}
 		for id, deployment := range chain.Deployments {
-			if !chainKey.MatchString(id) || (deployment.Kind != "uniswap-v3" && deployment.Kind != "pancake-v3") || len(deployment.Fees) == 0 || len(deployment.Fees) > 8 {
+			if !chainKey.MatchString(id) || (deployment.Kind != "uniswap-v3" && deployment.Kind != "pancake-v3") || len(deployment.Fees) == 0 {
 				return errors.New("invalid deployment kind, identifier, or fees")
 			}
 			for _, a := range []string{deployment.Factory, deployment.Quoter, deployment.Router} {
@@ -124,7 +116,7 @@ func (c Config) validate() error {
 			}
 			fees := map[uint32]bool{}
 			for _, fee := range deployment.Fees {
-				if fee == 0 || fee >= 1000000 || fees[fee] {
+				if fee >= 1000000 || fees[fee] {
 					return errors.New("invalid or duplicate pool fee")
 				}
 				fees[fee] = true

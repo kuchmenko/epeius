@@ -17,7 +17,7 @@ Use this page as the index for current components and operator workflows.
 | --- | --- |
 | Run read-only quotes | [Terminal quick start](terminal.md#quick-start) |
 | Configure or diagnose a chain | [Engine configuration](engine.md#configuration) |
-| Prepare or execute on Base Sepolia | [Terminal execution](terminal.md#base-sepolia-execution), then [execution contract](execution.md) |
+| Prepare or execute on an enabled chain | [Terminal execution](terminal.md#configured-chain-execution), then [execution contract](execution.md) |
 | Deploy and seed disposable test pools | [Testnet harness](testnet.md) |
 | Run repository checks | [Development tooling](development.md#verification) |
 | Integrate another client | [Protocol](protocol.md) |

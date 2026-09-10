@@ -1,6 +1,6 @@
 # Epeius
 
-Epeius is a proof-of-concept EVM trading terminal and quote engine, currently targeting Base. One Go engine serves every configured chain. A Bun terminal uses ConnectRPC to request quotes and, on explicitly enabled Base Sepolia configurations, prepare and submit transactions with a local signer. Base mainnet remains read-only.
+Epeius is a proof-of-concept EVM trading terminal and quote engine. One Go engine serves every configured positive chain ID. A Bun terminal uses ConnectRPC to request quotes and, only when `execution_enabled = true`, prepare and submit transactions with a local signer. Chain, token, contract, and pool-fee allowlists come from TOML; there are no implicit Base WETH, USDC, or Uniswap defaults. The checked-in root configuration keeps execution disabled on every chain.
 
 ## Quick start
 
@@ -37,4 +37,4 @@ Start at the [documentation index](docs/README.md):
 - [Development tooling](docs/development.md)
 - [ConnectRPC protocol](docs/protocol.md)
 
-Read the execution contract before sending transactions. A successful simulation or receipt does not guarantee full input consumption; this milestone checks actual amounts but has no custom on-chain executor.
+Read the execution contract before sending transactions. A successful simulation or receipt does not guarantee full input consumption; this milestone checks actual amounts but has no custom on-chain executor. Base Sepolia remains the verified and default test setup, not proof that a newly configured network or provider supports safe live execution.

@@ -28,7 +28,7 @@ Usage:
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
   bun run terminal -- prepare|execute --chain KEY --quote-id ID --route-id ID --keystore PATH --password-file PATH [--slippage-bps N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
-Default config: ./epeius.toml. Execution: Base Sepolia only (84532), explicitly enabled in chain config.
+Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
 prepare previews without sending. execute displays terms and asks approval or swap confirmation.
 Approval always requires a fresh quote afterward. Execution output is JSON lines; confirmations go to stderr.`;
 
@@ -206,19 +206,14 @@ export async function main(rawArgs: string[]) {
         status.chains,
         values.chain ?? config.defaultChain,
       );
-      if (
-        !chain.executionEnabled ||
-        !chain.connected ||
-        chain.chainId !== "84532"
-      )
-        throw new Error(
-          "Engine must enable execution on connected chain ID 84532.",
-        );
+      if (!chain.executionEnabled || !chain.connected)
+        throw new Error("Engine must enable execution on the connected chain.");
       return await executionCommand(
         command,
         values,
         config.path,
         chain.key,
+        chain.chainId,
         client,
         abort.signal,
       );

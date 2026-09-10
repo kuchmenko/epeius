@@ -8,13 +8,15 @@ import {
   address,
   canonicalReceipt,
   fixture,
+  loadProfile,
   options,
   run,
   sqrt,
-  uni,
 } from "./harness.mjs";
 
 const sender = "0x0000000000000000000000000000000000000001";
+const defaultProfilePath = new URL("./harness.toml", import.meta.url).pathname;
+const { uni } = await loadProfile(defaultProfilePath);
 test("Bun env files reach the CLI while exported RPC values take precedence", async () => {
   const dir = mkdtempSync(resolve(tmpdir(), "epeius-env-"));
   const paths = [];
@@ -155,6 +157,75 @@ test("only explicit broadcast with explicit encrypted signer is accepted", () =>
   assert.throws(() => options(["deploy", "--sender"]), /Missing value/);
   assert.throws(() => address("0x00"), /20-byte/);
   assert.throws(() => address(`0x${"0".repeat(40)}`), /nonzero/);
+  assert.equal(options(["check"]).config, defaultProfilePath);
+});
+
+test("checked-in profile owns chain, contracts, fixture tokens and fee limits", async () => {
+  const profile = await loadProfile(defaultProfilePath);
+  assert.equal(profile.chain.key, "base-sepolia");
+  assert.equal(profile.chain.id, 84532);
+  assert.equal(profile.chain.rpc_url_env, "BASE_SEPOLIA_RPC_URL");
+  assert.equal(
+    profile.chain.weth,
+    "0x4200000000000000000000000000000000000006",
+  );
+  assert.deepEqual(profile.decimals, { A: 18, B: 6, C: 8 });
+  assert.deepEqual(profile.fixtures.uniswap_fees, [500, 3000]);
+  assert.deepEqual(profile.fixtures.pancake_fees, [500, 2500]);
+});
+
+test("custom profile selects another network and tokens but cannot reuse a mismatched journal", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-profile-"));
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.HARNESS_OTHER_RPC;
+  const methods = [];
+  process.env.HARNESS_OTHER_RPC = "https://example.invalid";
+  globalThis.fetch = async (_url, request) => {
+    methods.push(JSON.parse(request.body).method);
+    return { ok: true, json: async () => ({ result: "0xaa36a7" }) };
+  };
+  try {
+    const config = resolve(dir, "profile.toml");
+    const source = (await Bun.file(defaultProfilePath).text())
+      .replace('key = "base-sepolia"', 'key = "another-network"')
+      .replace("id = 84532", "id = 11155111")
+      .replace("BASE_SEPOLIA_RPC_URL", "HARNESS_OTHER_RPC")
+      .replace("A = 18, B = 6, C = 8", "A = 18, B = 6, C = 8, Extra = 12")
+      .replace('AC = ["A", "C"]', 'AC = ["A", "C"]\nextra = ["A", "Extra"]')
+      .replace(
+        "uniswap_fees = [500, 3000]",
+        "uniswap_fees = [0, 1, 2, 3, 4, 5, 6, 7, 8]",
+      );
+    writeFileSync(config, source);
+    const profile = await loadProfile(config);
+    assert.equal(profile.chain.id, 11155111);
+    assert.equal(profile.decimals.Extra, 12);
+    assert.deepEqual(profile.fixtures.pairs.extra, ["A", "Extra"]);
+    const path = resolve(dir, "manifest.json");
+    const journal = {
+      version: 1,
+      chainId: 84532,
+      transactions: {},
+      tokens: {},
+      pancake: {},
+      pools: [],
+      uni,
+    };
+    const args = options(["check", "--config", config, "--manifest", path]);
+    writeFileSync(path, JSON.stringify(journal));
+    await assert.rejects(run(args), /Malformed deployment manifest/);
+    journal.chainId = 11155111;
+    journal.uni = { ...uni, router: sender };
+    writeFileSync(path, JSON.stringify(journal));
+    await assert.rejects(run(args), /deployment identity/);
+    assert.deepEqual(methods, ["eth_chainId", "eth_chainId"]);
+    assert.deepEqual(await Bun.file(path).json(), journal);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.HARNESS_OTHER_RPC;
+    else process.env.HARNESS_OTHER_RPC = previousURL;
+    rmSync(dir, { recursive: true });
+  }
 });
 
 test("normalized asymmetric prices use integer square roots and aligned concentrated ranges", () => {
@@ -251,6 +322,7 @@ const prepared =
           pancake: {},
           pools: [],
           sender: "0x0000000000000000000000000000000000000002",
+          uni,
         }),
       );
       await assert.rejects(

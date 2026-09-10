@@ -25,6 +25,7 @@ async function main(args: string[]) {
     strict: true,
     options: {
       config: { type: "string" },
+      chain: { type: "string" },
       keystore: { type: "string" },
       "password-file": { type: "string" },
       report: { type: "string" },
@@ -34,7 +35,7 @@ async function main(args: string[]) {
   });
   if (values.help) {
     console.log(
-      "Usage: bun scripts/e2e.ts --config PATH [--broadcast --keystore PATH --password-file PATH] [--report PATH]\nWithout --broadcast, prints scenarios without network calls. Requires the seeded A/B/C harness and a running engine for broadcast. Sends separate approvals and eight swaps for two deployments; stops at the first failure without resending.",
+      "Usage: bun scripts/e2e.ts --config PATH [--chain KEY] [--broadcast --keystore PATH --password-file PATH] [--report PATH]\nWithout --broadcast, prints scenarios without network calls. Requires seeded harness fixture tokens A and C as scenario inputs, not a general token whitelist. Sends separate approvals and configured swaps; stops at first failure without resending.",
     );
     return;
   }
@@ -42,6 +43,7 @@ async function main(args: string[]) {
     throw new Error("Provide --config for the seeded harness.");
   const config = await readConfig(values.config);
   const settings = Bun.TOML.parse(await Bun.file(config.path).text()) as {
+    terminal?: { default_chain?: string };
     chains?: Record<
       string,
       {
@@ -51,17 +53,21 @@ async function main(args: string[]) {
       }
     >;
   };
-  const chain = settings.chains?.["base-sepolia"];
-  if (chain?.chain_id !== 84532 || chain.execution_enabled !== true)
-    throw new Error("Harness must explicitly enable Base Sepolia execution.");
-  const deployments = Object.entries(chain.deployments ?? {});
+  const chainKey = values.chain ?? settings.terminal?.default_chain;
+  if (!chainKey) throw new Error("Provide --chain or terminal.default_chain.");
+  const chain = settings.chains?.[chainKey];
   if (
-    deployments.length !== 2 ||
-    !["uniswap-v3", "pancake-v3"].every((kind) =>
-      deployments.some(([, deployment]) => deployment.kind === kind),
-    )
+    !chain ||
+    !Number.isSafeInteger(chain.chain_id) ||
+    (chain.chain_id ?? 0) <= 0 ||
+    chain.execution_enabled !== true
   )
-    throw new Error("Harness requires one Uniswap and one Pancake deployment.");
+    throw new Error("Selected chain must explicitly enable execution.");
+  const deployments = Object.entries(chain.deployments ?? {});
+  if (!deployments.length)
+    throw new Error(
+      "Selected chain requires at least one configured deployment.",
+    );
   const planned = scenarios(deployments.map(([id]) => id));
   if (!values.broadcast) {
     console.log(
@@ -98,14 +104,14 @@ async function main(args: string[]) {
   };
   const client = quoteClient(config.engineUrl);
   const status = await client.getStatus({}, { timeoutMs: 15000 });
-  const remote = status.chains.find((item) => item.key === "base-sepolia");
+  const remote = status.chains.find((item) => item.key === chainKey);
   if (
     !remote?.connected ||
     !remote.executionEnabled ||
-    remote.chainId !== "84532"
+    remote.chainId !== String(chain.chain_id)
   )
     throw new Error(
-      "Engine must be connected and execution-enabled on Base Sepolia.",
+      "Engine must be connected and execution-enabled on selected chain.",
     );
   await record({ event: "start", sender, reportPath, scenarios: planned });
   for (const scenario of planned) {

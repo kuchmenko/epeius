@@ -10,13 +10,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-var (
-	Factory = common.HexToAddress("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
-	Quoter  = common.HexToAddress("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")
-	WETH    = common.HexToAddress("0x4200000000000000000000000000000000000006")
-	USDC    = common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
-)
-
 type Caller interface {
 	Call(context.Context, common.Address, []byte, common.Hash) ([]byte, error)
 }
@@ -37,18 +30,11 @@ type singleInput struct {
 
 // Quote returns a zero pool and nil amount when no pool exists for this fee.
 func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big.Int, fee uint32, block common.Hash) (common.Address, *big.Int, error) {
-	factory, quoter := p.FactoryAddress, p.QuoterAddress
-	if factory == (common.Address{}) {
-		factory = Factory
-	}
-	if quoter == (common.Address{}) {
-		quoter = Quoter
-	}
 	data, err := factoryABI.Pack("getPool", in, out, new(big.Int).SetUint64(uint64(fee)))
 	if err != nil {
 		return common.Address{}, nil, err
 	}
-	result, err := p.Client.Call(ctx, factory, data, block)
+	result, err := p.Client.Call(ctx, p.FactoryAddress, data, block)
 	if err != nil {
 		return common.Address{}, nil, errors.New("pool discovery failed at the pinned block")
 	}
@@ -64,7 +50,7 @@ func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big
 	if err != nil {
 		return pool, nil, err
 	}
-	result, err = p.Client.Call(ctx, quoter, data, block)
+	result, err = p.Client.Call(ctx, p.QuoterAddress, data, block)
 	if err != nil {
 		return pool, nil, errors.New("quote failed at the pinned block")
 	}

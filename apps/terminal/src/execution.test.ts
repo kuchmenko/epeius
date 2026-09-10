@@ -26,6 +26,8 @@ const sender = addr("1"),
   output = addr("5"),
   pool = addr("6");
 const hash = `0x${"a".repeat(64)}`;
+const expectedChainId = "11155111";
+const expectedRpcChainId = "0xaa36a7";
 function prepared() {
   return create(PrepareExecutionResponseSchema, {
     status: PreparationStatus.READY,
@@ -38,7 +40,7 @@ function prepared() {
     tokenOut: output,
     recipient: sender,
     transaction: {
-      chainId: "84532",
+      chainId: expectedChainId,
       from: sender,
       to: router,
       data: "0x1234",
@@ -101,7 +103,8 @@ function fixture() {
     confirmations: string[] = [];
   const io: ExecutionIO = {
     signer: sender,
-    chainId: async () => "0x14a34",
+    expectedChainId,
+    chainId: async () => expectedRpcChainId,
     prepare: async (id) => {
       requests.push(id);
       return structuredClone(p);
@@ -156,10 +159,19 @@ test("wrong RPC network before preparation or after confirmation never sends", a
   for (const wrongAt of [1, 2]) {
     const f = fixture();
     let calls = 0;
-    f.io.chainId = async () => (++calls === wrongAt ? "0x2105" : "0x14a34");
-    await expect(executePrepared(f.io)).rejects.toThrow(/network|84532/);
+    f.io.chainId = async () =>
+      ++calls === wrongAt ? "0x14a34" : expectedRpcChainId;
+    await expect(executePrepared(f.io)).rejects.toThrow(/network|configured/);
     expect(f.sent).toHaveLength(0);
   }
+});
+
+test("prepared transaction on a different chain never sends", async () => {
+  const f = fixture();
+  assert(f.p.transaction);
+  f.p.transaction.chainId = "84532";
+  await expect(executePrepared(f.io)).rejects.toThrow("configured chain ID");
+  expect(f.sent).toHaveLength(0);
 });
 
 test("changed transaction, route, minimum, deadline or identity after confirmation never sends", async () => {
@@ -227,10 +239,14 @@ test("expired, rejected, and requote preparations fail closed", async () => {
   }
   const p = prepared();
   p.expiresAtUnix = "100";
-  expect(() => validatePreparation(p, sender, 100)).toThrow("expired");
+  expect(() => validatePreparation(p, sender, expectedChainId, 100)).toThrow(
+    "expired",
+  );
   p.expiresAtUnix = "101";
   p.deadlineUnix = "100";
-  expect(() => validatePreparation(p, sender, 100)).toThrow("expired");
+  expect(() => validatePreparation(p, sender, expectedChainId, 100)).toThrow(
+    "expired",
+  );
 });
 
 test("approval confirms separately, sends only exact approval and requires fresh quote", async () => {
@@ -252,7 +268,7 @@ test("approval confirms separately, sends only exact approval and requires fresh
     nextAction: expect.stringContaining("Rerun quote"),
   });
   f.p.approvalTransaction.data = `0x095ea7b3${router.slice(2).padStart(64, "0")}${"f".repeat(64)}`;
-  expect(() => validatePreparation(f.p, sender)).toThrow(
+  expect(() => validatePreparation(f.p, sender, expectedChainId)).toThrow(
     "displayed input amount",
   );
 });
@@ -345,6 +361,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   await chmod(castPath, 0o700);
   let p = prepared();
   let enabled = true;
+  let remoteChainId = expectedChainId;
   let receiptReads = 0;
   let canonicalMismatch = false;
   const blockHash = `0x${"b".repeat(64)}`;
@@ -364,7 +381,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
               chains: [
                 {
                   key: "testnet",
-                  chainId: "84532",
+                  chainId: remoteChainId,
                   connected: true,
                   executionEnabled: enabled,
                 },
@@ -406,11 +423,11 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         id: 1,
         result:
           body.method === "eth_chainId"
-            ? "0x14a34"
+            ? expectedRpcChainId
             : {
                 ...receipt(),
                 blockNumber: "0x123",
-                // Base preconfirmations can report success before the block is sealed.
+                // Preconfirmations can report success before the block is sealed.
                 ...(receiptReads === 2
                   ? {}
                   : {
@@ -424,7 +441,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   const config = join(directory, "epeius.toml");
   await Bun.write(
     config,
-    `[terminal]\ndefault_chain='testnet'\nengine_url='${server.url}'\nsearch_budget_ms=2000\n[chains.testnet]\nchain_id=84532\nexecution_enabled=true\nrpc_url_env='EPEIUS_FIXTURE_RPC'\n`,
+    `[terminal]\ndefault_chain='testnet'\nengine_url='${server.url}'\nsearch_budget_ms=2000\n[chains.testnet]\nchain_id=${expectedChainId}\nexecution_enabled=true\nrpc_url_env='EPEIUS_FIXTURE_RPC'\n`,
   );
   const rpc = `${server.url}secret-api-key`;
   const run = async (args: string[], rpcOverride = rpc) => {
@@ -481,6 +498,14 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect(slowPreview.code).toBe(0);
     expect(slowPreview.out).toContain('"status":"PREPARATION_STATUS_READY"');
     expect(slowPreview.out).toContain('"sent":false');
+    remoteChainId = "84532";
+    expect((await run(["execute", "--confirm-swap", "yes"])).err).toContain(
+      "Engine chain ID must match configured chain ID",
+    );
+    expect(
+      (await calls()).filter((call) => call.args[0] === "send"),
+    ).toHaveLength(0);
+    remoteChainId = expectedChainId;
     expect((await run(["prepare", "--slippage-bps", "9999"])).code).toBe(0);
     expect((await run(["prepare", "--slippage-bps", "10000"])).err).toContain(
       "0 through 9999",
@@ -508,7 +533,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
       "--gas-limit",
       "200000",
       "--chain",
-      "84532",
+      expectedChainId,
       "--from",
       sender,
       "--async",

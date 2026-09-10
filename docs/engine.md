@@ -17,7 +17,7 @@ The first engine stdout line is an internal JSON readiness event consumed by the
 
 ## Configuration
 
-Default configuration is `./epeius.toml` in the current working directory. There is no parent search or config merge.
+Default configuration is `./epeius.toml` in the current working directory. There is no parent search, config merge, or hot reload. TOML is loaded when the process starts; restart the engine and terminal after changing it.
 
 ```toml
 [terminal]
@@ -48,9 +48,11 @@ bun --env-file=/absolute/path/to/.env scripts/engine.ts
 
 Remote RPC URLs require HTTPS. HTTP is allowed only for loopback IPs and `localhost`. The server itself binds only to a loopback IP. RPC URL values and credentials are not returned in status output.
 
-Unknown TOML fields and duplicate chain IDs are rejected. Chain keys use lowercase letters, digits, and hyphens and start with a letter. IDs are positive integers no larger than 9,007,199,254,740,991. `terminal.default_chain` must exist. If the listen port changes, update `terminal.engine_url` or pass the terminal's `--engine-url` option.
+Unknown TOML fields are rejected. Chain keys use lowercase letters, digits, and hyphens and start with a letter. IDs are positive integers no larger than 9,007,199,254,740,991. Distinct keys may describe the same network ID with different RPCs or deployments; requests select the key and verify its network ID. `terminal.default_chain` must exist. If the listen port changes, update `terminal.engine_url` or pass the terminal's `--engine-url` option.
 
-Adding a chain enables connectivity checks only. Quotes also require configured tokens and deployments. Supported deployments use `kind = "uniswap-v3"` or `kind = "pancake-v3"` plus `factory`, `quoter`, `router`, and `fees`. The checked-in Base configuration is read-only. Harness-generated Base Sepolia configuration is described in [Testnet harness and contracts](testnet.md).
+Adding a positive chain ID enables connectivity checks only. Quotes also require explicit TOML token and deployment allowlists. Supported deployments use `kind = "uniswap-v3"` or `kind = "pancake-v3"` plus TOML-provided `factory`, `quoter`, `router`, and `fees`. These kinds select supported implementations; they do not allow arbitrary ABIs or calldata. There are no built-in Base WETH, USDC, Uniswap, contract-address, fee-list, or provider defaults. The former limits of five tokens and eight fees are removed. Tokens must remain unique and valid; deployment fees must be unique and in the protocol range 0 through 999,999. Fee 0 works only when the configured factory actually has that pool.
+
+Execution may be enabled for any configured positive chain ID with `execution_enabled = true`, at least two tokens, and at least one deployment. Engine status, terminal TOML, terminal RPC, and prepared transaction must agree on chain identity before submission. This supersedes the earlier milestone policy that fixed execution to Base Sepolia. Base Sepolia remains the verified and default test setup; every newly introduced network or provider still needs capability and simulation-support validation before live use. The checked-in root configuration keeps `execution_enabled = false` for all chains.
 
 Execution simulation requires `TENDERLY_ACCESS_KEY`, `TENDERLY_ACCOUNT_SLUG`, and `TENDERLY_PROJECT_SLUG` in the engine's private environment. Informational quotes do not require Tenderly. Never put these values in TOML, logs, or committed files. Restart the engine after changing its environment.
 
@@ -71,7 +73,7 @@ bun run terminal -- chain check base
 
 ## Quote search
 
-The engine pins one canonical block hash and searches every configured deployment, direct path, two-hop path, and fee combination. Results stay in deterministic deployment/path order; they are not ranked by economic value. `searchComplete` means every candidate attempt finished within the budget, not that every attempt succeeded. Per-route failures remain in `errors`.
+The engine pins one canonical block hash and searches every configured deployment, direct path, two-hop path, and fee combination. One-hop and two-hop routes are the current capability; arbitrary-length routes are not supported. Results stay in deterministic deployment/path order; they are not ranked by economic value. `searchComplete` means every candidate attempt finished within the budget, not that every attempt succeeded. Per-route failures remain in `errors`.
 
 RPCs must support EIP-1898 block-hash calls. There is no fallback to latest state. Gas pricing, economic ranking, split routes, Slipstream execution, custom executors, databases, and indexing are outside the current engine.
 

@@ -8,7 +8,7 @@ Protocol source is [`proto/epeius/quote/v1/quote.proto`](../proto/epeius/quote/v
 
 - `GetStatus`: current in-memory chain status established at engine startup.
 - `GetQuote`: deterministic unary exact-input route search.
-- `PrepareExecution`: create or recheck immutable Base Sepolia execution terms and simulation evidence.
+- `PrepareExecution`: create or recheck immutable execution terms and simulation evidence for an explicitly enabled configured chain.
 - `StreamQuote`: declared but not implemented.
 
 The engine builds and simulates unsigned transactions. Signing, user confirmation, submission, and receipt checks belong to the terminal. This trust split is part of the current contract.
@@ -17,7 +17,7 @@ The engine builds and simulates unsigned transactions. Signing, user confirmatio
 
 Each `ChainStatus` contains chain key and ID, startup connectivity, sanitized error, quote support, configured tokens, startup block, and execution flag.
 
-`connected: true` means startup RPC verification succeeded. It is not continuous health monitoring. `quotingSupported: false` can coexist with connectivity when tokens or deployments are absent. `executionEnabled: true` is necessary but the terminal also requires connected chain ID 84532.
+`connected: true` means startup RPC verification succeeded. It is not continuous health monitoring. `quotingSupported: false` can coexist with connectivity when tokens or deployments are absent. `executionEnabled: true` is necessary but not sufficient: local TOML, engine status, terminal RPC, and prepared transaction chain IDs must match.
 
 ## Quotes
 
@@ -33,7 +33,7 @@ Clients send canonical token addresses, positive decimal atomic input, search bu
 
 `searchComplete: true` means all candidate attempts finished before the budget. It does not mean all candidates succeeded. `false` means some routes may be missing; returned routes and errors still describe completed work. No route means failure to find a usable route, even if search completed.
 
-Each route identifies provider, configured deployment, exact atomic output, block, latency, and one or two legs. `feePips` is millionths. `tickSpacing` is a signed Slipstream selector, not a fee. Missing optional cost or best-route fields mean unknown or uncomputed, never zero.
+Each route identifies provider, configured deployment, exact atomic output, block, latency, and one or two legs. Arbitrary-length routes are not supported. `feePips` is millionths and may be 0 through 999,999; a configured fee yields a route only when the configured factory has a pool. `tickSpacing` is a signed Slipstream selector, not a fee. Missing optional cost or best-route fields mean unknown or uncomputed, never zero.
 
 All calls at quote time use one canonical EIP-1898 block hash. There is no fallback to latest state. Quote output is informational and does not authorize execution.
 

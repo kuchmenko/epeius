@@ -1,6 +1,6 @@
 # Terminal
 
-The Bun terminal is the user-facing CLI. It reads local configuration, calls the engine over ConnectRPC, formats quote results, owns the local signer, asks for confirmation, submits explicitly approved Base Sepolia transactions, and verifies receipts.
+The Bun terminal is the user-facing CLI. It reads local configuration, calls the engine over ConnectRPC, formats quote results, owns the local signer, asks for confirmation, submits explicitly approved transactions on configured execution-enabled chains, and verifies receipts.
 
 ## Quick start
 
@@ -61,9 +61,9 @@ Routes are deterministic search results, not best-to-worst rankings. Missing `be
 
 `status` exits 1 if any configured chain is unavailable. `chain check` exits 1 for a failed check. Machine consumers should read both the JSON and exit code.
 
-## Base Sepolia execution
+## Configured-chain execution
 
-Read [Testnet execution contract](execution.md) before sending. Requires Foundry `cast`, an encrypted keystore, a password file, Tenderly credentials, Base Sepolia gas, funded test tokens, and a chain with `chain_id = 84532` and `execution_enabled = true`.
+Read [Execution contract](execution.md) before sending. Requires Foundry `cast`, an encrypted keystore, a password file, Tenderly credentials, native gas, funded configured tokens, a positive `chain_id`, and `execution_enabled = true`. The local TOML chain ID must match engine status, the terminal RPC, and the prepared transaction. Tokens, deployment contracts, and pool fees are accepted only from TOML; addresses supplied as token input do not bypass that allowlist.
 
 ```bash
 bun run terminal -- prepare --chain base-sepolia --config .testnet/runtime.toml \
@@ -84,9 +84,9 @@ For swaps, `verification.outcome: "passed"` means the canonical successful recei
 
 `failed` means the receipt or measured token movement did not satisfy checks. `unavailable`, `pending_or_unknown`, or a null hash means outcome is inconclusive. A send may have reached the network even when its hash could not be returned. Inspect wallet transactions before any retry; never resend automatically.
 
-Interactive execution requires typing `approval` or `swap`. Deliberate noninteractive runs may pass exactly one of `--confirm-approval yes` or `--confirm-swap yes`. The wrong action is not confirmed. Preparation IDs are in memory, expire after 30 seconds, and do not survive engine restart. On-chain deadline is 120 seconds from the preparation snapshot; rechecking extends neither deadline.
+Interactive execution requires typing `approval` or `swap`. Deliberate noninteractive runs may pass exactly one of `--confirm-approval yes` or `--confirm-swap yes`. The wrong action is not confirmed. Preparation IDs are in memory, expire after 30 seconds, and do not survive engine restart. On-chain deadline is 120 seconds from the preparation snapshot; rechecking extends neither deadline. These TTL and timeout values, gas behavior, and other fixed safety constants have not become TOML options.
 
-Keep keystores and password files outside Git. Private keys are never accepted as command arguments. Mainnet execution is disabled. Starting the engine never writes to a network.
+Keep keystores and password files outside Git. Private keys are never accepted as command arguments. The checked-in root TOML disables execution on every chain. Base Sepolia is the verified and default test setup; configuring another network or provider does not prove capability or simulation support. Starting the engine never writes to a network.
 
 ## Troubleshooting and removed options
 
