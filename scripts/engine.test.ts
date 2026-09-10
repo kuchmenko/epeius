@@ -5,6 +5,29 @@ import { join } from "node:path";
 import { startEngine } from "./engine";
 import { root } from "./tasks";
 
+test("importing smoke does not run checks or change exit status", async () => {
+  const child = Bun.spawn(
+    [
+      "bun",
+      "-e",
+      'globalThis.fetch = () => { throw new Error("Unexpected network request"); }; await import("./scripts/smoke.ts");',
+    ],
+    {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 3000,
+      killSignal: "SIGKILL",
+    },
+  );
+  const [out, err, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect({ out, err, code }).toEqual({ out: "", err: "", code: 0 });
+});
+
 const zero = (bytes: number) => `0x${"00".repeat(bytes)}`;
 const header = {
   parentHash: zero(32),

@@ -62,7 +62,8 @@ try {
       "5500",
       "--json",
     ],
-    { stdout: "pipe", stderr: "pipe" },
+    // Leave time for cleanup before the outer Go test's 15-second deadline.
+    { stdout: "pipe", stderr: "pipe", timeout: 10000, killSignal: "SIGKILL" },
   );
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(terminal.stdout).text(),
