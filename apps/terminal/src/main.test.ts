@@ -16,8 +16,8 @@ test("quote input preserves amounts above JS integer precision and distinct addr
   expect(input.amountInAtomic).toBe("9007199254740993");
   expect(input.sender).toBe(`0x${"1".repeat(40)}`);
   expect(input.recipient).toBe(`0x${"2".repeat(40)}`);
-  expect(input.tokenIn).toBe(`0x${"3".repeat(40)}`);
-  expect(input.tokenOut).toBe(`0x${"4".repeat(40)}`);
+  expect(input.tokenIn).toBe("0x4200000000000000000000000000000000000006");
+  expect(input.tokenOut).toBe("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
   expect(input.slippageBps).toBe(37);
   expect(input.searchBudgetMs).toBe(1200);
   expect(
@@ -47,9 +47,14 @@ test("invalid units, bounds, addresses, and environments are rejected", () => {
   expect(
     quoteInput(changed("--slippage-bps", "10000"), "base-mainnet").slippageBps,
   ).toBe(10000);
+  expect(
+    quoteInput(changed("--search-budget-ms", "2147478647"), "base-mainnet")
+      .searchBudgetMs,
+  ).toBe(2147478647);
   for (const [flag, value] of [
     ["--slippage-bps", "10001"],
     ["--search-budget-ms", "0"],
+    ["--search-budget-ms", "2147478648"],
     ["--search-budget-ms", "4294967296"],
     ["--sender", "0x123"],
   ]) {

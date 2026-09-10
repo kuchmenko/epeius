@@ -1,7 +1,12 @@
 import { parseArgs } from "node:util";
+import { toJsonString } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
-import { Environment } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import {
+  Environment,
+  QuoteFinalSchema,
+} from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { quoteClient } from "./client";
+import { formatQuote } from "./format";
 
 const help = `Epeius — EVM trading terminal and quote engine (currently Base)
 
@@ -10,7 +15,7 @@ Usage:
   bun run terminal -- quote [options]
   bun run terminal -- execute <quote-id> --route <route-id>
 
-Foundation only: quotes and execution are not implemented. No transactions are sent.
+Direct quotes are read-only. Execution is not implemented; no transactions are sent.
 
 Quote options (all trade fields are explicit):
   --environment     base-mainnet or base-sepolia (or EPEIUS_ENVIRONMENT)
@@ -20,35 +25,39 @@ Quote options (all trade fields are explicit):
   --out             Output token address
   --amount-atomic   Positive integer in the input token's smallest unit
   --slippage-bps    Integer from 0 to 10000
-  --search-budget-ms Positive integer, at most 4294967295
+  --search-budget-ms Positive integer, at most 2147478647
+  --json            Print protobuf JSON
 
 Use token addresses and atomic units; token-symbol lookup is not implemented.`;
 
 export function showStartup(environment: string, url: string) {
   console.log(
-    `Epeius — ${environment} (read-only)\nEngine: ${url}\nQuotes and execution are not implemented.\nRun bun run terminal -- quote --help in another terminal.\nPress Ctrl+C to stop.`,
+    `Epeius — ${environment} (read-only)\nEngine: ${url}\nRun bun run terminal -- quote --help in another terminal.\nExecution is not implemented.\nPress Ctrl+C to stop.`,
   );
 }
 
 export function quoteInput(args: string[], fallbackEnvironment?: string) {
-  let values: Record<string, string | undefined>;
+  let values: Record<string, string | boolean | undefined>;
   try {
     values = parseArgs({
       args,
       strict: true,
-      options: Object.fromEntries(
-        [
-          "environment",
-          "sender",
-          "recipient",
-          "in",
-          "out",
-          "amount-atomic",
-          "slippage-bps",
-          "search-budget-ms",
-        ].map((name) => [name, { type: "string" as const }]),
-      ),
-    }).values as Record<string, string | undefined>;
+      options: {
+        ...Object.fromEntries(
+          [
+            "environment",
+            "sender",
+            "recipient",
+            "in",
+            "out",
+            "amount-atomic",
+            "slippage-bps",
+            "search-budget-ms",
+          ].map((name) => [name, { type: "string" as const }]),
+        ),
+        json: { type: "boolean" },
+      },
+    }).values as Record<string, string | boolean | undefined>;
   } catch {
     throw new Error(
       "Invalid quote arguments. Run bun run terminal -- quote --help.",
@@ -65,13 +74,13 @@ export function quoteInput(args: string[], fallbackEnvironment?: string) {
     throw new Error("Choose --environment base-mainnet or base-sepolia.");
   function address(key: string) {
     const value = values[key];
-    if (!value || !/^0x[0-9a-fA-F]{40}$/.test(value))
+    if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value))
       throw new Error(`Provide a 20-byte EVM address for --${key}.`);
     return value;
   }
   const amountInAtomic = values["amount-atomic"];
   if (
-    !amountInAtomic ||
+    typeof amountInAtomic !== "string" ||
     !/^[1-9][0-9]*$/.test(amountInAtomic) ||
     amountInAtomic.length > 78 ||
     BigInt(amountInAtomic) >= 1n << 256n
@@ -81,7 +90,7 @@ export function quoteInput(args: string[], fallbackEnvironment?: string) {
   function integer(key: string, min: number, max: number) {
     const value = values[key];
     if (
-      !value ||
+      typeof value !== "string" ||
       !/^\d+$/.test(value) ||
       Number(value) < min ||
       Number(value) > max
@@ -97,7 +106,9 @@ export function quoteInput(args: string[], fallbackEnvironment?: string) {
     tokenOut: address("out"),
     amountInAtomic,
     slippageBps: integer("slippage-bps", 0, 10000),
-    searchBudgetMs: integer("search-budget-ms", 1, 4294967295),
+    // Leave response time within Bun's signed 32-bit timer limit.
+    searchBudgetMs: integer("search-budget-ms", 1, 2147483647 - 5000),
+    json: values.json === true,
   };
 }
 
@@ -120,20 +131,32 @@ export async function main(args: string[]) {
   const cancel = () => abort.abort();
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
+  let environment = Environment.UNSPECIFIED;
   try {
-    const input = quoteInput(args.slice(1), process.env.EPEIUS_ENVIRONMENT);
+    const { json, ...input } = quoteInput(
+      args.slice(1),
+      process.env.EPEIUS_ENVIRONMENT,
+    );
+    environment = input.environment;
     const client = quoteClient(
       process.env.EPEIUS_ENGINE_URL ?? "http://127.0.0.1:8080",
     );
-    await client.getQuote(input, { signal: abort.signal });
-    // Foundation must not present an unexpected server response as a real quote.
-    console.error("This terminal does not support quote results yet.");
-    return 1;
+    const quote = await client.getQuote(input, {
+      signal: abort.signal,
+      timeoutMs: input.searchBudgetMs + 5000,
+    });
+    console.log(
+      json ? toJsonString(QuoteFinalSchema, quote) : formatQuote(quote, input),
+    );
+    if (json && !quote.searchComplete)
+      console.error("WARNING: Search was partial; some routes may be missing.");
+    return quote.routes.length > 0 ? 0 : 1;
   } catch (error) {
     if (error instanceof ConnectError) {
       console.error(
-        error.code === Code.Unimplemented
-          ? "Quotes are not implemented (unimplemented). The engine received the request."
+        error.code === Code.FailedPrecondition &&
+          environment === Environment.BASE_SEPOLIA
+          ? "Quoting is unsupported on Base Sepolia; use it for connectivity checks only."
           : `Quote request failed (${Code[error.code]}). Check the engine address and availability.`,
       );
     } else {

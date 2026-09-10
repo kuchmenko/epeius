@@ -1,5 +1,5 @@
 import { createClient } from "@connectrpc/connect";
-import { createConnectTransport } from "@connectrpc/connect-node";
+import { createConnectTransport } from "@connectrpc/connect-web";
 import { QuoteService } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 
 export function quoteClient(baseUrl: string) {
@@ -24,7 +24,8 @@ export function quoteClient(baseUrl: string) {
     QuoteService,
     createConnectTransport({
       baseUrl: url.toString(),
-      httpVersion: "1.1",
+      // Use Bun's native fetch, avoiding its Node HTTP compatibility path.
+      useBinaryFormat: true,
       defaultTimeoutMs: 5000,
     }),
   );

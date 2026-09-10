@@ -69,7 +69,7 @@ test("real engine verifies RPC, serves CLI, and releases its port without stoppi
     );
     expect(await new Response(cli.stdout).text()).toBe("");
     expect(await new Response(cli.stderr).text()).toContain(
-      "Quotes are not implemented (unimplemented)",
+      "Quoting is unsupported on Base Sepolia",
     );
     expect(await cli.exited).toBe(1);
     await engine.stop();

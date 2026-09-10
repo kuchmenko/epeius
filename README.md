@@ -2,7 +2,7 @@
 
 Epeius is a proof of concept trading terminal and quote engine for EVM, currently targeting Base.
 
-The foundation connects a Bun/TypeScript terminal to a Go service over ConnectRPC. The engine checks the selected network and reads its latest block. **Quotes and execution are not implemented yet.** No keys, signing, or transaction sending are supported.
+The Bun/TypeScript terminal calls a Go service over ConnectRPC. Base mainnet quoting supports direct WETH/USDC routes in both directions. No keys, signing, or transaction sending are supported.
 
 ## Quick start
 
@@ -16,7 +16,7 @@ cp .env.example .env
 bun run dev
 ```
 
-The example configuration uses the public Base Sepolia RPC. Startup shows the verified network, block, and engine address. Keep it running and use a second terminal for commands. Ctrl+C stops the engine.
+The example configuration uses the public Base Sepolia RPC. It verifies connectivity only; quoting is unsupported there. For quotes, configure Base mainnet below. Startup shows the verified network, block, and engine address. Keep it running and use a second terminal for commands. Ctrl+C stops the engine.
 
 `setup` downloads Go dependencies and pinned generators into `.tools/bin`. Buf and TypeScript tooling come from the Bun lockfile; no global installation is needed. `dev` builds the Go executable but does not install dependencies or regenerate code.
 
@@ -39,6 +39,10 @@ EPEIUS_RPC_URL=https://mainnet.base.org
 
 Both are **read-only**. Wrong-chain RPCs fail startup. Public endpoints are rate-limited; use your provider URL if needed. Keep credentials in `.env`, which Git ignores. No test ETH is required.
 
+Remote RPC endpoints must use HTTPS. HTTP is allowed only for loopback IPs and `localhost`.
+
+`mainnet.base.org` can rate-limit a four-tier search. `https://base-rpc.publicnode.com` is another public Base mainnet endpoint; select it explicitly through `EPEIUS_RPC_URL`. There is no automatic retry or provider fallback.
+
 Optional settings: `EPEIUS_LISTEN_ADDR` defaults to `127.0.0.1:8080`; `EPEIUS_ENGINE_URL` defaults to `http://127.0.0.1:8080`. Change both when selecting a different port. The engine only binds loopback IPs.
 
 Root Bun commands load `.env` and pass it to Go. Exported environment variables take precedence. Running the Go binary directly requires exported variables; it does not read `.env`.
@@ -54,9 +58,27 @@ bun run check:generated            # Compare bindings against fresh generation
 bun run smoke                     # Read-only live check using the selected network
 ```
 
-`quote` accepts explicit token addresses, atomic input amount, sender, recipient, slippage, and search budget. It calls the real API, reports `unimplemented`, and exits 1. `execute` also exits 1 without signing or sending. Token-symbol lookup and decimal amount conversion are not available yet.
+`quote` accepts explicit token addresses and an atomic input amount. It exits 0 when at least one route is returned, otherwise 1. Human output includes exact decimal and atomic amounts, block data, fee tiers, pools, and provider errors. Add `--json` for protobuf JSON. `execute` exits 1 without signing or sending.
 
-`smoke` starts its own engine on a free port, verifies RPC startup, and checks the CLI receives the expected `unimplemented` error. It exits 0 only for that expected result and stops its engine. Its sample addresses are transport inputs, not claims about deployed tokens or liquidity.
+The terminal's quote deadline is the search budget plus 5 seconds, allowing the engine to return partial results after the search budget expires. CLI budgets are limited to 2,147,478,647 ms to keep that deadline within Bun's timer range. Client cancellation or transport deadline expiry still fails the request rather than returning partial data.
+
+With engine running against Base mainnet, quote 1 WETH to native USDC:
+
+```bash
+bun run terminal -- quote \
+  --environment base-mainnet \
+  --sender 0x1111111111111111111111111111111111111111 \
+  --recipient 0x1111111111111111111111111111111111111111 \
+  --in 0x4200000000000000000000000000000000000006 \
+  --out 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
+  --amount-atomic 1000000000000000000 \
+  --slippage-bps 50 \
+  --search-budget-ms 2000
+```
+
+For 100 USDC to WETH, swap `--in` and `--out` and use `--amount-atomic 100000000`. Addresses and atomic units remain explicit.
+
+`smoke` starts its own engine on a free port. On mainnet it checks positive WETH/USDC quotes in both directions; on Sepolia it checks connectivity and explicit rejection of quoting. It stops its engine when done.
 
 For either network without changing `.env`:
 
@@ -71,14 +93,17 @@ EPEIUS_ENVIRONMENT=base-sepolia EPEIUS_RPC_URL=https://sepolia.base.org bun run 
 apps/terminal/                    Bun CLI and Connect client
 services/quote-engine/            Go module
   cmd/epeius-engine/              Engine entry point
-  internal/rpc/                  Network verification
-  internal/quote/                Contract integration tests
+  internal/rpc/                  Network verification and pinned reads
+  internal/quote/                Quote handler and transport tests
+  internal/providers/uniswapv3/   Direct quotes and original local ABIs
 proto/epeius/quote/v1/            QuoteService contract
 generated/go/                    Generated Go module
 generated/ts/                    Generated TypeScript bindings
 scripts/                         Local launch and check commands
 ```
 
-`QuoteService` exposes `GetQuote`, finite `StreamQuote`, and `PrepareExecution`. All currently return `Unimplemented`. Generated files are checked in; edit the proto and run `bun run generate`, not the generated code.
+`GetQuote` searches fee tiers 100, 500, 3000, and 10000 pips at one canonical block hash. This is a limited candidate set, not every pool on Base. Results follow fee order, not economic rank. `searchComplete` means all candidate attempts finished within the budget; individual failures remain in `errors`. A partial search retains finished quotes. RPCs must support EIP-1898 block-hash calls; the engine never falls back to latest state.
 
-CI runs credential-free tests, including real Bun-to-Go streaming, cancellation, and local RPC fixtures. Live smoke checks are separate. No fork, DEX adapter, wallet, custom contract, or deployment is included in this milestone.
+Sender, recipient, and slippage are validated inputs but do not affect QuoterV2's raw output. Quotes are informational, not executable minimum-output guarantees. `StreamQuote` and `PrepareExecution` remain unimplemented. Generated files are checked in; edit the proto and run `bun run generate`, not the generated code.
+
+CI runs credential-free tests, including Bun-to-Go transport and local RPC fixtures. Live smoke checks are separate.
