@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"sort"
 	"time"
 
 	"connectrpc.com/connect"
@@ -26,8 +27,14 @@ type Handler struct {
 	// Business streaming and execution preparation remain unimplemented.
 	// No approvals, signing, or transactions are performed by this service.
 	quotev1connect.UnimplementedQuoteServiceHandler
-	Client      Reader
-	Environment quotev1.Environment
+	Chains map[string]Chain
+}
+
+type Chain struct {
+	ChainID  string
+	Client   Reader
+	Snapshot rpc.Snapshot
+	Error    string
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)
@@ -38,16 +45,20 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	invalid := func(message string) (*connect.Response[quotev1.QuoteFinal], error) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(message))
 	}
-	if r.Environment != quotev1.Environment_ENVIRONMENT_BASE_MAINNET && r.Environment != quotev1.Environment_ENVIRONMENT_BASE_SEPOLIA {
-		return invalid("unsupported environment")
+	chain, ok := h.Chains[r.Chain]
+	if !ok {
+		return invalid("unknown chain")
 	}
-	if r.Environment != h.Environment {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("request environment does not match engine"))
+	if r.ChainId != chain.ChainID {
+		return invalid("chain ID does not match configured chain")
 	}
-	if r.Environment != quotev1.Environment_ENVIRONMENT_BASE_MAINNET {
+	if chain.Client == nil {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("chain is unavailable"))
+	}
+	if chain.ChainID != "8453" {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("quoting is supported on Base mainnet only"))
 	}
-	for _, value := range []string{r.Sender, r.Recipient, r.TokenIn, r.TokenOut} {
+	for _, value := range []string{r.TokenIn, r.TokenOut} {
 		if !address.MatchString(value) {
 			return invalid("addresses must be 20-byte hex strings")
 		}
@@ -63,14 +74,12 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	if !ok || amount.BitLen() > 256 {
 		return invalid("amount must be a positive uint256 decimal integer")
 	}
-	if r.SlippageBps > 10000 || r.SearchBudgetMs == 0 {
-		return invalid("slippage must be at most 10000 bps and search budget must be positive")
+	if r.SearchBudgetMs == 0 {
+		return invalid("search budget must be positive")
 	}
-	// Sender, recipient, and slippage are validated contract inputs. QuoterV2
-	// does not use them; this response is not an executable minimum-output promise.
 	searchCtx, cancel := context.WithTimeout(ctx, time.Duration(r.SearchBudgetMs)*time.Millisecond)
 	defer cancel()
-	snapshot, err := h.Client.Snapshot(searchCtx)
+	snapshot, err := chain.Client.Snapshot(searchCtx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, connect.NewError(contextCode(ctx.Err()), ctx.Err())
@@ -92,7 +101,7 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		completed bool
 	}
 	results := make(chan result, len(fees))
-	provider := uniswapv3.Provider{Client: h.Client}
+	provider := uniswapv3.Provider{Client: chain.Client}
 	for index, fee := range fees {
 		go func() {
 			start := time.Now()
@@ -129,6 +138,33 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		}
 	}
 	return connect.NewResponse(final), nil
+}
+
+func (h Handler) GetStatus(_ context.Context, _ *connect.Request[quotev1.GetStatusRequest]) (*connect.Response[quotev1.GetStatusResponse], error) {
+	keys := make([]string, 0, len(h.Chains))
+	for key := range h.Chains {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	response := &quotev1.GetStatusResponse{Chains: make([]*quotev1.ChainStatus, 0, len(keys))}
+	for _, key := range keys {
+		response.Chains = append(response.Chains, Status(key, h.Chains[key]))
+	}
+	return connect.NewResponse(response), nil
+}
+
+func Status(key string, chain Chain) *quotev1.ChainStatus {
+	status := &quotev1.ChainStatus{Key: key, ChainId: chain.ChainID, Connected: chain.Client != nil, Error: chain.Error, QuotingSupported: chain.ChainID == "8453"}
+	if status.QuotingSupported {
+		status.Tokens = []*quotev1.Token{
+			{Address: uniswapv3.WETH.Hex(), Symbol: "WETH", Decimals: 18},
+			{Address: uniswapv3.USDC.Hex(), Symbol: "USDC", Decimals: 6},
+		}
+	}
+	if status.Connected {
+		status.Block = &quotev1.BlockContext{Number: chain.Snapshot.BlockNumber, Hash: chain.Snapshot.BlockHash}
+	}
+	return status
 }
 
 func contextCode(err error) connect.Code {

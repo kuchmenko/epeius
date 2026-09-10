@@ -112,20 +112,6 @@ async function task(name: string) {
       }
       break;
     }
-    case "engine": {
-      await buildEngine();
-      const child = Bun.spawn([engineBinary], {
-        cwd: root,
-        stdout: "inherit",
-        stderr: "inherit",
-        stdin: "inherit",
-      });
-      const stop = () => child.kill("SIGTERM");
-      process.once("SIGINT", stop);
-      process.once("SIGTERM", stop);
-      process.exitCode = await child.exited;
-      break;
-    }
     case "check": {
       await run(["bunx", "--no-install", "biome", "check", "."]);
       await run(["bunx", "--no-install", "buf", "lint"]);

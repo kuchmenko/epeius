@@ -21,55 +21,6 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-type Environment int32
-
-const (
-	Environment_ENVIRONMENT_UNSPECIFIED  Environment = 0
-	Environment_ENVIRONMENT_BASE_MAINNET Environment = 1
-	Environment_ENVIRONMENT_BASE_SEPOLIA Environment = 2
-)
-
-// Enum value maps for Environment.
-var (
-	Environment_name = map[int32]string{
-		0: "ENVIRONMENT_UNSPECIFIED",
-		1: "ENVIRONMENT_BASE_MAINNET",
-		2: "ENVIRONMENT_BASE_SEPOLIA",
-	}
-	Environment_value = map[string]int32{
-		"ENVIRONMENT_UNSPECIFIED":  0,
-		"ENVIRONMENT_BASE_MAINNET": 1,
-		"ENVIRONMENT_BASE_SEPOLIA": 2,
-	}
-)
-
-func (x Environment) Enum() *Environment {
-	p := new(Environment)
-	*p = x
-	return p
-}
-
-func (x Environment) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (Environment) Descriptor() protoreflect.EnumDescriptor {
-	return file_epeius_quote_v1_quote_proto_enumTypes[0].Descriptor()
-}
-
-func (Environment) Type() protoreflect.EnumType {
-	return &file_epeius_quote_v1_quote_proto_enumTypes[0]
-}
-
-func (x Environment) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use Environment.Descriptor instead.
-func (Environment) EnumDescriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{0}
-}
-
 type PreparationStatus int32
 
 const (
@@ -109,11 +60,11 @@ func (x PreparationStatus) String() string {
 }
 
 func (PreparationStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_epeius_quote_v1_quote_proto_enumTypes[1].Descriptor()
+	return file_epeius_quote_v1_quote_proto_enumTypes[0].Descriptor()
 }
 
 func (PreparationStatus) Type() protoreflect.EnumType {
-	return &file_epeius_quote_v1_quote_proto_enumTypes[1]
+	return &file_epeius_quote_v1_quote_proto_enumTypes[0]
 }
 
 func (x PreparationStatus) Number() protoreflect.EnumNumber {
@@ -122,27 +73,258 @@ func (x PreparationStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PreparationStatus.Descriptor instead.
 func (PreparationStatus) EnumDescriptor() ([]byte, []int) {
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{0}
+}
+
+type GetStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetStatusRequest) Reset() {
+	*x = GetStatusRequest{}
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetStatusRequest) ProtoMessage() {}
+
+func (x *GetStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetStatusRequest) Descriptor() ([]byte, []int) {
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{0}
+}
+
+type Token struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Symbol        string                 `protobuf:"bytes,2,opt,name=symbol,proto3" json:"symbol,omitempty"`
+	Decimals      uint32                 `protobuf:"varint,3,opt,name=decimals,proto3" json:"decimals,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Token) Reset() {
+	*x = Token{}
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Token) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Token) ProtoMessage() {}
+
+func (x *Token) ProtoReflect() protoreflect.Message {
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Token.ProtoReflect.Descriptor instead.
+func (*Token) Descriptor() ([]byte, []int) {
 	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{1}
 }
 
+func (x *Token) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *Token) GetSymbol() string {
+	if x != nil {
+		return x.Symbol
+	}
+	return ""
+}
+
+func (x *Token) GetDecimals() uint32 {
+	if x != nil {
+		return x.Decimals
+	}
+	return 0
+}
+
+type ChainStatus struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Key     string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	ChainId string                 `protobuf:"bytes,2,opt,name=chain_id,json=chainId,proto3" json:"chain_id,omitempty"`
+	// Connectivity verified at startup, not a continuous health check.
+	Connected        bool          `protobuf:"varint,3,opt,name=connected,proto3" json:"connected,omitempty"`
+	Error            string        `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	QuotingSupported bool          `protobuf:"varint,5,opt,name=quoting_supported,json=quotingSupported,proto3" json:"quoting_supported,omitempty"`
+	Tokens           []*Token      `protobuf:"bytes,6,rep,name=tokens,proto3" json:"tokens,omitempty"`
+	Block            *BlockContext `protobuf:"bytes,7,opt,name=block,proto3" json:"block,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ChainStatus) Reset() {
+	*x = ChainStatus{}
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChainStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChainStatus) ProtoMessage() {}
+
+func (x *ChainStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChainStatus.ProtoReflect.Descriptor instead.
+func (*ChainStatus) Descriptor() ([]byte, []int) {
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ChainStatus) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *ChainStatus) GetChainId() string {
+	if x != nil {
+		return x.ChainId
+	}
+	return ""
+}
+
+func (x *ChainStatus) GetConnected() bool {
+	if x != nil {
+		return x.Connected
+	}
+	return false
+}
+
+func (x *ChainStatus) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *ChainStatus) GetQuotingSupported() bool {
+	if x != nil {
+		return x.QuotingSupported
+	}
+	return false
+}
+
+func (x *ChainStatus) GetTokens() []*Token {
+	if x != nil {
+		return x.Tokens
+	}
+	return nil
+}
+
+func (x *ChainStatus) GetBlock() *BlockContext {
+	if x != nil {
+		return x.Block
+	}
+	return nil
+}
+
+type GetStatusResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Chains        []*ChainStatus         `protobuf:"bytes,1,rep,name=chains,proto3" json:"chains,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetStatusResponse) Reset() {
+	*x = GetStatusResponse{}
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetStatusResponse) ProtoMessage() {}
+
+func (x *GetStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetStatusResponse) Descriptor() ([]byte, []int) {
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *GetStatusResponse) GetChains() []*ChainStatus {
+	if x != nil {
+		return x.Chains
+	}
+	return nil
+}
+
 type QuoteRequest struct {
-	state       protoimpl.MessageState `protogen:"open.v1"`
-	Environment Environment            `protobuf:"varint,1,opt,name=environment,proto3,enum=epeius.quote.v1.Environment" json:"environment,omitempty"`
-	Sender      string                 `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
-	Recipient   string                 `protobuf:"bytes,3,opt,name=recipient,proto3" json:"recipient,omitempty"`
-	TokenIn     string                 `protobuf:"bytes,4,opt,name=token_in,json=tokenIn,proto3" json:"token_in,omitempty"`
-	TokenOut    string                 `protobuf:"bytes,5,opt,name=token_out,json=tokenOut,proto3" json:"token_out,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	TokenIn  string                 `protobuf:"bytes,4,opt,name=token_in,json=tokenIn,proto3" json:"token_in,omitempty"`
+	TokenOut string                 `protobuf:"bytes,5,opt,name=token_out,json=tokenOut,proto3" json:"token_out,omitempty"`
 	// Positive base-10 integer in the input token's smallest unit.
 	AmountInAtomic string `protobuf:"bytes,6,opt,name=amount_in_atomic,json=amountInAtomic,proto3" json:"amount_in_atomic,omitempty"`
-	SlippageBps    uint32 `protobuf:"varint,7,opt,name=slippage_bps,json=slippageBps,proto3" json:"slippage_bps,omitempty"`
 	SearchBudgetMs uint32 `protobuf:"varint,8,opt,name=search_budget_ms,json=searchBudgetMs,proto3" json:"search_budget_ms,omitempty"`
+	Chain          string `protobuf:"bytes,9,opt,name=chain,proto3" json:"chain,omitempty"`
+	ChainId        string `protobuf:"bytes,10,opt,name=chain_id,json=chainId,proto3" json:"chain_id,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
 func (x *QuoteRequest) Reset() {
 	*x = QuoteRequest{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[0]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -154,7 +336,7 @@ func (x *QuoteRequest) String() string {
 func (*QuoteRequest) ProtoMessage() {}
 
 func (x *QuoteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[0]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -167,28 +349,7 @@ func (x *QuoteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuoteRequest.ProtoReflect.Descriptor instead.
 func (*QuoteRequest) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{0}
-}
-
-func (x *QuoteRequest) GetEnvironment() Environment {
-	if x != nil {
-		return x.Environment
-	}
-	return Environment_ENVIRONMENT_UNSPECIFIED
-}
-
-func (x *QuoteRequest) GetSender() string {
-	if x != nil {
-		return x.Sender
-	}
-	return ""
-}
-
-func (x *QuoteRequest) GetRecipient() string {
-	if x != nil {
-		return x.Recipient
-	}
-	return ""
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *QuoteRequest) GetTokenIn() string {
@@ -212,18 +373,25 @@ func (x *QuoteRequest) GetAmountInAtomic() string {
 	return ""
 }
 
-func (x *QuoteRequest) GetSlippageBps() uint32 {
-	if x != nil {
-		return x.SlippageBps
-	}
-	return 0
-}
-
 func (x *QuoteRequest) GetSearchBudgetMs() uint32 {
 	if x != nil {
 		return x.SearchBudgetMs
 	}
 	return 0
+}
+
+func (x *QuoteRequest) GetChain() string {
+	if x != nil {
+		return x.Chain
+	}
+	return ""
+}
+
+func (x *QuoteRequest) GetChainId() string {
+	if x != nil {
+		return x.ChainId
+	}
+	return ""
 }
 
 type BlockContext struct {
@@ -236,7 +404,7 @@ type BlockContext struct {
 
 func (x *BlockContext) Reset() {
 	*x = BlockContext{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[1]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -248,7 +416,7 @@ func (x *BlockContext) String() string {
 func (*BlockContext) ProtoMessage() {}
 
 func (x *BlockContext) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[1]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -261,7 +429,7 @@ func (x *BlockContext) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockContext.ProtoReflect.Descriptor instead.
 func (*BlockContext) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{1}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *BlockContext) GetNumber() string {
@@ -291,7 +459,7 @@ type RouteLeg struct {
 
 func (x *RouteLeg) Reset() {
 	*x = RouteLeg{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[2]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -303,7 +471,7 @@ func (x *RouteLeg) String() string {
 func (*RouteLeg) ProtoMessage() {}
 
 func (x *RouteLeg) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[2]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -316,7 +484,7 @@ func (x *RouteLeg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteLeg.ProtoReflect.Descriptor instead.
 func (*RouteLeg) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{2}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RouteLeg) GetPool() string {
@@ -364,7 +532,7 @@ type RouteQuote struct {
 
 func (x *RouteQuote) Reset() {
 	*x = RouteQuote{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[3]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -376,7 +544,7 @@ func (x *RouteQuote) String() string {
 func (*RouteQuote) ProtoMessage() {}
 
 func (x *RouteQuote) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[3]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -389,7 +557,7 @@ func (x *RouteQuote) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteQuote.ProtoReflect.Descriptor instead.
 func (*RouteQuote) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{3}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RouteQuote) GetRouteId() string {
@@ -459,7 +627,7 @@ type ProviderError struct {
 
 func (x *ProviderError) Reset() {
 	*x = ProviderError{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[4]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -471,7 +639,7 @@ func (x *ProviderError) String() string {
 func (*ProviderError) ProtoMessage() {}
 
 func (x *ProviderError) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[4]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -484,7 +652,7 @@ func (x *ProviderError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderError.ProtoReflect.Descriptor instead.
 func (*ProviderError) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{4}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ProviderError) GetProvider() string {
@@ -523,7 +691,7 @@ type QuoteFinal struct {
 
 func (x *QuoteFinal) Reset() {
 	*x = QuoteFinal{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[5]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -535,7 +703,7 @@ func (x *QuoteFinal) String() string {
 func (*QuoteFinal) ProtoMessage() {}
 
 func (x *QuoteFinal) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[5]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -548,7 +716,7 @@ func (x *QuoteFinal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuoteFinal.ProtoReflect.Descriptor instead.
 func (*QuoteFinal) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{5}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *QuoteFinal) GetQuoteId() string {
@@ -607,7 +775,7 @@ type QuoteEvent struct {
 
 func (x *QuoteEvent) Reset() {
 	*x = QuoteEvent{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[6]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -619,7 +787,7 @@ func (x *QuoteEvent) String() string {
 func (*QuoteEvent) ProtoMessage() {}
 
 func (x *QuoteEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[6]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -632,7 +800,7 @@ func (x *QuoteEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuoteEvent.ProtoReflect.Descriptor instead.
 func (*QuoteEvent) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{6}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *QuoteEvent) GetEvent() isQuoteEvent_Event {
@@ -701,7 +869,7 @@ type PrepareExecutionRequest struct {
 
 func (x *PrepareExecutionRequest) Reset() {
 	*x = PrepareExecutionRequest{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[7]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -713,7 +881,7 @@ func (x *PrepareExecutionRequest) String() string {
 func (*PrepareExecutionRequest) ProtoMessage() {}
 
 func (x *PrepareExecutionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[7]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -726,7 +894,7 @@ func (x *PrepareExecutionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareExecutionRequest.ProtoReflect.Descriptor instead.
 func (*PrepareExecutionRequest) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{7}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PrepareExecutionRequest) GetQuoteId() string {
@@ -755,7 +923,7 @@ type UnsignedTransaction struct {
 
 func (x *UnsignedTransaction) Reset() {
 	*x = UnsignedTransaction{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[8]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -767,7 +935,7 @@ func (x *UnsignedTransaction) String() string {
 func (*UnsignedTransaction) ProtoMessage() {}
 
 func (x *UnsignedTransaction) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[8]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -780,7 +948,7 @@ func (x *UnsignedTransaction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsignedTransaction.ProtoReflect.Descriptor instead.
 func (*UnsignedTransaction) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{8}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *UnsignedTransaction) GetChainId() string {
@@ -823,7 +991,7 @@ type PrepareExecutionResponse struct {
 
 func (x *PrepareExecutionResponse) Reset() {
 	*x = PrepareExecutionResponse{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[9]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -835,7 +1003,7 @@ func (x *PrepareExecutionResponse) String() string {
 func (*PrepareExecutionResponse) ProtoMessage() {}
 
 func (x *PrepareExecutionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[9]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -848,7 +1016,7 @@ func (x *PrepareExecutionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareExecutionResponse.ProtoReflect.Descriptor instead.
 func (*PrepareExecutionResponse) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{9}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PrepareExecutionResponse) GetStatus() PreparationStatus {
@@ -876,16 +1044,30 @@ var File_epeius_quote_v1_quote_proto protoreflect.FileDescriptor
 
 const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\n" +
-	"\x1bepeius/quote/v1/quote.proto\x12\x0fepeius.quote.v1\"\xb3\x02\n" +
-	"\fQuoteRequest\x12>\n" +
-	"\venvironment\x18\x01 \x01(\x0e2\x1c.epeius.quote.v1.EnvironmentR\venvironment\x12\x16\n" +
-	"\x06sender\x18\x02 \x01(\tR\x06sender\x12\x1c\n" +
-	"\trecipient\x18\x03 \x01(\tR\trecipient\x12\x19\n" +
+	"\x1bepeius/quote/v1/quote.proto\x12\x0fepeius.quote.v1\"\x12\n" +
+	"\x10GetStatusRequest\"U\n" +
+	"\x05Token\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
+	"\x06symbol\x18\x02 \x01(\tR\x06symbol\x12\x1a\n" +
+	"\bdecimals\x18\x03 \x01(\rR\bdecimals\"\x80\x02\n" +
+	"\vChainStatus\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x19\n" +
+	"\bchain_id\x18\x02 \x01(\tR\achainId\x12\x1c\n" +
+	"\tconnected\x18\x03 \x01(\bR\tconnected\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12+\n" +
+	"\x11quoting_supported\x18\x05 \x01(\bR\x10quotingSupported\x12.\n" +
+	"\x06tokens\x18\x06 \x03(\v2\x16.epeius.quote.v1.TokenR\x06tokens\x123\n" +
+	"\x05block\x18\a \x01(\v2\x1d.epeius.quote.v1.BlockContextR\x05block\"I\n" +
+	"\x11GetStatusResponse\x124\n" +
+	"\x06chains\x18\x01 \x03(\v2\x1c.epeius.quote.v1.ChainStatusR\x06chains\"\x91\x02\n" +
+	"\fQuoteRequest\x12\x19\n" +
 	"\btoken_in\x18\x04 \x01(\tR\atokenIn\x12\x1b\n" +
 	"\ttoken_out\x18\x05 \x01(\tR\btokenOut\x12(\n" +
-	"\x10amount_in_atomic\x18\x06 \x01(\tR\x0eamountInAtomic\x12!\n" +
-	"\fslippage_bps\x18\a \x01(\rR\vslippageBps\x12(\n" +
-	"\x10search_budget_ms\x18\b \x01(\rR\x0esearchBudgetMs\":\n" +
+	"\x10amount_in_atomic\x18\x06 \x01(\tR\x0eamountInAtomic\x12(\n" +
+	"\x10search_budget_ms\x18\b \x01(\rR\x0esearchBudgetMs\x12\x14\n" +
+	"\x05chain\x18\t \x01(\tR\x05chain\x12\x19\n" +
+	"\bchain_id\x18\n" +
+	" \x01(\tR\achainIdJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x03\x10\x04J\x04\b\a\x10\bR\venvironmentR\x06senderR\trecipientR\fslippage_bps\":\n" +
 	"\fBlockContext\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\tR\x06number\x12\x12\n" +
 	"\x04hash\x18\x02 \x01(\tR\x04hash\"q\n" +
@@ -938,18 +1120,15 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\x18PrepareExecutionResponse\x12:\n" +
 	"\x06status\x18\x01 \x01(\x0e2\".epeius.quote.v1.PreparationStatusR\x06status\x12F\n" +
 	"\vtransaction\x18\x02 \x01(\v2$.epeius.quote.v1.UnsignedTransactionR\vtransaction\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage*f\n" +
-	"\vEnvironment\x12\x1b\n" +
-	"\x17ENVIRONMENT_UNSPECIFIED\x10\x00\x12\x1c\n" +
-	"\x18ENVIRONMENT_BASE_MAINNET\x10\x01\x12\x1c\n" +
-	"\x18ENVIRONMENT_BASE_SEPOLIA\x10\x02*\xc9\x01\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage*\xc9\x01\n" +
 	"\x11PreparationStatus\x12\"\n" +
 	"\x1ePREPARATION_STATUS_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18PREPARATION_STATUS_READY\x10\x01\x12(\n" +
 	"$PREPARATION_STATUS_APPROVAL_REQUIRED\x10\x02\x12'\n" +
 	"#PREPARATION_STATUS_REQUOTE_REQUIRED\x10\x03\x12\x1f\n" +
-	"\x1bPREPARATION_STATUS_REJECTED\x10\x042\x8c\x02\n" +
-	"\fQuoteService\x12F\n" +
+	"\x1bPREPARATION_STATUS_REJECTED\x10\x042\xe0\x02\n" +
+	"\fQuoteService\x12R\n" +
+	"\tGetStatus\x12!.epeius.quote.v1.GetStatusRequest\x1a\".epeius.quote.v1.GetStatusResponse\x12F\n" +
 	"\bGetQuote\x12\x1d.epeius.quote.v1.QuoteRequest\x1a\x1b.epeius.quote.v1.QuoteFinal\x12K\n" +
 	"\vStreamQuote\x12\x1d.epeius.quote.v1.QuoteRequest\x1a\x1b.epeius.quote.v1.QuoteEvent0\x01\x12g\n" +
 	"\x10PrepareExecution\x12(.epeius.quote.v1.PrepareExecutionRequest\x1a).epeius.quote.v1.PrepareExecutionResponseBBZ@github.com/kuchmenko/epeius/generated/go/epeius/quote/v1;quotev1b\x06proto3"
@@ -966,45 +1145,52 @@ func file_epeius_quote_v1_quote_proto_rawDescGZIP() []byte {
 	return file_epeius_quote_v1_quote_proto_rawDescData
 }
 
-var file_epeius_quote_v1_quote_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_epeius_quote_v1_quote_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_epeius_quote_v1_quote_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_epeius_quote_v1_quote_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_epeius_quote_v1_quote_proto_goTypes = []any{
-	(Environment)(0),                 // 0: epeius.quote.v1.Environment
-	(PreparationStatus)(0),           // 1: epeius.quote.v1.PreparationStatus
-	(*QuoteRequest)(nil),             // 2: epeius.quote.v1.QuoteRequest
-	(*BlockContext)(nil),             // 3: epeius.quote.v1.BlockContext
-	(*RouteLeg)(nil),                 // 4: epeius.quote.v1.RouteLeg
-	(*RouteQuote)(nil),               // 5: epeius.quote.v1.RouteQuote
-	(*ProviderError)(nil),            // 6: epeius.quote.v1.ProviderError
-	(*QuoteFinal)(nil),               // 7: epeius.quote.v1.QuoteFinal
-	(*QuoteEvent)(nil),               // 8: epeius.quote.v1.QuoteEvent
-	(*PrepareExecutionRequest)(nil),  // 9: epeius.quote.v1.PrepareExecutionRequest
-	(*UnsignedTransaction)(nil),      // 10: epeius.quote.v1.UnsignedTransaction
-	(*PrepareExecutionResponse)(nil), // 11: epeius.quote.v1.PrepareExecutionResponse
+	(PreparationStatus)(0),           // 0: epeius.quote.v1.PreparationStatus
+	(*GetStatusRequest)(nil),         // 1: epeius.quote.v1.GetStatusRequest
+	(*Token)(nil),                    // 2: epeius.quote.v1.Token
+	(*ChainStatus)(nil),              // 3: epeius.quote.v1.ChainStatus
+	(*GetStatusResponse)(nil),        // 4: epeius.quote.v1.GetStatusResponse
+	(*QuoteRequest)(nil),             // 5: epeius.quote.v1.QuoteRequest
+	(*BlockContext)(nil),             // 6: epeius.quote.v1.BlockContext
+	(*RouteLeg)(nil),                 // 7: epeius.quote.v1.RouteLeg
+	(*RouteQuote)(nil),               // 8: epeius.quote.v1.RouteQuote
+	(*ProviderError)(nil),            // 9: epeius.quote.v1.ProviderError
+	(*QuoteFinal)(nil),               // 10: epeius.quote.v1.QuoteFinal
+	(*QuoteEvent)(nil),               // 11: epeius.quote.v1.QuoteEvent
+	(*PrepareExecutionRequest)(nil),  // 12: epeius.quote.v1.PrepareExecutionRequest
+	(*UnsignedTransaction)(nil),      // 13: epeius.quote.v1.UnsignedTransaction
+	(*PrepareExecutionResponse)(nil), // 14: epeius.quote.v1.PrepareExecutionResponse
 }
 var file_epeius_quote_v1_quote_proto_depIdxs = []int32{
-	0,  // 0: epeius.quote.v1.QuoteRequest.environment:type_name -> epeius.quote.v1.Environment
-	4,  // 1: epeius.quote.v1.RouteQuote.legs:type_name -> epeius.quote.v1.RouteLeg
-	3,  // 2: epeius.quote.v1.RouteQuote.block:type_name -> epeius.quote.v1.BlockContext
-	5,  // 3: epeius.quote.v1.QuoteFinal.routes:type_name -> epeius.quote.v1.RouteQuote
-	6,  // 4: epeius.quote.v1.QuoteFinal.errors:type_name -> epeius.quote.v1.ProviderError
-	3,  // 5: epeius.quote.v1.QuoteFinal.block:type_name -> epeius.quote.v1.BlockContext
-	5,  // 6: epeius.quote.v1.QuoteEvent.quote:type_name -> epeius.quote.v1.RouteQuote
-	6,  // 7: epeius.quote.v1.QuoteEvent.error:type_name -> epeius.quote.v1.ProviderError
-	7,  // 8: epeius.quote.v1.QuoteEvent.final:type_name -> epeius.quote.v1.QuoteFinal
-	1,  // 9: epeius.quote.v1.PrepareExecutionResponse.status:type_name -> epeius.quote.v1.PreparationStatus
-	10, // 10: epeius.quote.v1.PrepareExecutionResponse.transaction:type_name -> epeius.quote.v1.UnsignedTransaction
-	2,  // 11: epeius.quote.v1.QuoteService.GetQuote:input_type -> epeius.quote.v1.QuoteRequest
-	2,  // 12: epeius.quote.v1.QuoteService.StreamQuote:input_type -> epeius.quote.v1.QuoteRequest
-	9,  // 13: epeius.quote.v1.QuoteService.PrepareExecution:input_type -> epeius.quote.v1.PrepareExecutionRequest
-	7,  // 14: epeius.quote.v1.QuoteService.GetQuote:output_type -> epeius.quote.v1.QuoteFinal
-	8,  // 15: epeius.quote.v1.QuoteService.StreamQuote:output_type -> epeius.quote.v1.QuoteEvent
-	11, // 16: epeius.quote.v1.QuoteService.PrepareExecution:output_type -> epeius.quote.v1.PrepareExecutionResponse
-	14, // [14:17] is the sub-list for method output_type
-	11, // [11:14] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	2,  // 0: epeius.quote.v1.ChainStatus.tokens:type_name -> epeius.quote.v1.Token
+	6,  // 1: epeius.quote.v1.ChainStatus.block:type_name -> epeius.quote.v1.BlockContext
+	3,  // 2: epeius.quote.v1.GetStatusResponse.chains:type_name -> epeius.quote.v1.ChainStatus
+	7,  // 3: epeius.quote.v1.RouteQuote.legs:type_name -> epeius.quote.v1.RouteLeg
+	6,  // 4: epeius.quote.v1.RouteQuote.block:type_name -> epeius.quote.v1.BlockContext
+	8,  // 5: epeius.quote.v1.QuoteFinal.routes:type_name -> epeius.quote.v1.RouteQuote
+	9,  // 6: epeius.quote.v1.QuoteFinal.errors:type_name -> epeius.quote.v1.ProviderError
+	6,  // 7: epeius.quote.v1.QuoteFinal.block:type_name -> epeius.quote.v1.BlockContext
+	8,  // 8: epeius.quote.v1.QuoteEvent.quote:type_name -> epeius.quote.v1.RouteQuote
+	9,  // 9: epeius.quote.v1.QuoteEvent.error:type_name -> epeius.quote.v1.ProviderError
+	10, // 10: epeius.quote.v1.QuoteEvent.final:type_name -> epeius.quote.v1.QuoteFinal
+	0,  // 11: epeius.quote.v1.PrepareExecutionResponse.status:type_name -> epeius.quote.v1.PreparationStatus
+	13, // 12: epeius.quote.v1.PrepareExecutionResponse.transaction:type_name -> epeius.quote.v1.UnsignedTransaction
+	1,  // 13: epeius.quote.v1.QuoteService.GetStatus:input_type -> epeius.quote.v1.GetStatusRequest
+	5,  // 14: epeius.quote.v1.QuoteService.GetQuote:input_type -> epeius.quote.v1.QuoteRequest
+	5,  // 15: epeius.quote.v1.QuoteService.StreamQuote:input_type -> epeius.quote.v1.QuoteRequest
+	12, // 16: epeius.quote.v1.QuoteService.PrepareExecution:input_type -> epeius.quote.v1.PrepareExecutionRequest
+	4,  // 17: epeius.quote.v1.QuoteService.GetStatus:output_type -> epeius.quote.v1.GetStatusResponse
+	10, // 18: epeius.quote.v1.QuoteService.GetQuote:output_type -> epeius.quote.v1.QuoteFinal
+	11, // 19: epeius.quote.v1.QuoteService.StreamQuote:output_type -> epeius.quote.v1.QuoteEvent
+	14, // 20: epeius.quote.v1.QuoteService.PrepareExecution:output_type -> epeius.quote.v1.PrepareExecutionResponse
+	17, // [17:21] is the sub-list for method output_type
+	13, // [13:17] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_epeius_quote_v1_quote_proto_init() }
@@ -1012,10 +1198,10 @@ func file_epeius_quote_v1_quote_proto_init() {
 	if File_epeius_quote_v1_quote_proto != nil {
 		return
 	}
-	file_epeius_quote_v1_quote_proto_msgTypes[3].OneofWrappers = []any{}
-	file_epeius_quote_v1_quote_proto_msgTypes[4].OneofWrappers = []any{}
-	file_epeius_quote_v1_quote_proto_msgTypes[5].OneofWrappers = []any{}
-	file_epeius_quote_v1_quote_proto_msgTypes[6].OneofWrappers = []any{
+	file_epeius_quote_v1_quote_proto_msgTypes[7].OneofWrappers = []any{}
+	file_epeius_quote_v1_quote_proto_msgTypes[8].OneofWrappers = []any{}
+	file_epeius_quote_v1_quote_proto_msgTypes[9].OneofWrappers = []any{}
+	file_epeius_quote_v1_quote_proto_msgTypes[10].OneofWrappers = []any{
 		(*QuoteEvent_Quote)(nil),
 		(*QuoteEvent_Error)(nil),
 		(*QuoteEvent_Final)(nil),
@@ -1025,8 +1211,8 @@ func file_epeius_quote_v1_quote_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_epeius_quote_v1_quote_proto_rawDesc), len(file_epeius_quote_v1_quote_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   10,
+			NumEnums:      1,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

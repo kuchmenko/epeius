@@ -27,9 +27,9 @@ func (f streamFixture) StreamQuote(ctx context.Context, req *connect.Request[quo
 	if err := stream.Send(&quotev1.QuoteEvent{Event: &quotev1.QuoteEvent_Quote{Quote: &quotev1.RouteQuote{RouteId: "route-a", AmountOutAtomic: "9007199254740993"}}}); err != nil {
 		return err
 	}
-	if req.Msg.Sender == "cancel" || req.Msg.Sender == "deadline" {
+	if req.Msg.Chain == "cancel" || req.Msg.Chain == "deadline" {
 		<-ctx.Done()
-		f.stopped <- req.Msg.Sender
+		f.stopped <- req.Msg.Chain
 		return ctx.Err()
 	}
 	if err := stream.Send(&quotev1.QuoteEvent{Event: &quotev1.QuoteEvent_Error{Error: &quotev1.ProviderError{Provider: "second", Message: "test failure"}}}); err != nil {
@@ -51,14 +51,14 @@ func TestBunConnectTransport(t *testing.T) {
 		},
 	}
 	mux := http.NewServeMux()
-	path, actual := quotev1connect.NewQuoteServiceHandler(Handler{Client: reader, Environment: quotev1.Environment_ENVIRONMENT_BASE_MAINNET})
+	path, actual := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader}}})
 	mux.Handle(path, actual)
 	reader.call = func(ctx context.Context, _ common.Address, _ []byte, _ common.Hash) ([]byte, error) {
 		<-ctx.Done()
 		unaryStopped <- struct{}{}
 		return nil, ctx.Err()
 	}
-	_, slow := quotev1connect.NewQuoteServiceHandler(Handler{Client: reader, Environment: quotev1.Environment_ENVIRONMENT_BASE_MAINNET})
+	_, slow := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader}}})
 	mux.Handle("/slow/", http.StripPrefix("/slow", slow))
 	reader.call = func(ctx context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
 		if calldataFee(data) != 100 {
@@ -70,7 +70,7 @@ func TestBunConnectTransport(t *testing.T) {
 		}
 		return quoteResponse(987654321), nil
 	}
-	_, partial := quotev1connect.NewQuoteServiceHandler(Handler{Client: reader, Environment: quotev1.Environment_ENVIRONMENT_BASE_MAINNET})
+	_, partial := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader}}})
 	mux.Handle("/partial/", http.StripPrefix("/partial", partial))
 	_, fixture := quotev1connect.NewQuoteServiceHandler(streamFixture{stopped: stopped})
 	mux.Handle("/fixture/", http.StripPrefix("/fixture", fixture))

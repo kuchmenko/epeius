@@ -15,7 +15,7 @@ import (
 )
 
 type Snapshot struct {
-	Environment string `json:"environment"`
+	Key         string `json:"key"`
 	ChainID     string `json:"chainId"`
 	BlockNumber string `json:"blockNumber"`
 	BlockHash   string `json:"blockHash"`
@@ -23,30 +23,21 @@ type Snapshot struct {
 
 type Client struct {
 	*ethclient.Client
-	environment string
-	chainID     string
+	key     string
+	chainID string
 }
 
-func Open(ctx context.Context, environment, endpoint string) (*Client, Snapshot, error) {
-	expected := int64(0)
-	switch environment {
-	case "base-mainnet":
-		expected = 8453
-	case "base-sepolia":
-		expected = 84532
-	default:
-		return nil, Snapshot{}, errors.New("set EPEIUS_ENVIRONMENT to base-mainnet or base-sepolia")
-	}
+func Open(ctx context.Context, key string, expected int64, endpoint string) (*Client, Snapshot, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return nil, Snapshot{}, errors.New("set EPEIUS_RPC_URL to an HTTP or HTTPS RPC endpoint")
+		return nil, Snapshot{}, errors.New("RPC endpoint must be an HTTP or HTTPS URL")
 	}
 	if parsed.Scheme == "http" && parsed.Hostname() != "localhost" && !net.ParseIP(parsed.Hostname()).IsLoopback() {
-		return nil, Snapshot{}, errors.New("EPEIUS_RPC_URL must use HTTPS except for loopback endpoints")
+		return nil, Snapshot{}, errors.New("RPC endpoint must use HTTPS except for loopback endpoints")
 	}
 	client, err := ethclient.DialContext(ctx, endpoint)
 	if err != nil {
-		return nil, Snapshot{}, errors.New("could not connect to RPC; check EPEIUS_RPC_URL")
+		return nil, Snapshot{}, errors.New("could not connect to RPC; check its configured environment variable")
 	}
 	chainID, err := client.ChainID(ctx)
 	if err != nil {
@@ -55,9 +46,9 @@ func Open(ctx context.Context, environment, endpoint string) (*Client, Snapshot,
 	}
 	if !chainID.IsInt64() || chainID.Int64() != expected {
 		client.Close()
-		return nil, Snapshot{}, fmt.Errorf("RPC chain ID does not match %s (expected %d)", environment, expected)
+		return nil, Snapshot{}, fmt.Errorf("RPC chain ID does not match %s (expected %d)", key, expected)
 	}
-	verified := &Client{client, environment, chainID.String()}
+	verified := &Client{client, key, chainID.String()}
 	snapshot, err := verified.Snapshot(ctx)
 	if err != nil {
 		client.Close()
@@ -71,7 +62,7 @@ func (c *Client) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil || header == nil || header.Number == nil {
 		return Snapshot{}, readError(ctx, "latest block")
 	}
-	return Snapshot{c.environment, c.chainID, header.Number.String(), header.Hash().Hex()}, nil
+	return Snapshot{c.key, c.chainID, header.Number.String(), header.Hash().Hex()}, nil
 }
 
 func (c *Client) Call(ctx context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {

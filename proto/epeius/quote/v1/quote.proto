@@ -6,27 +6,45 @@ option go_package = "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1;qu
 
 // QuoteService is non-signing. Streaming and execution preparation are deferred.
 service QuoteService {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
   rpc GetQuote(QuoteRequest) returns (QuoteFinal);
   rpc StreamQuote(QuoteRequest) returns (stream QuoteEvent);
   rpc PrepareExecution(PrepareExecutionRequest) returns (PrepareExecutionResponse);
 }
 
-enum Environment {
-  ENVIRONMENT_UNSPECIFIED = 0;
-  ENVIRONMENT_BASE_MAINNET = 1;
-  ENVIRONMENT_BASE_SEPOLIA = 2;
+message GetStatusRequest {}
+
+message Token {
+  string address = 1;
+  string symbol = 2;
+  uint32 decimals = 3;
+}
+
+message ChainStatus {
+  string key = 1;
+  string chain_id = 2;
+  // Connectivity verified at startup, not a continuous health check.
+  bool connected = 3;
+  string error = 4;
+  bool quoting_supported = 5;
+  repeated Token tokens = 6;
+  BlockContext block = 7;
+}
+
+message GetStatusResponse {
+  repeated ChainStatus chains = 1;
 }
 
 message QuoteRequest {
-  Environment environment = 1;
-  string sender = 2;
-  string recipient = 3;
+  reserved 1, 2, 3, 7;
+  reserved "environment", "sender", "recipient", "slippage_bps";
   string token_in = 4;
   string token_out = 5;
   // Positive base-10 integer in the input token's smallest unit.
   string amount_in_atomic = 6;
-  uint32 slippage_bps = 7;
   uint32 search_budget_ms = 8;
+  string chain = 9;
+  string chain_id = 10;
 }
 
 message BlockContext {
