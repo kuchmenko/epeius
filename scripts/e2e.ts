@@ -19,6 +19,43 @@ export function scenarios(deployments: string[]) {
   );
 }
 
+// Persist submitted hashes as they arrive, before waiting for receipt verification.
+// Only the final event can establish success; an approval is not a completed swap.
+export async function recordExecution(
+  stdout: AsyncIterable<Uint8Array>,
+  exited: Promise<number>,
+  kind: "approval" | "swap",
+  record: (result: Record<string, unknown>) => Promise<void>,
+) {
+  let pending = "";
+  let last:
+    | { transactionHash?: string; verification?: { outcome?: string } }
+    | undefined;
+  const decoder = new TextDecoder();
+  for await (const chunk of stdout) {
+    pending += decoder.decode(chunk, { stream: true });
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const result = JSON.parse(line);
+      await record(result);
+      last = result;
+    }
+  }
+  pending += decoder.decode();
+  if (
+    (await exited) !== 0 ||
+    pending.trim() ||
+    !/^0x[0-9a-fA-F]{64}$/.test(last?.transactionHash ?? "") ||
+    last?.verification?.outcome !==
+      (kind === "swap" ? "passed" : "receipt_success")
+  )
+    throw new Error(
+      "Terminal execution did not pass. Inspect recorded hashes before any retry.",
+    );
+}
+
 async function main(args: string[]) {
   const { values } = parseArgs({
     args,
@@ -29,13 +66,14 @@ async function main(args: string[]) {
       keystore: { type: "string" },
       "password-file": { type: "string" },
       report: { type: "string" },
+      selection: { type: "boolean", default: false },
       broadcast: { type: "boolean", default: false },
       help: { type: "boolean" },
     },
   });
   if (values.help) {
     console.log(
-      "Usage: bun scripts/e2e.ts --config PATH [--chain KEY] [--broadcast --keystore PATH --password-file PATH] [--report PATH]\nWithout --broadcast, prints scenarios without network calls. Requires seeded harness fixture tokens A and C as scenario inputs, not a general token whitelist. Sends separate approvals and configured swaps; stops at first failure without resending.",
+      "Usage: bun scripts/e2e.ts --config PATH [--chain KEY] [--selection] [--broadcast --keystore PATH --password-file PATH] [--report PATH]\nWithout --broadcast, prints scenarios without network calls. Default: named deployment/hop/direction coverage. --selection: engine-selected trades in both directions, with interactive approval and swap confirmations. Requires seeded harness fixture tokens A and C as scenario inputs, not a general token whitelist. Stops at first failure without resending.",
     );
     return;
   }
@@ -69,14 +107,22 @@ async function main(args: string[]) {
       "Selected chain requires at least one configured deployment.",
     );
   const planned = scenarios(deployments.map(([id]) => id));
+  const selectedScenarios = [
+    { input: "A", output: "C" },
+    { input: "C", output: "A" },
+  ];
+  const plan = values.selection ? selectedScenarios : planned;
+  const track = values.selection ? "selection" : "coverage";
   if (!values.broadcast) {
     console.log(
-      JSON.stringify({ broadcast: false, scenarios: planned }, null, 2),
+      JSON.stringify({ broadcast: false, track, scenarios: plan }, null, 2),
     );
     return;
   }
   if (!values.keystore || !values["password-file"])
     throw new Error("Broadcast requires --keystore and --password-file.");
+  if (values.selection && !process.stdin.isTTY)
+    throw new Error("Selected-route trades require interactive confirmation.");
   const wallet = [
     "--keystore",
     values.keystore,
@@ -113,7 +159,50 @@ async function main(args: string[]) {
     throw new Error(
       "Engine must be connected and execution-enabled on selected chain.",
     );
-  await record({ event: "start", sender, reportPath, scenarios: planned });
+  await record({ event: "start", track, sender, reportPath, scenarios: plan });
+  if (values.selection) {
+    for (const scenario of selectedScenarios) {
+      const child = Bun.spawn(
+        [
+          "bun",
+          "apps/terminal/src/main.ts",
+          "trade",
+          "--chain",
+          remote.key,
+          "--config",
+          config.path,
+          "--in",
+          scenario.input,
+          "--out",
+          scenario.output,
+          "--amount",
+          "1",
+          "--slippage-bps",
+          "50",
+          "--search-budget-ms",
+          "15000",
+          ...wallet,
+        ],
+        {
+          cwd: resolve(import.meta.dir, ".."),
+          stdin: "inherit",
+          stdout: "pipe",
+          stderr: "inherit",
+        },
+      );
+      await recordExecution(
+        child.stdout,
+        child.exited,
+        "swap",
+        async (result) => {
+          await record({ event: "trade", scenario, result });
+        },
+      );
+      await record({ event: "scenario_passed", scenario });
+    }
+    await record({ event: "passed", track, count: selectedScenarios.length });
+    return;
+  }
   for (const scenario of planned) {
     const tokenIn = resolveToken(scenario.input, remote.tokens);
     const tokenOut = resolveToken(scenario.output, remote.tokens);
@@ -143,6 +232,9 @@ async function main(args: string[]) {
         scenario,
         quoteId: quote.quoteId,
         block: quote.block,
+        bestRouteId: quote.bestRouteId,
+        searchComplete: quote.searchComplete,
+        errors: quote.errors,
         route,
       });
       return { quote, route };
@@ -178,30 +270,14 @@ async function main(args: string[]) {
           stderr: "inherit",
         },
       );
-      // Persist each submitted hash before waiting for the receipt. Do not retry sends.
-      let pending = "";
-      let verified = false;
-      const decoder = new TextDecoder();
-      for await (const chunk of child.stdout) {
-        pending += decoder.decode(chunk, { stream: true });
-        const lines = pending.split("\n");
-        pending = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const result = JSON.parse(line);
+      await recordExecution(
+        child.stdout,
+        child.exited,
+        kind,
+        async (result) => {
           await record({ event: kind, scenario, result });
-          if (
-            /^0x[0-9a-fA-F]{64}$/.test(result.transactionHash ?? "") &&
-            result.verification?.outcome ===
-              (kind === "swap" ? "passed" : "receipt_success")
-          )
-            verified = true;
-        }
-      }
-      if ((await child.exited) !== 0 || !verified || pending.trim())
-        throw new Error(
-          "Terminal execution did not pass. Inspect recorded hashes before any retry.",
-        );
+        },
+      );
     };
     let selected = await freshQuote();
     const prepared = await client.prepareExecution(
@@ -225,7 +301,7 @@ async function main(args: string[]) {
     await execute(selected.quote.quoteId, selected.route.routeId, "swap");
     await record({ event: "scenario_passed", scenario });
   }
-  await record({ event: "passed", count: planned.length });
+  await record({ event: "passed", track, count: planned.length });
 }
 
 if (import.meta.main) {

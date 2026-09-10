@@ -102,6 +102,20 @@ The default profile's tokens A, B, and C use 18, 6, and 8 decimals. A/B/C are na
 
 Under the default profile, both venues receive A/B, B/C, and A/C pools. Fee-500 pools use a broad range for normal swaps. Narrow pools use Uniswap fee 3000 and Pancake fee 2500 for exhaustion tests. These pairs and fee lists come from `harness.toml`. Public testnet trades change pool state; reruns are new trades, not resets, and sequential outputs need not match.
 
+## Credential-free selected-route evidence
+
+After dependency installation and preparation above, run:
+
+```bash
+bun test scripts/e2e.test.ts scripts/testnet
+bunx --no-install tsc -p apps/terminal/tsconfig.json
+forge test --root contracts
+```
+
+The selected-route fixtures run the real terminal `runTrade`, `executePrepared`, receipt verification, and E2E JSONL reader. Engine responses, signing, RPC receipts, and confirmation answers are fixed test inputs. They prove the connection between the returned recommendation, selected route, fresh quote after approval, separate confirmation, and recorded quoted/simulated/actual amounts. They do not prove public-pool pricing, real signing, or interactive TTY input; terminal CLI tests and the opt-in run below cover those separate paths.
+
+The initial fixture recommends Uniswap at 12,000 atomic output over Pancake at 10,000. After approval, a different quote ID/block returns Uniswap at 11,000 and Pancake at 14,500, with an incomplete search. Auto mode selects fresh Pancake; manual Uniswap remains selected. Expected minimum, simulation, and actual outputs are fixed independently: auto 14,427 / 14,490 / 14,480; manual 10,945 / 10,990 / 10,980. The tests also decline the fresh swap and reject a second required approval, leaving only the first approval sent. Ranking and deterministic tie-breaking tests belong to the engine, not this fixture.
+
 ## Live E2E runner
 
 List four direction-and-hop scenarios per configured deployment without RPC calls, signer access, or sends. A and C remain the named seeded scenario inputs; they are not a general product allowlist:
@@ -115,10 +129,31 @@ Pass `--chain KEY` to select a configured runtime chain. Without it, the runner 
 After starting the engine and reviewing the plan:
 
 ```bash
-bun scripts/e2e.ts --config .testnet/runtime.toml --broadcast \
-  --keystore /local/path/terminal --password-file /local/path/password
+bun --env-file="$ENV_FILE" scripts/e2e.ts --config .testnet/runtime.toml --broadcast \
+  --keystore "$TERMINAL_KEYSTORE" --password-file "$TERMINAL_PASSWORD_FILE" \
+  --report .testnet/coverage-acceptance.jsonl
 ```
 
-Broadcast mode creates `.testnet/e2e-<timestamp>.jsonl` with mode 0600, or uses `--report PATH`. It prints the same JSONL events to stdout. Event order is `start`, then per-scenario `quote`, `preparation_preview`, terminal `approval` when needed, fresh `quote` after approval, terminal `swap`, and `scenario_passed`; final success is `passed` with count equal to four times the configured deployment count.
+Broadcast mode creates `.testnet/e2e-<timestamp>.jsonl` with mode 0600, or uses `--report PATH` (which must not exist). It prints the same JSONL events to stdout. Event order is `start`, then per-scenario `quote`, `preparation_preview`, terminal `approval` when needed, fresh `quote` after approval, terminal `swap`, and `scenario_passed`; final success is `passed` with `track: "coverage"` and count equal to four times the configured deployment count. Quote events include the pinned block, selected route, engine `bestRouteId`, search completeness, and errors. This matrix deliberately selects a named venue/hop route rather than the engine recommendation; it establishes execution coverage, not winner selection.
 
-Each terminal send records the submitted hash before waiting for receipt verification. Swap success requires `verification.outcome: "passed"`; approval requires `receipt_success`. Any missing route, rejected preparation, nonzero child exit, inconclusive receipt, malformed remaining output, or failed verification stops the run at the first scenario. Provider diagnostics are suppressed in the final runner error. Inspect the JSONL report and wallet transactions before rerunning; there is no automatic resend.
+Each terminal send records the submitted hash before waiting for receipt verification. Final swap success requires `verification.outcome: "passed"`; approval requires `receipt_success`. An earlier successful event cannot hide a later failure or cancellation. Any missing route, rejected preparation, nonzero child exit, inconclusive receipt, malformed remaining output, or failed verification stops the run at the first scenario. Provider diagnostics are suppressed in the final runner error. Inspect the JSONL report and wallet transactions before rerunning; there is no automatic resend.
+
+### Selected-route acceptance is a separate opt-in run
+
+`--selection` runs two real `trade` commands, A→C and C→A, instead of the named matrix. Both tracks are needed; selected-route success does not replace venue/hop coverage. Listing either plan remains credential-free:
+
+```bash
+bun scripts/e2e.ts --config .testnet/runtime.toml --selection
+
+# Only after transaction approval, from an interactive terminal:
+bun --env-file="$ENV_FILE" scripts/e2e.ts --config .testnet/runtime.toml \
+  --selection --broadcast \
+  --keystore "$TERMINAL_KEYSTORE" --password-file "$TERMINAL_PASSWORD_FILE" \
+  --report .testnet/selection-acceptance.jsonl
+```
+
+Review each displayed preparation and type `approval` or `swap` only for that transaction. The runner passes no confirmation flag and requires a TTY. A verified approval permits one fresh quote, not a swap authorization. Auto mode reselects the fresh engine recommendation; manual terminal `trade --route-id ID` keeps that route or fails if missing. The fresh route and amounts require another explicit swap confirmation. If the fresh winner still needs an approval, the flow stops instead of sending another approval or silently choosing another venue. Previously confirmed approval remains in place.
+
+Selected reports begin with `start` and `track: "selection"`. Each `trade` event wraps the terminal JSON under `result`: full `quote`, explicit `selection` (quote/route IDs, `source`, `searchComplete`, `basis: "raw_output"`, `afterApproval`), full `preparation` before confirmation, submitted hash, then verification. Compare `preparation.route.amountOutAtomic` (quoted), `preparation.simulatedAmountOutAtomic` (simulated at `simulationBlock`), and `verification.outputReceivedAtomic` (actual transaction transfers). Retain quote block/hash, preparation ID, transaction hash, and actual input spent as well. `scenario_passed` follows each verified swap; final `passed` count is 2. Confirmation cancellation is not success.
+
+The recommendation means highest gross output among returned successful routes, with deterministic candidate-order ties. All candidates remain visible. An incomplete search is not a global optimum; the report makes it explicit even when protobuf JSON omits a false `quote.searchComplete`. No network-cost or gas-optimal claim follows from these checks. Public pools change between transactions: do not assert fixed winners, equal sequential outputs, or same-state winner changes from live runs. The fixed fixtures above establish refresh-selection behavior without spending test ETH. A live run with existing allowance does not establish the approval-refresh path; inspect the recorded events rather than inferring that path from overall success.
