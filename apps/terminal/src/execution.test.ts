@@ -60,6 +60,7 @@ function prepared() {
       routeId: "r1",
       provider: "uniswap-v3",
       deploymentId: "uni",
+      amountOutAtomic: "198",
       legs: [
         {
           tokenIn: input,
@@ -118,6 +119,7 @@ function fixture() {
   const io: ExecutionIO = {
     signer: sender,
     expectedChainId,
+    slippageBps: 50,
     trusted,
     chainId: async () => expectedRpcChainId,
     prepare: async (id) => {
@@ -279,12 +281,12 @@ test("expired, rejected, and requote preparations fail closed", async () => {
   const p = prepared();
   p.expiresAtUnix = "100";
   expect(() =>
-    validatePreparation(p, sender, expectedChainId, trusted, 100),
+    validatePreparation(p, sender, expectedChainId, 50, trusted, 100),
   ).toThrow("expired");
   p.expiresAtUnix = "101";
   p.deadlineUnix = "100";
   expect(() =>
-    validatePreparation(p, sender, expectedChainId, trusted, 100),
+    validatePreparation(p, sender, expectedChainId, 50, trusted, 100),
   ).toThrow("expired");
 });
 
@@ -308,8 +310,159 @@ test("approval confirms separately, sends only exact approval and requires fresh
   });
   f.p.approvalTransaction.data = `0x095ea7b3${router.slice(2).padStart(64, "0")}${"f".repeat(64)}`;
   expect(() =>
-    validatePreparation(f.p, sender, expectedChainId, trusted),
+    validatePreparation(f.p, sender, expectedChainId, 50, trusted),
   ).toThrow("displayed input amount");
+});
+
+test("rejects uint256 overflow even when calldata matches the old encoder", () => {
+  const overflow = (1n << 260n).toString();
+  for (const status of [
+    PreparationStatus.READY,
+    PreparationStatus.APPROVAL_REQUIRED,
+  ]) {
+    const p = prepared();
+    const oldData = p.transaction?.data;
+    p.status = status;
+    p.amountInAtomic = overflow;
+    if (status === PreparationStatus.READY) {
+      p.deadlineUnix = overflow;
+      assert(p.transaction);
+      assert(oldData);
+      p.transaction.data = oldData
+        .replace(
+          (4102444800).toString(16).padStart(64, "0"),
+          BigInt(overflow).toString(16),
+        )
+        .replace(
+          (101).toString(16).padStart(64, "0"),
+          BigInt(overflow).toString(16),
+        );
+    } else {
+      p.approvalSpender = router;
+      assert(p.transaction);
+      p.approvalTransaction = {
+        ...p.transaction,
+        to: input,
+        data: `0x095ea7b3${router.slice(2).padStart(64, "0")}${BigInt(overflow).toString(16).padStart(64, "0")}`,
+      };
+      p.transaction = undefined;
+    }
+    expect(() =>
+      validatePreparation(p, sender, expectedChainId, 50, trusted),
+    ).toThrow("uint256");
+  }
+});
+
+test("accepts uint256 maximum and enforces saved quote slippage with rounding", () => {
+  const max = ((1n << 256n) - 1n).toString();
+  const boundary = prepared();
+  boundary.amountInAtomic = max;
+  boundary.deadlineUnix = max;
+  assert(boundary.transaction);
+  boundary.transaction.data = expectedSwapData(boundary, "uniswap-v3");
+  expect(
+    validatePreparation(boundary, sender, expectedChainId, 50, trusted),
+  ).toBe(boundary.transaction);
+
+  for (const [bps, minimum, quotedOutput] of [
+    [0, "198"],
+    [50, "197"],
+    [9999, "1", "10001"],
+  ] as const) {
+    const p = prepared();
+    p.amountOutMinimumAtomic = minimum;
+    if (quotedOutput) {
+      assert(p.route);
+      p.route.amountOutAtomic = quotedOutput;
+    }
+    assert(p.transaction);
+    p.transaction.data = expectedSwapData(p, "uniswap-v3");
+    expect(validatePreparation(p, sender, expectedChainId, bps, trusted)).toBe(
+      p.transaction,
+    );
+  }
+});
+
+test("every encoded amount and deadline rejects the first out-of-range uint256", () => {
+  for (const field of [
+    "amountInAtomic",
+    "amountOutMinimumAtomic",
+    "deadlineUnix",
+  ] as const) {
+    const p = prepared();
+    p[field] = (1n << 256n).toString();
+    expect(() => expectedSwapData(p, "uniswap-v3")).toThrow("uint256");
+    expect(() => expectedSwapData(p, "pancake-v3")).toThrow("uint256");
+    expect(() =>
+      validatePreparation(p, sender, expectedChainId, 50, trusted),
+    ).toThrow("uint256");
+  }
+});
+
+test("rejects malicious matching minimum, invalid bps, and invalid quoted output before send", async () => {
+  for (const invalidBps of [-1, 10000]) {
+    const f = fixture();
+    f.io.slippageBps = invalidBps;
+    await expect(executePrepared(f.io)).rejects.toThrow("slippage");
+    expect(f.sent).toHaveLength(0);
+  }
+  for (const amountOutAtomic of ["0", (1n << 256n).toString()]) {
+    const f = fixture();
+    assert(f.p.route);
+    f.p.route.amountOutAtomic = amountOutAtomic;
+    await expect(executePrepared(f.io)).rejects.toThrow("quoted output");
+    expect(f.sent).toHaveLength(0);
+  }
+  for (const status of [
+    PreparationStatus.READY,
+    PreparationStatus.APPROVAL_REQUIRED,
+  ]) {
+    const f = fixture();
+    f.p.amountOutMinimumAtomic = "1";
+    if (status === PreparationStatus.READY) {
+      assert(f.p.transaction);
+      f.p.transaction.data = expectedSwapData(f.p, "uniswap-v3");
+    } else {
+      f.p.status = status;
+      f.p.approvalSpender = router;
+      assert(f.p.transaction);
+      f.p.approvalTransaction = {
+        ...f.p.transaction,
+        to: input,
+        data: `0x095ea7b3${router.slice(2).padStart(64, "0")}${(101).toString(16).padStart(64, "0")}`,
+      };
+      f.p.transaction = undefined;
+    }
+    await expect(executePrepared(f.io)).rejects.toThrow("slippage minimum");
+    expect(f.sent).toHaveLength(0);
+  }
+});
+
+test("recheck cannot refresh saved route quote basis", async () => {
+  const f = fixture();
+  f.io.prepare = async (id) => {
+    const p = prepared();
+    if (id) p.simulatedAmountOutAtomic = "1000000";
+    return p;
+  };
+  expect(await executePrepared(f.io)).toBe(0);
+  expect(f.sent).toHaveLength(1);
+
+  const changed = fixture();
+  changed.io.prepare = async (id) => {
+    const p = prepared();
+    if (id) {
+      assert(p.route && p.transaction);
+      p.route.amountOutAtomic = "10000";
+      p.amountOutMinimumAtomic = "9950";
+      p.transaction.data = expectedSwapData(p, "uniswap-v3");
+    }
+    return p;
+  };
+  await expect(executePrepared(changed.io)).rejects.toThrow(
+    "changed after confirmation",
+  );
+  expect(changed.sent).toHaveLength(0);
 });
 
 test("locally encodes both router ABIs for one and two hop routes", () => {
@@ -324,7 +477,7 @@ test("locally encodes both router ABIs for one and two hop routes", () => {
       p.route.provider = kind;
       if (hops === 1) p.route.legs = [{ ...p.route.legs[0], tokenOut: output }];
       p.transaction.data = expectedSwapData(p, kind);
-      expect(validatePreparation(p, sender, expectedChainId, trusted)).toBe(
+      expect(validatePreparation(p, sender, expectedChainId, 50, trusted)).toBe(
         p.transaction,
       );
     }
@@ -417,7 +570,7 @@ test("rejects altered target, calldata, path, amount, deadline, recipient and ap
     const p = prepared();
     mutate(p);
     expect(() =>
-      validatePreparation(p, sender, expectedChainId, trusted),
+      validatePreparation(p, sender, expectedChainId, 50, trusted),
     ).toThrow();
   }
   const p = prepared();
@@ -431,7 +584,7 @@ test("rejects altered target, calldata, path, amount, deadline, recipient and ap
   };
   p.transaction = undefined;
   expect(() =>
-    validatePreparation(p, sender, expectedChainId, trusted),
+    validatePreparation(p, sender, expectedChainId, 50, trusted),
   ).toThrow("spender");
 });
 
@@ -546,6 +699,11 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
                   chainId: remoteChainId,
                   connected: true,
                   executionEnabled: enabled,
+                  tokens: [
+                    { address: input, symbol: "IN", decimals: 18 },
+                    { address: middle, symbol: "MID", decimals: 6 },
+                    { address: output, symbol: "OUT", decimals: 8 },
+                  ],
                 },
               ],
             }),
@@ -603,7 +761,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   const config = join(directory, "epeius.toml");
   await Bun.write(
     config,
-    `[terminal]\ndefault_chain='testnet'\nengine_url='${server.url}'\nsearch_budget_ms=2000\n[chains.testnet]\nchain_id=${expectedChainId}\nexecution_enabled=true\nrpc_url_env='EPEIUS_FIXTURE_RPC'\n[[chains.testnet.tokens]]\naddress='${input.slice(2)}'\n[[chains.testnet.tokens]]\naddress='${middle.slice(2)}'\n[[chains.testnet.tokens]]\naddress='${output.slice(2)}'\n[chains.testnet.deployments.uni]\nkind='uniswap-v3'\nrouter='${router.slice(2)}'\nfees=[500,3000]\n`,
+    `[terminal]\ndefault_chain='testnet'\nengine_url='${server.url}'\nsearch_budget_ms=2000\n[chains.testnet]\nchain_id=${expectedChainId}\nexecution_enabled=true\nrpc_url_env='EPEIUS_FIXTURE_RPC'\n[[chains.testnet.tokens]]\naddress='${input.slice(2)}'\nsymbol='IN'\ndecimals=18\n[[chains.testnet.tokens]]\naddress='${middle.slice(2)}'\nsymbol='MID'\ndecimals=6\n[[chains.testnet.tokens]]\naddress='${output.slice(2)}'\nsymbol='OUT'\ndecimals=8\n[chains.testnet.deployments.uni]\nkind='uniswap-v3'\nrouter='${router.slice(2)}'\nfees=[500,3000]\n`,
   );
   const rpc = `${server.url}secret-api-key`;
   const run = async (args: string[], rpcOverride = rpc) => {
@@ -668,7 +826,9 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
       (await calls()).filter((call) => call.args[0] === "send"),
     ).toHaveLength(0);
     remoteChainId = expectedChainId;
-    expect((await run(["prepare", "--slippage-bps", "9999"])).code).toBe(0);
+    expect((await run(["prepare", "--slippage-bps", "9999"])).err).toContain(
+      "slippage minimum",
+    );
     expect((await run(["prepare", "--slippage-bps", "10000"])).err).toContain(
       "0 through 9999",
     );

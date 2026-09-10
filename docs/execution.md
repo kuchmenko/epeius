@@ -20,6 +20,8 @@ An informational quote does not need a wallet and does not authorize execution. 
 
 Rechecking a preparation can update the simulation result, but cannot silently change the transaction's conditions. Changing the route, minimum output, or deadline requires a new preparation and confirmation. Preparations are held in memory; restarting the engine invalidates their identifiers.
 
+The terminal verifies the minimum against the requested `--slippage-bps`: `floor(route.amountOutAtomic * (10000 - slippageBps) / 10000)`. The basis is the saved route quote, not a refreshed simulation estimate. The minimum must remain positive. All encoded amounts and deadlines must fit `uint256`. These checks establish consistency with the displayed quote, not an independent fair-market price: the engine still supplies the quoted output.
+
 Application expiry and the on-chain deadline have different jobs. Application expiry limits how long the terminal accepts a preparation. The router checks the deadline against the block timestamp. Neither reserves pool liquidity or guarantees inclusion before expiry.
 
 Uniswap SwapRouter02's V3 swap tuples do not include a deadline. Its trusted `multicall(uint256,bytes[])` wrapper supplies that check. This router-local wrapper is not a new generic multicall contract. Pancake V3 includes a deadline in its swap parameters.

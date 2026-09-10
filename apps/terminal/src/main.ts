@@ -16,6 +16,7 @@ import {
   decimalToAtomic,
   parseAtomic,
   resolveToken,
+  trustChainTokens,
 } from "./tokens";
 
 const help = `Epeius — EVM quote terminal
@@ -148,24 +149,6 @@ export async function main(rawArgs: string[]) {
     console.log(help);
     return 0;
   }
-  const parsedCommand = globals(rawArgs).args[0];
-  for (const removed of [
-    "sender",
-    "recipient",
-    "environment",
-    ...(parsedCommand === "quote" ? ["slippage-bps"] : []),
-  ])
-    if (
-      rawArgs.some(
-        (arg) => arg === `--${removed}` || arg.startsWith(`--${removed}=`),
-      )
-    ) {
-      diagnostic(
-        new Error(`--${removed} was removed; delete it from this command.`),
-        rawArgs.includes("--json"),
-      );
-      return 1;
-    }
   let json = rawArgs.includes("--json");
   let quoting = false;
   const abort = new AbortController();
@@ -176,6 +159,20 @@ export async function main(rawArgs: string[]) {
     const parsed = globals(rawArgs);
     json = parsed.json;
     const [command, ...args] = parsed.args;
+    for (const removed of [
+      "sender",
+      "recipient",
+      "environment",
+      ...(command === "quote" ? ["slippage-bps"] : []),
+    ])
+      if (
+        rawArgs.some(
+          (arg) => arg === `--${removed}` || arg.startsWith(`--${removed}=`),
+        )
+      )
+        throw new Error(
+          `--${removed} was removed; delete it from this command.`,
+        );
     const config = await readConfig(parsed.config);
     if (command === "prepare" || command === "execute") {
       const values = options(args, [
@@ -207,6 +204,7 @@ export async function main(rawArgs: string[]) {
         status.chains,
         values.chain ?? config.defaultChain,
       );
+      trustChainTokens(chain, config.chains[chain.key]);
       if (!chain.executionEnabled || !chain.connected)
         throw new Error("Engine must enable execution on the connected chain.");
       return await executionCommand(
@@ -266,10 +264,11 @@ export async function main(rawArgs: string[]) {
       );
       return status.chains.every((chain) => chain.connected) ? 0 : 1;
     }
-    const chain = chainFromStatus(
+    let chain = chainFromStatus(
       status.chains,
       values.chain ?? config.defaultChain,
     );
+    chain = trustChainTokens(chain, config.chains[chain.key]);
     if (command === "tokens") {
       console.log(
         json ? toJsonString(ChainStatusSchema, chain) : formatTokens(chain),

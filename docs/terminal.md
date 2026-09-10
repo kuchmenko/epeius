@@ -65,6 +65,8 @@ Routes are deterministic search results, not best-to-worst rankings. Missing `be
 
 Read [Execution contract](execution.md) before sending. Requires Foundry `cast`, an encrypted keystore, a password file, Tenderly credentials, native gas, funded configured tokens, a positive `chain_id`, and `execution_enabled = true`. The local TOML chain ID must match engine status, the terminal RPC, and the prepared transaction. Tokens, deployment contracts, and pool fees are accepted only from TOML; addresses supplied as token input do not bypass that allowlist.
 
+Token addresses, symbols, and decimals reported by the engine must match the local chain token configuration before `tokens`, `quote`, `prepare`, or `execute` proceeds. Decimal conversion and quote formatting use this checked metadata, including when `--engine-url` selects a remote engine. Both decimal and atomic input modes enforce the check; `status` remains an informational view of the engine response.
+
 ```bash
 bun run terminal -- prepare --chain base-sepolia --config .testnet/runtime.toml \
   --quote-id QUOTE_ID --route-id ROUTE_ID --slippage-bps 50 \

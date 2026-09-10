@@ -2,9 +2,48 @@ import type {
   ChainStatus,
   Token,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import type { LocalChainConfig } from "./config";
 
 const UINT256_LIMIT = 1n << 256n;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+function normalizedAddress(value: string): string {
+  const prefixed = `0x${value.replace(/^0x/i, "")}`;
+  return ADDRESS.test(prefixed) ? prefixed.toLowerCase() : "";
+}
+
+export function trustChainTokens(
+  chain: ChainStatus,
+  local: LocalChainConfig | undefined,
+): ChainStatus {
+  if (!local)
+    throw new Error(`Chain ${chain.key} is missing from local config.`);
+  const trusted = chain.tokens.map((remote) => {
+    const address = normalizedAddress(remote.address);
+    const configured = local.tokens.find(
+      (token) => normalizedAddress(token.address) === address,
+    );
+    if (
+      !address ||
+      !configured ||
+      configured.symbol !== remote.symbol ||
+      configured.decimals !== remote.decimals
+    )
+      throw new Error(
+        `Engine token metadata for ${remote.symbol || remote.address} does not match local config.`,
+      );
+    return {
+      ...remote,
+      symbol: configured.symbol,
+      decimals: configured.decimals,
+    };
+  });
+  if (trusted.length !== local.tokens.length)
+    throw new Error(
+      `Engine token metadata for chain ${chain.key} does not match local config.`,
+    );
+  return { ...chain, tokens: trusted };
+}
 
 export function resolveToken(value: string, tokens: Token[]): Token {
   const matches = ADDRESS.test(value)

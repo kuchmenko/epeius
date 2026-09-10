@@ -56,17 +56,18 @@ test("token lookup is case-insensitive and rejects unknown or ambiguous values",
   );
 });
 
-test("config validates only terminal settings and sanitizes parse errors", async () => {
+test("config reads chain token metadata and sanitizes parse errors", async () => {
   const directory = await mkdtemp(join(tmpdir(), "epeius-terminal-"));
   try {
     const path = join(directory, "custom.toml");
     await Bun.write(
       path,
-      `[terminal]\ndefault_chain='base'\nengine_url='http://127.0.0.1:8080'\nsearch_budget_ms=2000\n[chains.bad]\nanything='is Go owned'\n`,
+      `[terminal]\ndefault_chain='base'\nengine_url='http://127.0.0.1:8080'\nsearch_budget_ms=2000\n[chains.base]\nchain_id=1\n[[chains.base.tokens]]\naddress='${"1".repeat(40)}'\nsymbol='AAA'\ndecimals=18\n`,
     );
     expect(await readConfig(path)).toMatchObject({
       defaultChain: "base",
       searchBudgetMs: 2000,
+      chains: { base: { tokens: [{ symbol: "AAA", decimals: 18 }] } },
     });
     await Bun.write(path, "secret = '");
     await expect(readConfig(path)).rejects.not.toThrow("secret");
@@ -111,12 +112,33 @@ test("help needs no config and removed flags give migration errors", async () =>
   }
 });
 
+test("missing global option values return guarded text and JSON errors", async () => {
+  for (const [args, json] of [
+    [["status", "--config"], false],
+    [["status", "--json", "--engine-url"], true],
+  ] as const) {
+    const child = Bun.spawn(["bun", "apps/terminal/src/main.ts", ...args], {
+      cwd: join(import.meta.dir, "../../.."),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const error = await new Response(child.stderr).text();
+    expect(await child.exited).toBe(1);
+    expect(error).not.toContain("apps/terminal/src/main.ts:");
+    if (json)
+      expect(JSON.parse(error).error.message).toBe(
+        "Provide a value for --engine-url.",
+      );
+    else expect(error.trim()).toBe("Provide a value for --config.");
+  }
+});
+
 test("command detection ignores option values", async () => {
   const directory = await mkdtemp(join(tmpdir(), "epeius-command-"));
   const config = join(directory, "epeius.toml");
   await Bun.write(
     config,
-    "[terminal]\ndefault_chain='testnet'\nengine_url='http://127.0.0.1:1'\nsearch_budget_ms=2000\n",
+    `[terminal]\ndefault_chain='testnet'\nengine_url='http://127.0.0.1:1'\nsearch_budget_ms=2000\n[chains.testnet]\n[[chains.testnet.tokens]]\naddress='${"1".repeat(40)}'\nsymbol='AAA'\ndecimals=18\n`,
   );
   const run = async (args: string[]) => {
     const child = Bun.spawn(
@@ -180,7 +202,18 @@ test("CLI resolves symbols and addresses, sends exact amounts, and handles compl
                   chainId: "123",
                   connected: true,
                   quotingSupported: true,
-                  tokens,
+                  executionEnabled: true,
+                  tokens:
+                    mode === "input-decimals-mismatch"
+                      ? [{ ...tokens[0], decimals: 30 }, tokens[1]]
+                      : mode === "output-decimals-mismatch"
+                        ? [tokens[0], { ...tokens[1], decimals: 30 }]
+                        : mode === "address-mismatch"
+                          ? [
+                              { ...tokens[0], address: `0x${"c".repeat(40)}` },
+                              tokens[1],
+                            ]
+                          : tokens,
                 },
               ],
             }),
@@ -208,7 +241,7 @@ test("CLI resolves symbols and addresses, sends exact amounts, and handles compl
   });
   await Bun.write(
     config,
-    `[terminal]\ndefault_chain='custom'\nengine_url='${server.url}'\nsearch_budget_ms=1234\n`,
+    `[terminal]\ndefault_chain='custom'\nengine_url='${server.url}'\nsearch_budget_ms=1234\n[chains.custom]\nchain_id=123\n[[chains.custom.tokens]]\naddress='${"a".repeat(40)}'\nsymbol='AAA'\ndecimals=6\n[[chains.custom.tokens]]\naddress='${tokens[1].address}'\nsymbol='BBB'\ndecimals=18\n`,
   );
   const run = async (args: string[]) => {
     const child = Bun.spawn(
@@ -271,6 +304,40 @@ test("CLI resolves symbols and addresses, sends exact amounts, and handles compl
       amountInAtomic: "19",
       searchBudgetMs: 2147478647,
     });
+    for (const [nextMode, amountArgs] of [
+      ["input-decimals-mismatch", ["--amount", "1"]],
+      ["output-decimals-mismatch", ["--amount-atomic", "1"]],
+      ["address-mismatch", ["--amount", "1"]],
+    ] as const) {
+      mode = nextMode;
+      const before = requests.length;
+      const mismatch = await run([
+        "quote",
+        "--in",
+        "AAA",
+        "--out",
+        "BBB",
+        ...amountArgs,
+      ]);
+      expect(mismatch.code).toBe(1);
+      expect(mismatch.err).toContain("does not match local config");
+      expect(requests.length).toBe(before);
+    }
+    mode = "input-decimals-mismatch";
+    const executionMismatch = await run([
+      "prepare",
+      "--quote-id",
+      "q1",
+      "--route-id",
+      "r1",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(executionMismatch.code).toBe(1);
+    expect(executionMismatch.err).toContain("does not match local config");
+    mode = "complete";
     for (const amountArgs of [
       ["--amount", "1", "--amount-atomic", "1"],
       ["--amount", ""],

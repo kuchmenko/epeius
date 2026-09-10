@@ -46,7 +46,7 @@ const directory = await mkdtemp(join(tmpdir(), "epeius-integration-"));
 const config = join(directory, "epeius.toml");
 await Bun.write(
   config,
-  `[terminal]\ndefault_chain='base'\nengine_url='${url}/partial'\nsearch_budget_ms=5500\n`,
+  `[terminal]\ndefault_chain='base'\nengine_url='${url}/partial'\nsearch_budget_ms=5500\n[[chains.base.tokens]]\naddress='${WETH}'\nsymbol='WETH'\ndecimals=18\n[[chains.base.tokens]]\naddress='${USDC}'\nsymbol='USDC'\ndecimals=6\n`,
 );
 try {
   const terminal = Bun.spawn(

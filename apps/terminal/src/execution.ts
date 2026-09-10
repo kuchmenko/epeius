@@ -13,6 +13,8 @@ const localAddress = /^(?:0x|0X)?[0-9a-fA-F]{40}$/;
 const hashPattern = /^0x[0-9a-fA-F]{64}$/;
 const transfer =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const uint256Limit = 1n << 256n;
+const uint256MaxDecimal = (uint256Limit - 1n).toString();
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const normalizeLocalAddress = (value: string) => {
   if (!localAddress.test(value)) throw new Error("Invalid local address.");
@@ -27,7 +29,22 @@ export type TrustedExecution = {
   >;
 };
 
-const word = (value: bigint) => value.toString(16).padStart(64, "0");
+const word = (value: bigint) => {
+  if (value < 0n || value >= uint256Limit)
+    throw new Error("ABI word must fit uint256.");
+  return value.toString(16).padStart(64, "0");
+};
+const uint256Decimal = (value: string, label: string) => {
+  const normalized = value.replace(/^0+(?=\d)/, "");
+  if (
+    !/^[0-9]+$/.test(value) ||
+    normalized.length > uint256MaxDecimal.length ||
+    (normalized.length === uint256MaxDecimal.length &&
+      normalized > uint256MaxDecimal)
+  )
+    throw new Error(`${label} must fit uint256.`);
+  return BigInt(normalized);
+};
 const addressWord = (value: string) =>
   value.slice(2).toLowerCase().padStart(64, "0");
 const dynamicBytes = (hex: string) => {
@@ -146,9 +163,12 @@ export function validatePreparation(
   p: PrepareExecutionResponse,
   signer: string,
   expectedChainId: string,
+  slippageBps: number,
   trusted: TrustedExecution,
   now = Math.floor(Date.now() / 1000),
 ) {
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 9999)
+    throw new Error("Requested slippage must be 0 through 9999 bps.");
   if (
     ![PreparationStatus.READY, PreparationStatus.APPROVAL_REQUIRED].includes(
       p.status,
@@ -178,13 +198,18 @@ export function validatePreparation(
     !/^[1-9][0-9]*$/.test(tx.gasLimit)
   )
     throw new Error("Invalid ERC20 transaction terms.");
+  const deadline = uint256Decimal(p.deadlineUnix, "Deadline");
   if (
     !/^[0-9]+$/.test(p.expiresAtUnix) ||
     BigInt(p.expiresAtUnix) <= BigInt(now) ||
-    !/^[0-9]+$/.test(p.deadlineUnix) ||
-    BigInt(p.deadlineUnix) <= BigInt(now)
+    deadline <= BigInt(now)
   )
     throw new Error("Preparation expired. Rerun quote.");
+  const amountIn = uint256Decimal(p.amountInAtomic, "Input amount");
+  const minimum = uint256Decimal(
+    p.amountOutMinimumAtomic,
+    "Minimum output amount",
+  );
   if (
     !address.test(p.tokenIn) ||
     !address.test(p.tokenOut) ||
@@ -193,8 +218,21 @@ export function validatePreparation(
     !/^[1-9][0-9]*$/.test(p.amountOutMinimumAtomic)
   )
     throw new Error("Invalid swap amount or token terms.");
+  if (!p.route) throw new Error("Invalid route terms.");
+  const quotedOutput = uint256Decimal(
+    p.route.amountOutAtomic,
+    "Route quoted output",
+  );
+  if (quotedOutput <= 0n)
+    throw new Error("Route quoted output must be positive.");
+  const requestedMinimum =
+    (quotedOutput * BigInt(10000 - slippageBps)) / 10000n;
+  if (minimum !== requestedMinimum)
+    throw new Error(
+      "Prepared slippage minimum does not match saved route quote.",
+    );
   if (
-    !p.route?.legs.length ||
+    !p.route.legs.length ||
     p.route.legs.length > 2 ||
     !same(p.route.legs[0].tokenIn, p.tokenIn) ||
     !same(p.route.legs[p.route.legs.length - 1].tokenOut, p.tokenOut) ||
@@ -225,7 +263,7 @@ export function validatePreparation(
       "Route is not allowed by local token and deployment config.",
     );
   if (approval) {
-    const expected = `0x095ea7b3${p.approvalSpender.slice(2).toLowerCase().padStart(64, "0")}${BigInt(p.amountInAtomic).toString(16).padStart(64, "0")}`;
+    const expected = `0x095ea7b3${p.approvalSpender.slice(2).toLowerCase().padStart(64, "0")}${word(amountIn)}`;
     if (
       !address.test(p.approvalSpender) ||
       !same(p.approvalSpender, deployment.router) ||
@@ -248,6 +286,7 @@ export function validatePreparation(
 export type ExecutionIO = {
   signer: string;
   expectedChainId: string;
+  slippageBps: number;
   trusted: TrustedExecution;
   chainId: () => Promise<string>;
   prepare: (preparationId?: string) => Promise<PrepareExecutionResponse>;
@@ -277,6 +316,7 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     prepared,
     io.signer,
     io.expectedChainId,
+    io.slippageBps,
     io.trusted,
   );
   const snapshot = toJsonString(PrepareExecutionResponseSchema, prepared);
@@ -293,7 +333,13 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     return 1;
   }
   const checked = await io.prepare(prepared.preparationId);
-  validatePreparation(checked, io.signer, io.expectedChainId, io.trusted);
+  validatePreparation(
+    checked,
+    io.signer,
+    io.expectedChainId,
+    io.slippageBps,
+    io.trusted,
+  );
   // Compare all executable terms, including route, minimum, deadline and approval.
   // A newer simulation block and output estimate do not change signed terms.
   const immutable = (p: PrepareExecutionResponse) =>
@@ -312,7 +358,13 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     );
   if (!(await rpcMatchesExpectedChain()))
     throw new Error("RPC network changed. Nothing sent.");
-  validatePreparation(prepared, io.signer, io.expectedChainId, io.trusted);
+  validatePreparation(
+    prepared,
+    io.signer,
+    io.expectedChainId,
+    io.slippageBps,
+    io.trusted,
+  );
   let hash: string;
   try {
     hash = (await io.send(tx)).trim();
@@ -515,6 +567,7 @@ export async function executionCommand(
     {
       signer,
       expectedChainId,
+      slippageBps: Number(slippage),
       trusted,
       chainId: async () => String(await rpc("eth_chainId")).toLowerCase(),
       prepare: async (preparationId) => {
