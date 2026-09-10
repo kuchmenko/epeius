@@ -4,6 +4,8 @@ import {
   PreparationStatus,
   type PrepareExecutionResponse,
   PrepareExecutionResponseSchema,
+  type RouteQuote,
+  RouteQuoteSchema,
   type UnsignedTransaction,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import type { quoteClient } from "./client";
@@ -297,6 +299,9 @@ export type ExecutionIO = {
   send: (tx: UnsignedTransaction) => Promise<string>;
   receipt: (hash: string) => Promise<Receipt>;
   report: (result: unknown) => void;
+  reportPreparation?: boolean;
+  swapOnly?: boolean;
+  onApprovalVerified?: () => void;
 };
 
 export async function executePrepared(io: ExecutionIO, preview = false) {
@@ -324,8 +329,13 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     prepared.status === PreparationStatus.APPROVAL_REQUIRED
       ? "approval"
       : "swap";
-  if (preview) {
+  if (io.swapOnly && kind === "approval")
+    throw new Error(
+      "Approval is still required. Start a new trade; nothing retried.",
+    );
+  if (preview || io.reportPreparation)
     io.report({ preparation: JSON.parse(snapshot), sent: false });
+  if (preview) {
     return 0;
   }
   if (!(await io.confirm(kind, prepared))) {
@@ -406,6 +416,8 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
           }
         : {}),
     });
+    if (kind === "approval" && verification.outcome === "receipt_success")
+      io.onApprovalVerified?.();
     return verification.outcome === "passed" ||
       verification.outcome === "receipt_success"
       ? 0
@@ -429,6 +441,14 @@ export async function executionCommand(
   remoteChainId: string,
   client: ReturnType<typeof quoteClient>,
   signal: AbortSignal,
+  trade?: {
+    route: RouteQuote;
+    amountInAtomic: string;
+    tokenIn: string;
+    tokenOut: string;
+    afterApproval: boolean;
+    onApprovalVerified: () => void;
+  },
 ) {
   if (
     !values.keystore ||
@@ -566,6 +586,9 @@ export async function executionCommand(
   return executePrepared(
     {
       signer,
+      reportPreparation: !!trade,
+      swapOnly: trade?.afterApproval,
+      onApprovalVerified: trade?.onApprovalVerified,
       expectedChainId,
       slippageBps: Number(slippage),
       trusted,
@@ -584,16 +607,29 @@ export async function executionCommand(
         );
         if (response.route && response.route.routeId !== values["route-id"])
           throw new Error("Engine returned a different route. Nothing sent.");
+        if (
+          trade &&
+          (!response.route ||
+            toJsonString(RouteQuoteSchema, response.route) !==
+              toJsonString(RouteQuoteSchema, trade.route) ||
+            response.amountInAtomic !== trade.amountInAtomic ||
+            !same(response.tokenIn, trade.tokenIn) ||
+            !same(response.tokenOut, trade.tokenOut))
+        )
+          throw new Error(
+            "Preparation does not match the selected quote. Nothing sent.",
+          );
         return response;
       },
       confirm: async (kind, p) => {
         console.error(
           `${kind === "approval" ? "APPROVAL ONLY — fresh quote required afterward" : "SWAP"}\n${toJsonString(PrepareExecutionResponseSchema, p, { prettySpaces: 2 })}`,
         );
-        if (values[`confirm-${kind}`] === "yes") return true;
+        if (!trade?.afterApproval && values[`confirm-${kind}`] === "yes")
+          return true;
         if (
-          values["confirm-approval"] ||
-          values["confirm-swap"] ||
+          (!trade?.afterApproval &&
+            (values["confirm-approval"] || values["confirm-swap"])) ||
           !process.stdin.isTTY
         )
           return false;

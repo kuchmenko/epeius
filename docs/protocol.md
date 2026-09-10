@@ -31,9 +31,11 @@ Clients send canonical token addresses, positive decimal atomic input, search bu
 - zero or more `errors`, optionally tied to a route; and
 - `searchComplete`.
 
+`bestRouteId` is present when at least one route succeeds. It selects the greatest raw `amountOutAtomic` using arbitrary-precision integer comparison. Ties keep the first route in deterministic candidate order, independent of completion order. It does not reorder or remove routes or errors. Partial searches may recommend the best returned route, not a global best. Selection excludes gas, approval costs, and latency.
+
 `searchComplete: true` means all candidate attempts finished before the budget. It does not mean all candidates succeeded. `false` means some routes may be missing; returned routes and errors still describe completed work. No route means failure to find a usable route, even if search completed.
 
-Each route identifies provider, configured deployment, exact atomic output, block, latency, and one or two legs. Arbitrary-length routes are not supported. `feePips` is millionths and may be 0 through 999,999; a configured fee yields a route only when the configured factory has a pool. `tickSpacing` is a signed Slipstream selector, not a fee. Missing optional cost or best-route fields mean unknown or uncomputed, never zero.
+Each route identifies provider, configured deployment, exact atomic output, block, latency, and one or two legs. Arbitrary-length routes are not supported. `feePips` is millionths and may be 0 through 999,999; a configured fee yields a route only when the configured factory has a pool. `tickSpacing` is a signed Slipstream selector, not a fee. Optional cost fields remain absent: unknown or uncomputed, never zero.
 
 All calls at quote time use one canonical EIP-1898 block hash. There is no fallback to latest state. Quote output is informational and does not authorize execution.
 

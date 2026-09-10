@@ -50,6 +50,10 @@ export function formatQuote(
   if (!quote.searchComplete)
     lines.push("WARNING: Search was partial; some routes may be missing.");
   lines.push(`Input: ${amount(tokenIn, amountInAtomic)}`);
+  if (quote.bestRouteId)
+    lines.push(
+      `Engine recommendation: ${quote.bestRouteId} (highest raw output among returned routes; not gas-adjusted or a global best).`,
+    );
   for (const route of quote.routes) {
     lines.push("", `Route ${route.routeId} (${route.provider})`);
     lines.push(`Output: ${amount(tokenOut, route.amountOutAtomic)}`);

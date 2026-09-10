@@ -177,9 +177,15 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	}
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].index < ordered[j].index })
 	final.SearchComplete = searchCtx.Err() == nil
+	var bestOutput *big.Int
 	for _, item := range ordered {
 		if item.route != nil {
 			final.Routes = append(final.Routes, item.route)
+			output, _ := new(big.Int).SetString(item.route.AmountOutAtomic, 10)
+			if bestOutput == nil || output.Cmp(bestOutput) > 0 {
+				bestOutput = output
+				final.BestRouteId = &item.route.RouteId
+			}
 		}
 		if item.err != nil {
 			final.Errors = append(final.Errors, item.err)
