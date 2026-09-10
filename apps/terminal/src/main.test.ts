@@ -16,8 +16,8 @@ test("quote input preserves amounts above JS integer precision and distinct addr
   expect(input.amountInAtomic).toBe("9007199254740993");
   expect(input.sender).toBe(`0x${"1".repeat(40)}`);
   expect(input.recipient).toBe(`0x${"2".repeat(40)}`);
-  expect(input.tokenIn).toBe(`0x${"3".repeat(40)}`);
-  expect(input.tokenOut).toBe(`0x${"4".repeat(40)}`);
+  expect(input.tokenIn).toBe("0x4200000000000000000000000000000000000006");
+  expect(input.tokenOut).toBe("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
   expect(input.slippageBps).toBe(37);
   expect(input.searchBudgetMs).toBe(1200);
   expect(

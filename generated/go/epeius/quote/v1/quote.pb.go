@@ -279,10 +279,12 @@ func (x *BlockContext) GetHash() string {
 }
 
 type RouteLeg struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Pool          string                 `protobuf:"bytes,1,opt,name=pool,proto3" json:"pool,omitempty"`
-	TokenIn       string                 `protobuf:"bytes,2,opt,name=token_in,json=tokenIn,proto3" json:"token_in,omitempty"`
-	TokenOut      string                 `protobuf:"bytes,3,opt,name=token_out,json=tokenOut,proto3" json:"token_out,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Pool     string                 `protobuf:"bytes,1,opt,name=pool,proto3" json:"pool,omitempty"`
+	TokenIn  string                 `protobuf:"bytes,2,opt,name=token_in,json=tokenIn,proto3" json:"token_in,omitempty"`
+	TokenOut string                 `protobuf:"bytes,3,opt,name=token_out,json=tokenOut,proto3" json:"token_out,omitempty"`
+	// Pool fee in millionths, not basis points.
+	FeePips       uint32 `protobuf:"varint,4,opt,name=fee_pips,json=feePips,proto3" json:"fee_pips,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -336,6 +338,13 @@ func (x *RouteLeg) GetTokenOut() string {
 		return x.TokenOut
 	}
 	return ""
+}
+
+func (x *RouteLeg) GetFeePips() uint32 {
+	if x != nil {
+		return x.FeePips
+	}
+	return 0
 }
 
 type RouteQuote struct {
@@ -500,14 +509,16 @@ func (x *ProviderError) GetMessage() string {
 }
 
 type QuoteFinal struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	QuoteId       string                 `protobuf:"bytes,1,opt,name=quote_id,json=quoteId,proto3" json:"quote_id,omitempty"`
-	Routes        []*RouteQuote          `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
-	Errors        []*ProviderError       `protobuf:"bytes,3,rep,name=errors,proto3" json:"errors,omitempty"`
-	BestRouteId   *string                `protobuf:"bytes,4,opt,name=best_route_id,json=bestRouteId,proto3,oneof" json:"best_route_id,omitempty"`
-	Block         *BlockContext          `protobuf:"bytes,5,opt,name=block,proto3" json:"block,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	QuoteId     string                 `protobuf:"bytes,1,opt,name=quote_id,json=quoteId,proto3" json:"quote_id,omitempty"`
+	Routes      []*RouteQuote          `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
+	Errors      []*ProviderError       `protobuf:"bytes,3,rep,name=errors,proto3" json:"errors,omitempty"`
+	BestRouteId *string                `protobuf:"bytes,4,opt,name=best_route_id,json=bestRouteId,proto3,oneof" json:"best_route_id,omitempty"`
+	Block       *BlockContext          `protobuf:"bytes,5,opt,name=block,proto3" json:"block,omitempty"`
+	// All candidate attempts finished within the search budget, even if some failed.
+	SearchComplete bool `protobuf:"varint,6,opt,name=search_complete,json=searchComplete,proto3" json:"search_complete,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *QuoteFinal) Reset() {
@@ -573,6 +584,13 @@ func (x *QuoteFinal) GetBlock() *BlockContext {
 		return x.Block
 	}
 	return nil
+}
+
+func (x *QuoteFinal) GetSearchComplete() bool {
+	if x != nil {
+		return x.SearchComplete
+	}
+	return false
 }
 
 type QuoteEvent struct {
@@ -870,11 +888,12 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\x10search_budget_ms\x18\b \x01(\rR\x0esearchBudgetMs\":\n" +
 	"\fBlockContext\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\tR\x06number\x12\x12\n" +
-	"\x04hash\x18\x02 \x01(\tR\x04hash\"V\n" +
+	"\x04hash\x18\x02 \x01(\tR\x04hash\"q\n" +
 	"\bRouteLeg\x12\x12\n" +
 	"\x04pool\x18\x01 \x01(\tR\x04pool\x12\x19\n" +
 	"\btoken_in\x18\x02 \x01(\tR\atokenIn\x12\x1b\n" +
-	"\ttoken_out\x18\x03 \x01(\tR\btokenOut\"\x9a\x03\n" +
+	"\ttoken_out\x18\x03 \x01(\tR\btokenOut\x12\x19\n" +
+	"\bfee_pips\x18\x04 \x01(\rR\afeePips\"\x9a\x03\n" +
 	"\n" +
 	"RouteQuote\x12\x19\n" +
 	"\broute_id\x18\x01 \x01(\tR\arouteId\x12\x1a\n" +
@@ -892,14 +911,15 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x1e\n" +
 	"\broute_id\x18\x02 \x01(\tH\x00R\arouteId\x88\x01\x01\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessageB\v\n" +
-	"\t_route_id\"\x84\x02\n" +
+	"\t_route_id\"\xad\x02\n" +
 	"\n" +
 	"QuoteFinal\x12\x19\n" +
 	"\bquote_id\x18\x01 \x01(\tR\aquoteId\x123\n" +
 	"\x06routes\x18\x02 \x03(\v2\x1b.epeius.quote.v1.RouteQuoteR\x06routes\x126\n" +
 	"\x06errors\x18\x03 \x03(\v2\x1e.epeius.quote.v1.ProviderErrorR\x06errors\x12'\n" +
 	"\rbest_route_id\x18\x04 \x01(\tH\x00R\vbestRouteId\x88\x01\x01\x123\n" +
-	"\x05block\x18\x05 \x01(\v2\x1d.epeius.quote.v1.BlockContextR\x05blockB\x10\n" +
+	"\x05block\x18\x05 \x01(\v2\x1d.epeius.quote.v1.BlockContextR\x05block\x12'\n" +
+	"\x0fsearch_complete\x18\x06 \x01(\bR\x0esearchCompleteB\x10\n" +
 	"\x0e_best_route_id\"\xb7\x01\n" +
 	"\n" +
 	"QuoteEvent\x123\n" +

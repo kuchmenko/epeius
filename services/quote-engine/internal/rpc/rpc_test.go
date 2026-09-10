@@ -7,12 +7,82 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
+
+func Verify(ctx context.Context, environment, endpoint string) (Snapshot, error) {
+	client, snapshot, err := Open(ctx, environment, endpoint)
+	if client != nil {
+		client.Close()
+	}
+	return snapshot, err
+}
+
+func TestPinnedCall(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+			calls := 0
+			hash := common.HexToHash("0x1234")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					ID     json.RawMessage
+					Method string
+					Params []json.RawMessage
+				}
+				json.NewDecoder(r.Body).Decode(&request)
+				calls++
+				if request.Method != "eth_call" || len(request.Params) != 2 {
+					t.Error("unexpected RPC call")
+					return
+				}
+				var block struct {
+					BlockHash        string
+					RequireCanonical bool
+				}
+				json.Unmarshal(request.Params[1], &block)
+				if block.BlockHash != hash.Hex() || !block.RequireCanonical {
+					t.Errorf("unpinned call: %s", request.Params[1])
+				}
+				var args map[string]string
+				json.Unmarshal(request.Params[0], &args)
+				if args["data"] != "0x010203" || common.HexToAddress(args["to"]) != common.HexToAddress("0xabcd") {
+					t.Error(args)
+				}
+				response := map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": "0x0405"}
+				if fail {
+					delete(response, "result")
+					response["error"] = map[string]any{"code": -32000, "message": "secret canonical block unavailable"}
+				}
+				json.NewEncoder(w).Encode(response)
+			}))
+			defer server.Close()
+			eth, err := ethclient.Dial(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &Client{Client: eth}
+			defer client.Close()
+			got, err := client.Call(context.Background(), common.HexToAddress("0xabcd"), []byte{1, 2, 3}, hash)
+			if fail {
+				if err == nil || strings.Contains(err.Error(), "secret") {
+					t.Fatal(err)
+				}
+			} else if err != nil || string(got) != string([]byte{4, 5}) {
+				t.Fatalf("%x %v", got, err)
+			}
+			if calls != 1 {
+				t.Fatal("must not retry at latest")
+			}
+		})
+	}
+}
 
 func TestVerifyNetworksAndSnapshot(t *testing.T) {
 	for _, tc := range []struct{ environment, chain, want string }{
