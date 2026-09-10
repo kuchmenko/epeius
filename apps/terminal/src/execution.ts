@@ -9,10 +9,51 @@ import {
 import type { quoteClient } from "./client";
 
 const address = /^0x[0-9a-fA-F]{40}$/;
+const localAddress = /^(?:0x|0X)?[0-9a-fA-F]{40}$/;
 const hashPattern = /^0x[0-9a-fA-F]{64}$/;
 const transfer =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const normalizeLocalAddress = (value: string) => {
+  if (!localAddress.test(value)) throw new Error("Invalid local address.");
+  return `0x${value.replace(/^0x/i, "").toLowerCase()}`;
+};
+
+export type TrustedExecution = {
+  tokens: string[];
+  deployments: Record<
+    string,
+    { kind: "uniswap-v3" | "pancake-v3"; router: string; fees: number[] }
+  >;
+};
+
+const word = (value: bigint) => value.toString(16).padStart(64, "0");
+const addressWord = (value: string) =>
+  value.slice(2).toLowerCase().padStart(64, "0");
+const dynamicBytes = (hex: string) => {
+  const value = hex.slice(2).toLowerCase();
+  return `${word(BigInt(value.length / 2))}${value.padEnd(Math.ceil(value.length / 64) * 64, "0")}`;
+};
+
+export function expectedSwapData(
+  p: PrepareExecutionResponse,
+  kind: "uniswap-v3" | "pancake-v3",
+) {
+  if (!p.route) throw new Error("Invalid route terms.");
+  if (p.route.legs.some((leg) => leg.selector.case !== "feePips"))
+    throw new Error("Invalid route terms.");
+  const path = `0x${p.route.legs
+    .map(
+      (leg) =>
+        `${leg.tokenIn.slice(2).toLowerCase()}${leg.selector.value?.toString(16).padStart(6, "0")}`,
+    )
+    .join("")}${p.route.legs.at(-1)?.tokenOut.slice(2).toLowerCase()}`;
+  const pathData = dynamicBytes(path);
+  if (kind === "pancake-v3")
+    return `0xc04b8d59${word(32n)}${word(160n)}${addressWord(p.recipient)}${word(BigInt(p.deadlineUnix))}${word(BigInt(p.amountInAtomic))}${word(BigInt(p.amountOutMinimumAtomic))}${pathData}`;
+  const inner = `b858183f${word(32n)}${word(128n)}${addressWord(p.recipient)}${word(BigInt(p.amountInAtomic))}${word(BigInt(p.amountOutMinimumAtomic))}${pathData}`;
+  return `0x5ae401dc${word(BigInt(p.deadlineUnix))}${word(64n)}${word(1n)}${word(32n)}${word(BigInt(inner.length / 2))}${inner.padEnd(Math.ceil(inner.length / 64) * 64, "0")}`;
+}
 
 export type Receipt = {
   transactionHash: string;
@@ -105,6 +146,7 @@ export function validatePreparation(
   p: PrepareExecutionResponse,
   signer: string,
   expectedChainId: string,
+  trusted: TrustedExecution,
   now = Math.floor(Date.now() / 1000),
 ) {
   if (
@@ -160,10 +202,33 @@ export function validatePreparation(
       !same(p.route.legs[0].tokenOut, p.route.legs[1].tokenIn))
   )
     throw new Error("Invalid route terms.");
+  const deployment = trusted.deployments[p.route.deploymentId];
+  const configuredTokens = new Set(
+    trusted.tokens.map((token) => token.toLowerCase()),
+  );
+  if (
+    !deployment ||
+    p.route.provider !== deployment.kind ||
+    !address.test(deployment.router) ||
+    !p.route.legs.every(
+      (leg) =>
+        leg.selector.case === "feePips" &&
+        Number.isInteger(leg.selector.value) &&
+        leg.selector.value >= 0 &&
+        leg.selector.value < 1_000_000 &&
+        deployment.fees.includes(leg.selector.value) &&
+        configuredTokens.has(leg.tokenIn.toLowerCase()) &&
+        configuredTokens.has(leg.tokenOut.toLowerCase()),
+    )
+  )
+    throw new Error(
+      "Route is not allowed by local token and deployment config.",
+    );
   if (approval) {
     const expected = `0x095ea7b3${p.approvalSpender.slice(2).toLowerCase().padStart(64, "0")}${BigInt(p.amountInAtomic).toString(16).padStart(64, "0")}`;
     if (
       !address.test(p.approvalSpender) ||
+      !same(p.approvalSpender, deployment.router) ||
       !same(tx.to, p.tokenIn) ||
       !same(tx.data, expected) ||
       p.transaction
@@ -171,6 +236,11 @@ export function validatePreparation(
       throw new Error(
         "Approval must authorize only the displayed input amount and spender.",
       );
+  } else if (
+    !same(tx.to, deployment.router) ||
+    !same(tx.data, expectedSwapData(p, deployment.kind))
+  ) {
+    throw new Error("Swap transaction does not match locally encoded route.");
   }
   return tx;
 }
@@ -178,6 +248,7 @@ export function validatePreparation(
 export type ExecutionIO = {
   signer: string;
   expectedChainId: string;
+  trusted: TrustedExecution;
   chainId: () => Promise<string>;
   prepare: (preparationId?: string) => Promise<PrepareExecutionResponse>;
   confirm: (
@@ -202,7 +273,12 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
       `RPC network must match configured chain ID ${io.expectedChainId}.`,
     );
   const prepared = await io.prepare();
-  const tx = validatePreparation(prepared, io.signer, io.expectedChainId);
+  const tx = validatePreparation(
+    prepared,
+    io.signer,
+    io.expectedChainId,
+    io.trusted,
+  );
   const snapshot = toJsonString(PrepareExecutionResponseSchema, prepared);
   const kind =
     prepared.status === PreparationStatus.APPROVAL_REQUIRED
@@ -217,7 +293,7 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     return 1;
   }
   const checked = await io.prepare(prepared.preparationId);
-  validatePreparation(checked, io.signer, io.expectedChainId);
+  validatePreparation(checked, io.signer, io.expectedChainId, io.trusted);
   // Compare all executable terms, including route, minimum, deadline and approval.
   // A newer simulation block and output estimate do not change signed terms.
   const immutable = (p: PrepareExecutionResponse) =>
@@ -236,7 +312,7 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     );
   if (!(await rpcMatchesExpectedChain()))
     throw new Error("RPC network changed. Nothing sent.");
-  validatePreparation(prepared, io.signer, io.expectedChainId);
+  validatePreparation(prepared, io.signer, io.expectedChainId, io.trusted);
   let hash: string;
   try {
     hash = (await io.send(tx)).trim();
@@ -322,7 +398,16 @@ export async function executionCommand(
   const config = Bun.TOML.parse(await Bun.file(configPath).text()) as {
     chains?: Record<
       string,
-      { chain_id?: number; rpc_url_env?: string; execution_enabled?: boolean }
+      {
+        chain_id?: number;
+        rpc_url_env?: string;
+        execution_enabled?: boolean;
+        tokens?: Array<{ address?: string }>;
+        deployments?: Record<
+          string,
+          { kind?: string; router?: string; fees?: number[] }
+        >;
+      }
     >;
   };
   const localChain = config.chains?.[chain];
@@ -338,6 +423,33 @@ export async function executionCommand(
       "Local chain must set a safe positive chain_id, explicitly enable execution, and set rpc_url_env.",
     );
   const expectedChainId = String(localChain.chain_id);
+  const trusted: TrustedExecution = { tokens: [], deployments: {} };
+  for (const token of localChain.tokens ?? []) {
+    if (!token.address)
+      throw new Error("Local execution tokens must have valid addresses.");
+    try {
+      trusted.tokens.push(normalizeLocalAddress(token.address));
+    } catch {
+      throw new Error("Local execution tokens must have valid addresses.");
+    }
+  }
+  for (const [id, deployment] of Object.entries(localChain.deployments ?? {})) {
+    if (
+      (deployment.kind !== "uniswap-v3" && deployment.kind !== "pancake-v3") ||
+      !deployment.router ||
+      !localAddress.test(deployment.router) ||
+      !Array.isArray(deployment.fees) ||
+      !deployment.fees.every(
+        (fee) => Number.isInteger(fee) && fee >= 0 && fee < 1_000_000,
+      )
+    )
+      throw new Error("Local execution deployment is invalid.");
+    trusted.deployments[id] = {
+      kind: deployment.kind,
+      router: normalizeLocalAddress(deployment.router),
+      fees: deployment.fees,
+    };
+  }
   if (remoteChainId !== expectedChainId)
     throw new Error(
       `Engine chain ID must match configured chain ID ${expectedChainId}.`,
@@ -403,6 +515,7 @@ export async function executionCommand(
     {
       signer,
       expectedChainId,
+      trusted,
       chainId: async () => String(await rpc("eth_chainId")).toLowerCase(),
       prepare: async (preparationId) => {
         const response = await client.prepareExecution(

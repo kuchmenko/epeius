@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import {
 import {
   type ExecutionIO,
   executePrepared,
+  expectedSwapData,
   type Receipt,
   validatePreparation,
   verifyReceipt,
@@ -28,8 +30,15 @@ const sender = addr("1"),
 const hash = `0x${"a".repeat(64)}`;
 const expectedChainId = "11155111";
 const expectedRpcChainId = "0xaa36a7";
+const trusted = {
+  tokens: [input, middle, output],
+  deployments: {
+    uni: { kind: "uniswap-v3" as const, router, fees: [500, 3000] },
+    cake: { kind: "pancake-v3" as const, router, fees: [500, 3000] },
+  },
+};
 function prepared() {
-  return create(PrepareExecutionResponseSchema, {
+  const result = create(PrepareExecutionResponseSchema, {
     status: PreparationStatus.READY,
     preparationId: "p1",
     expiresAtUnix: "4102444800",
@@ -43,12 +52,14 @@ function prepared() {
       chainId: expectedChainId,
       from: sender,
       to: router,
-      data: "0x1234",
+      data: "0x00",
       valueAtomic: "0",
       gasLimit: "200000",
     },
     route: {
       routeId: "r1",
+      provider: "uniswap-v3",
+      deploymentId: "uni",
       legs: [
         {
           tokenIn: input,
@@ -60,11 +71,14 @@ function prepared() {
           tokenIn: middle,
           tokenOut: output,
           pool,
-          selector: { case: "tickSpacing", value: 200 },
+          selector: { case: "feePips", value: 3000 },
         },
       ],
     },
   });
+  assert(result.transaction);
+  result.transaction.data = expectedSwapData(result, "uniswap-v3");
+  return result;
 }
 function log(
   token: string,
@@ -104,6 +118,7 @@ function fixture() {
   const io: ExecutionIO = {
     signer: sender,
     expectedChainId,
+    trusted,
     chainId: async () => expectedRpcChainId,
     prepare: async (id) => {
       requests.push(id);
@@ -153,6 +168,30 @@ test("swap rechecks by preparation ID and reports hash separately from verificat
       }),
     }),
   ]);
+});
+
+test("READY approval calldata to the input token never sends, even when recheck terms match", async () => {
+  const f = fixture();
+  assert(f.p.transaction);
+  f.p.transaction.to = input;
+  f.p.transaction.data = `0x095ea7b3${router.slice(2).padStart(64, "0")}${(101).toString(16).padStart(64, "0")}`;
+
+  await expect(executePrepared(f.io)).rejects.toThrow(
+    "Swap transaction does not match locally encoded route",
+  );
+  expect(f.sent).toHaveLength(0);
+});
+
+test("READY transfer calldata to a different recipient never sends", async () => {
+  const f = fixture();
+  assert(f.p.transaction);
+  f.p.transaction.to = input;
+  f.p.transaction.data = `0xa9059cbb${pool.slice(2).padStart(64, "0")}${(101).toString(16).padStart(64, "0")}`;
+
+  await expect(executePrepared(f.io)).rejects.toThrow(
+    "Swap transaction does not match locally encoded route",
+  );
+  expect(f.sent).toHaveLength(0);
 });
 
 test("wrong RPC network before preparation or after confirmation never sends", async () => {
@@ -239,14 +278,14 @@ test("expired, rejected, and requote preparations fail closed", async () => {
   }
   const p = prepared();
   p.expiresAtUnix = "100";
-  expect(() => validatePreparation(p, sender, expectedChainId, 100)).toThrow(
-    "expired",
-  );
+  expect(() =>
+    validatePreparation(p, sender, expectedChainId, trusted, 100),
+  ).toThrow("expired");
   p.expiresAtUnix = "101";
   p.deadlineUnix = "100";
-  expect(() => validatePreparation(p, sender, expectedChainId, 100)).toThrow(
-    "expired",
-  );
+  expect(() =>
+    validatePreparation(p, sender, expectedChainId, trusted, 100),
+  ).toThrow("expired");
 });
 
 test("approval confirms separately, sends only exact approval and requires fresh quote", async () => {
@@ -268,9 +307,132 @@ test("approval confirms separately, sends only exact approval and requires fresh
     nextAction: expect.stringContaining("Rerun quote"),
   });
   f.p.approvalTransaction.data = `0x095ea7b3${router.slice(2).padStart(64, "0")}${"f".repeat(64)}`;
-  expect(() => validatePreparation(f.p, sender, expectedChainId)).toThrow(
-    "displayed input amount",
-  );
+  expect(() =>
+    validatePreparation(f.p, sender, expectedChainId, trusted),
+  ).toThrow("displayed input amount");
+});
+
+test("locally encodes both router ABIs for one and two hop routes", () => {
+  for (const [deploymentId, kind] of [
+    ["uni", "uniswap-v3"],
+    ["cake", "pancake-v3"],
+  ] as const) {
+    for (const hops of [1, 2]) {
+      const p = prepared();
+      assert(p.route && p.transaction);
+      p.route.deploymentId = deploymentId;
+      p.route.provider = kind;
+      if (hops === 1) p.route.legs = [{ ...p.route.legs[0], tokenOut: output }];
+      p.transaction.data = expectedSwapData(p, kind);
+      expect(validatePreparation(p, sender, expectedChainId, trusted)).toBe(
+        p.transaction,
+      );
+    }
+  }
+});
+
+test("swap calldata matches independent router ABI fixtures", () => {
+  // Fixed fixtures generated offline with Foundry cast 1.5.0 from these ABI entries:
+  // Uniswap SwapRouter02: exactInput((bytes,address,uint256,uint256)) nested in
+  // multicall(uint256,bytes[]); PancakeSwap V3 SwapRouter: exactInput((bytes,address,uint256,uint256,uint256)).
+  // Hashes cover raw calldata bytes, not the hexadecimal text. Runtime needs no cast.
+  const fixtures = [
+    [
+      "uni",
+      "uniswap-v3",
+      1,
+      "2c39a3d04398e46bf93e75d80844549f0ad867bc0ba507413dbd401a31e78c25",
+    ],
+    [
+      "uni",
+      "uniswap-v3",
+      2,
+      "431c3032de3a86e622508accf84d27de4e8d35cda51efb2028ee02eb2c6f9783",
+    ],
+    [
+      "cake",
+      "pancake-v3",
+      1,
+      "019ea54cbe040f8a14d67f6f932609c82ce3c6e18e3ca65e64fb63db0151ecdd",
+    ],
+    [
+      "cake",
+      "pancake-v3",
+      2,
+      "b377cf0245f7e6e22c6dec8276753be693accaa742a0c5050a4106d237ec12f9",
+    ],
+  ] as const;
+
+  for (const [deploymentId, kind, hops, expectedDigest] of fixtures) {
+    const p = prepared();
+    assert(p.route);
+    p.route.deploymentId = deploymentId;
+    p.route.provider = kind;
+    if (hops === 1) p.route.legs = [{ ...p.route.legs[0], tokenOut: output }];
+    const calldata = expectedSwapData(p, kind);
+    const digest = createHash("sha256")
+      .update(Buffer.from(calldata.slice(2), "hex"))
+      .digest("hex");
+    expect(digest).toBe(expectedDigest);
+  }
+});
+
+test("rejects altered target, calldata, path, amount, deadline, recipient and approval spender", () => {
+  const mutations: Array<(p: ReturnType<typeof prepared>) => void> = [
+    (p) => {
+      assert(p.transaction);
+      p.transaction.to = pool;
+    },
+    (p) => {
+      assert(p.transaction);
+      p.transaction.data = `${p.transaction.data.slice(0, -2)}ff`;
+    },
+    (p) => {
+      assert(p.route);
+      p.route.legs[0].tokenIn = addr("9");
+    },
+    (p) => {
+      assert(p.route);
+      p.route.deploymentId = "unknown";
+    },
+    (p) => {
+      assert(p.route);
+      p.route.provider = "pancake-v3";
+    },
+    (p) => {
+      assert(p.route);
+      p.route.legs[0].selector = { case: "feePips", value: 100 };
+    },
+    (p) => {
+      p.amountInAtomic = "102";
+    },
+    (p) => {
+      p.deadlineUnix = "4102444799";
+    },
+    (p) => {
+      p.recipient = addr("9");
+    },
+  ];
+  for (const mutate of mutations) {
+    const p = prepared();
+    mutate(p);
+    expect(() =>
+      validatePreparation(p, sender, expectedChainId, trusted),
+    ).toThrow();
+  }
+  const p = prepared();
+  p.status = PreparationStatus.APPROVAL_REQUIRED;
+  p.approvalSpender = pool;
+  assert(p.transaction);
+  p.approvalTransaction = {
+    ...p.transaction,
+    to: input,
+    data: `0x095ea7b3${pool.slice(2).padStart(64, "0")}${(101).toString(16).padStart(64, "0")}`,
+  };
+  p.transaction = undefined;
+  expect(() =>
+    validatePreparation(p, sender, expectedChainId, trusted),
+  ).toThrow("spender");
 });
 
 test("send or receipt timeout reports unknown or pending and never retries", async () => {
@@ -441,7 +603,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   const config = join(directory, "epeius.toml");
   await Bun.write(
     config,
-    `[terminal]\ndefault_chain='testnet'\nengine_url='${server.url}'\nsearch_budget_ms=2000\n[chains.testnet]\nchain_id=${expectedChainId}\nexecution_enabled=true\nrpc_url_env='EPEIUS_FIXTURE_RPC'\n`,
+    `[terminal]\ndefault_chain='testnet'\nengine_url='${server.url}'\nsearch_budget_ms=2000\n[chains.testnet]\nchain_id=${expectedChainId}\nexecution_enabled=true\nrpc_url_env='EPEIUS_FIXTURE_RPC'\n[[chains.testnet.tokens]]\naddress='${input.slice(2)}'\n[[chains.testnet.tokens]]\naddress='${middle.slice(2)}'\n[[chains.testnet.tokens]]\naddress='${output.slice(2)}'\n[chains.testnet.deployments.uni]\nkind='uniswap-v3'\nrouter='${router.slice(2)}'\nfees=[500,3000]\n`,
   );
   const rpc = `${server.url}secret-api-key`;
   const run = async (args: string[], rpcOverride = rpc) => {
@@ -524,10 +686,12 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect(blockRequests).toEqual([["0x123", false]]);
     const send = (await calls()).filter((call) => call.args[0] === "send");
     expect(send).toHaveLength(1);
+    const expectedTransaction = prepared().transaction;
+    assert(expectedTransaction);
     expect(send[0].args).toEqual([
       "send",
       router,
-      "0x1234",
+      expectedTransaction.data,
       "--value",
       "0",
       "--gas-limit",

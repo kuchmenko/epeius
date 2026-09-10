@@ -148,11 +148,12 @@ export async function main(rawArgs: string[]) {
     console.log(help);
     return 0;
   }
+  const parsedCommand = globals(rawArgs).args[0];
   for (const removed of [
     "sender",
     "recipient",
     "environment",
-    ...(rawArgs.includes("quote") ? ["slippage-bps"] : []),
+    ...(parsedCommand === "quote" ? ["slippage-bps"] : []),
   ])
     if (
       rawArgs.some(

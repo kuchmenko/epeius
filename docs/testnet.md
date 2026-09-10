@@ -27,6 +27,8 @@ Foundry downloads native solc 0.7.6 and 0.8.24 when missing. Pancake uses its ow
 
 The profile is loaded when each harness process starts, not hot-reloaded. A different profile does not establish support for its network or providers. Validate chain capabilities, official contract links, and simulation support before live use. Base Sepolia remains the verified default profile.
 
+The profile's required positive `engine.quote_concurrency` is copied into generated runtime TOML. Seed validates every configured fee's factory tick spacing, pair price/range, liquidity, and mint amount before its first write. These checks enforce V3 and integer bounds, not a token-decimals allowlist; equal-decimal pairs remain valid.
+
 Fixture token symbols and decimals are configured in `fixtures.tokens`; there is no A/B/C-only restriction in deployment or seeding. `fixtures.pairs` maps stable journal identifiers to two distinct token symbols, for example `AB = ["A", "B"]`. Keep existing identifiers unchanged when resuming a deployment. The live E2E script still tests the A/C scenario of the default fixture; it is not a general token discovery tool.
 
 Put the environment variable named by `chain.rpc_url_env` in a private environment file. The default profile names `BASE_SEPOLIA_RPC_URL`. Bun 1.3.9 does not provide `process.loadEnvFile`, so the harness has no `--env` option. Prefix every harness invocation:
@@ -45,7 +47,7 @@ Set shell variables such as `ENV_FILE`, `HARNESS_ADDRESS`, `TERMINAL_ADDRESS`, `
 
 ```bash
 # Read checks and estimates only; no signing or broadcasting.
-bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs check
+# check requires an existing deployment manifest; deploy dry-run works before deployment.
 bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs deploy \
   --sender "$HARNESS_ADDRESS"
 

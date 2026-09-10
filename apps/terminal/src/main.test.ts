@@ -93,6 +93,7 @@ test("help needs no config and removed flags give migration errors", async () =>
   for (const [args, code, text] of [
     [["--help"], 0, "prepare previews without sending"],
     [["quote", "--sender", "x"], 1, "--sender was removed"],
+    [["quote", "--slippage-bps", "50"], 1, "--slippage-bps was removed"],
     [["execute"], 1, "Provide --keystore"],
   ] as const) {
     const child = Bun.spawn(["bun", "apps/terminal/src/main.ts", ...args], {
@@ -107,6 +108,51 @@ test("help needs no config and removed flags give migration errors", async () =>
     ]);
     expect(exit).toBe(code);
     expect(output + error).toContain(text);
+  }
+});
+
+test("command detection ignores option values", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "epeius-command-"));
+  const config = join(directory, "epeius.toml");
+  await Bun.write(
+    config,
+    "[terminal]\ndefault_chain='testnet'\nengine_url='http://127.0.0.1:1'\nsearch_budget_ms=2000\n",
+  );
+  const run = async (args: string[]) => {
+    const child = Bun.spawn(
+      ["bun", "apps/terminal/src/main.ts", "--config", config, ...args],
+      {
+        cwd: join(import.meta.dir, "../../.."),
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [out, err, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return { output: out + err, code };
+  };
+  try {
+    const ordinary = await run([
+      "execute",
+      "--quote-id",
+      "q1",
+      "--slippage-bps",
+      "50",
+    ]);
+    const commandNamedValue = await run([
+      "execute",
+      "--quote-id",
+      "quote",
+      "--slippage-bps",
+      "50",
+    ]);
+    expect(ordinary.output).toContain("Provide --keystore");
+    expect(commandNamedValue.output).toBe(ordinary.output);
+  } finally {
+    await rm(directory, { recursive: true });
   }
 });
 

@@ -27,6 +27,7 @@ search_budget_ms = 2000
 
 [engine]
 listen_addr = "127.0.0.1:8080"
+quote_concurrency = 4
 
 [chains.base]
 chain_id = 8453
@@ -74,6 +75,10 @@ bun run terminal -- chain check base
 ## Quote search
 
 The engine pins one canonical block hash and searches every configured deployment, direct path, two-hop path, and fee combination. One-hop and two-hop routes are the current capability; arbitrary-length routes are not supported. Results stay in deterministic deployment/path order; they are not ranked by economic value. `searchComplete` means every candidate attempt finished within the budget, not that every attempt succeeded. Per-route failures remain in `errors`.
+
+`engine.quote_concurrency` is required and must be positive. It limits active candidate workers per quote request; the checked-in value is 4. Candidates are generated as workers become available, not allocated or started all at once. Expired searches stop scheduling candidates and return partial results without an error entry for each unstarted candidate. This is not a global RPC rate limit across requests. Existing configs must add this field before restarting.
+
+Configured token and deployment addresses are normalized to prefixed EVM addresses during loading. Status advertises quote support only with at least two configured tokens and a usable deployment.
 
 RPCs must support EIP-1898 block-hash calls. There is no fallback to latest state. Gas pricing, economic ranking, split routes, Slipstream execution, custom executors, databases, and indexing are outside the current engine.
 

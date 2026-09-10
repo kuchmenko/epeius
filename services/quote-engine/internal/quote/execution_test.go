@@ -147,7 +147,7 @@ func executionFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, 
 			t.Fatal("missing timeout")
 		}
 		return "9991", nil
-	})}
+	}), QuoteConcurrency: 4}
 	h.Store.saveQuote(&quotev1.QuoteRequest{Chain: "test", ChainId: "11155111", TokenIn: tokenA, TokenOut: tokenC, AmountInAtomic: "123456789"}, &quotev1.QuoteFinal{QuoteId: "q", Routes: []*quotev1.RouteQuote{testRoute()}, Block: &quotev1.BlockContext{Number: "112230", Hash: blockHash}}, time.Now())
 	return h, &quotev1.PrepareExecutionRequest{QuoteId: "q", RouteId: testRoute().RouteId, Sender: wallet, SlippageBps: 75}, &allowance, &timestamp, &simulations
 }

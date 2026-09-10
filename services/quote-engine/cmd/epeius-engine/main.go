@@ -157,7 +157,7 @@ func serve(ctx context.Context, settings config.Config, getenv func(string) stri
 	}
 	defer listener.Close()
 	mux := http.NewServeMux()
-	path, handler := quotev1connect.NewQuoteServiceHandler(quote.Handler{Chains: chains, Store: quote.NewStore(), Simulator: quote.NewTenderly(getenv)})
+	path, handler := quotev1connect.NewQuoteServiceHandler(quote.Handler{Chains: chains, Store: quote.NewStore(), Simulator: quote.NewTenderly(getenv), QuoteConcurrency: settings.Engine.QuoteConcurrency})
 	mux.Handle(path, handler)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	served := make(chan error, 1)

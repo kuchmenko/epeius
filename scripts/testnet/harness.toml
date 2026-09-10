@@ -1,3 +1,6 @@
+[engine]
+quote_concurrency = 4
+
 [chain]
 key = "base-sepolia"
 id = 84532

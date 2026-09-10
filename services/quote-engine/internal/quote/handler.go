@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -26,9 +27,10 @@ type Reader interface {
 
 type Handler struct {
 	quotev1connect.UnimplementedQuoteServiceHandler
-	Chains    map[string]Chain
-	Store     *Store
-	Simulator Simulator
+	Chains           map[string]Chain
+	Store            *Store
+	Simulator        Simulator
+	QuoteConcurrency int
 }
 
 type Chain struct {
@@ -44,6 +46,9 @@ var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)
 var address = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 
 func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.QuoteRequest]) (*connect.Response[quotev1.QuoteFinal], error) {
+	if h.QuoteConcurrency < 1 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("quote concurrency is not configured"))
+	}
 	r := req.Msg
 	invalid := func(message string) (*connect.Response[quotev1.QuoteFinal], error) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(message))
@@ -99,59 +104,72 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	}
 	block := &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
 	final := &quotev1.QuoteFinal{QuoteId: rand.Text(), Block: block, SearchComplete: true}
-	candidates := candidates(chain.Config, in, out)
+	candidates := newCandidates(chain.Config, in, out)
 	type result struct {
-		index     int
-		route     *quotev1.RouteQuote
-		err       *quotev1.ProviderError
-		completed bool
+		index int
+		route *quotev1.RouteQuote
+		err   *quotev1.ProviderError
 	}
-	results := make(chan result, len(candidates))
-	for index, candidate := range candidates {
+	concurrency := h.QuoteConcurrency
+	results := make(chan result, concurrency)
+	var workers sync.WaitGroup
+	workers.Add(concurrency)
+	for range concurrency {
 		go func() {
-			start := time.Now()
-			id := candidate.id
-			deployment := chain.Config.Deployments[candidate.deployment]
-			if message := chain.DeploymentErrors[candidate.deployment]; message != "" {
-				results <- result{index: index, completed: true, err: &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: message}}
-				return
-			}
-			provider := uniswapv3.Provider{Client: chain.Client, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter)}
-			output := new(big.Int).Set(amount)
-			var legs []*quotev1.RouteLeg
-			var err error
-			for i, fee := range candidate.fees {
-				var pool common.Address
-				pool, output, err = provider.Quote(searchCtx, candidate.tokens[i], candidate.tokens[i+1], output, fee, common.HexToHash(snapshot.BlockHash))
-				if err != nil || output == nil {
-					break
+			defer workers.Done()
+			for {
+				index, candidate, ok := candidates.next(searchCtx)
+				if !ok {
+					return
 				}
-				legs = append(legs, &quotev1.RouteLeg{Pool: pool.Hex(), TokenIn: candidate.tokens[i].Hex(), TokenOut: candidate.tokens[i+1].Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: fee}})
+				start := time.Now()
+				id := candidate.id
+				deployment := chain.Config.Deployments[candidate.deployment]
+				if message := chain.DeploymentErrors[candidate.deployment]; message != "" {
+					results <- result{index: index, err: &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: message}}
+					continue
+				}
+				provider := uniswapv3.Provider{Client: chain.Client, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter)}
+				output := new(big.Int).Set(amount)
+				var legs []*quotev1.RouteLeg
+				var err error
+				for i, fee := range candidate.fees {
+					var pool common.Address
+					pool, output, err = provider.Quote(searchCtx, candidate.tokens[i], candidate.tokens[i+1], output, fee, common.HexToHash(snapshot.BlockHash))
+					if err != nil || output == nil {
+						break
+					}
+					legs = append(legs, &quotev1.RouteLeg{Pool: pool.Hex(), TokenIn: candidate.tokens[i].Hex(), TokenOut: candidate.tokens[i+1].Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: fee}})
+				}
+				if searchCtx.Err() != nil {
+					results <- result{index: index, err: &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: "search budget expired"}}
+					return
+				}
+				item := result{index: index}
+				if err != nil {
+					item.err = &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: err.Error()}
+				} else if output != nil {
+					item.route = &quotev1.RouteQuote{RouteId: id, Provider: deployment.Kind, DeploymentId: candidate.deployment, Legs: legs, AmountOutAtomic: output.String(), Block: block, LatencyMs: uint32(time.Since(start).Milliseconds())}
+				}
+				results <- item
 			}
-			item := result{index: index, completed: searchCtx.Err() == nil}
-			if !item.completed {
-				item.err = &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: "search budget expired"}
-			} else if err != nil {
-				item.err = &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: err.Error()}
-			} else if output != nil {
-				item.route = &quotev1.RouteQuote{RouteId: id, Provider: deployment.Kind, DeploymentId: candidate.deployment, Legs: legs, AmountOutAtomic: output.String(), Block: block, LatencyMs: uint32(time.Since(start).Milliseconds())}
-			}
-			results <- item
 		}()
 	}
-	ordered := make([]result, len(candidates))
-	for range candidates {
-		item := <-results
-		ordered[item.index] = item
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+	var ordered []result
+	for item := range results {
+		ordered = append(ordered, item)
 	}
 	if ctx.Err() != nil {
 		return nil, connect.NewError(contextCode(ctx.Err()), ctx.Err())
 	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].index < ordered[j].index })
+	final.SearchComplete = searchCtx.Err() == nil
 	for _, item := range ordered {
-		if !item.completed {
-			final.SearchComplete = false
-		}
-		if item.route != nil && item.completed {
+		if item.route != nil {
 			final.Routes = append(final.Routes, item.route)
 		}
 		if item.err != nil {
@@ -178,7 +196,7 @@ func (h Handler) GetStatus(_ context.Context, _ *connect.Request[quotev1.GetStat
 }
 
 func Status(key string, chain Chain) *quotev1.ChainStatus {
-	supported := len(chain.Config.Deployments) > len(chain.DeploymentErrors)
+	supported := len(chain.Config.Tokens) >= 2 && len(chain.Config.Deployments) > len(chain.DeploymentErrors)
 	status := &quotev1.ChainStatus{Key: key, ChainId: chain.ChainID, Connected: chain.Client != nil, Error: chain.Error, QuotingSupported: supported, ExecutionEnabled: supported && chain.Config.ExecutionEnabled}
 	if status.QuotingSupported {
 		for _, token := range chain.Config.Tokens {
@@ -204,34 +222,77 @@ type candidate struct {
 	fees           []uint32
 }
 
-func candidates(chain config.Chain, in, out common.Address) []candidate {
-	var result []candidate
+type candidateDeployment struct {
+	id   string
+	fees []uint32
+}
+
+type candidateIterator struct {
+	mutex                                     sync.Mutex
+	deployments                               []candidateDeployment
+	intermediates                             []common.Address
+	in, out                                   common.Address
+	deployment, direct, middle, first, second int
+	index                                     int
+}
+
+func newCandidates(chain config.Chain, in, out common.Address) *candidateIterator {
+	iterator := &candidateIterator{in: in, out: out}
 	var ids []string
 	for id := range chain.Deployments {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	var intermediates []common.Address
 	for _, token := range chain.Tokens {
 		a := common.HexToAddress(token.Address)
 		if a != in && a != out {
-			intermediates = append(intermediates, a)
+			iterator.intermediates = append(iterator.intermediates, a)
 		}
 	}
-	sort.Slice(intermediates, func(i, j int) bool { return intermediates[i].Hex() < intermediates[j].Hex() })
+	sort.Slice(iterator.intermediates, func(i, j int) bool { return iterator.intermediates[i].Hex() < iterator.intermediates[j].Hex() })
 	for _, id := range ids {
 		fees := append([]uint32(nil), chain.Deployments[id].Fees...)
 		sort.Slice(fees, func(i, j int) bool { return fees[i] < fees[j] })
-		for _, fee := range fees {
-			result = append(result, candidate{fmt.Sprintf("%s:%d", id, fee), id, []common.Address{in, out}, []uint32{fee}})
+		iterator.deployments = append(iterator.deployments, candidateDeployment{id: id, fees: fees})
+	}
+	return iterator
+}
+
+func (i *candidateIterator) next(ctx context.Context) (int, candidate, bool) {
+	i.mutex.Lock()
+	defer i.mutex.Unlock()
+	if ctx.Err() != nil {
+		return 0, candidate{}, false
+	}
+	for i.deployment < len(i.deployments) {
+		deployment := i.deployments[i.deployment]
+		if i.direct < len(deployment.fees) {
+			fee := deployment.fees[i.direct]
+			i.direct++
+			return i.take(candidate{fmt.Sprintf("%s:%d", deployment.id, fee), deployment.id, []common.Address{i.in, i.out}, []uint32{fee}})
 		}
-		for _, middle := range intermediates {
-			for _, first := range fees {
-				for _, second := range fees {
-					result = append(result, candidate{fmt.Sprintf("%s:%d:%s:%d", id, first, middle.Hex(), second), id, []common.Address{in, middle, out}, []uint32{first, second}})
+		if i.middle < len(i.intermediates) {
+			first, second := deployment.fees[i.first], deployment.fees[i.second]
+			middle := i.intermediates[i.middle]
+			i.second++
+			if i.second == len(deployment.fees) {
+				i.second = 0
+				i.first++
+				if i.first == len(deployment.fees) {
+					i.first = 0
+					i.middle++
 				}
 			}
+			return i.take(candidate{fmt.Sprintf("%s:%d:%s:%d", deployment.id, first, middle.Hex(), second), deployment.id, []common.Address{i.in, middle, i.out}, []uint32{first, second}})
 		}
+		i.deployment++
+		i.direct, i.middle, i.first, i.second = 0, 0, 0, 0
 	}
-	return result
+	return 0, candidate{}, false
+}
+
+func (i *candidateIterator) take(value candidate) (int, candidate, bool) {
+	index := i.index
+	i.index++
+	return index, value, true
 }

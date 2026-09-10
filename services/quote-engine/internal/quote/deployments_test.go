@@ -113,7 +113,7 @@ func TestConfiguredMultiHopCrossProductsAndProviderIsolation(t *testing.T) {
 		fee := new(big.Int).SetBytes(data[100:132]).Uint64()
 		return quoteResponse(input*2 + fee), nil
 	}}
-	handler := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "84532", Client: reader, Config: settings}}}
+	handler := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "84532", Client: reader, Config: settings}}, QuoteConcurrency: 4}
 	request := &quotev1.QuoteRequest{Chain: "test", ChainId: "84532", TokenIn: tokenA, TokenOut: tokenC, AmountInAtomic: "17", SearchBudgetMs: 1000}
 	response, err := handler.GetQuote(context.Background(), connect.NewRequest(request))
 	if err != nil {

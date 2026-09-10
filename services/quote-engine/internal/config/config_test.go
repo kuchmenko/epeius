@@ -15,6 +15,7 @@ search_budget_ms = 2500
 
 [engine]
 listen_addr = "127.0.0.1:8080"
+quote_concurrency = 4
 
 [chains.base]
 chain_id = 8453
@@ -53,6 +54,7 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		{"unsafe integer", "chain_id = 84532", "chain_id = 9007199254740992"},
 		{"bad environment name", `rpc_url_env = "TEST_RPC_URL"`, `rpc_url_env = "BAD-NAME"`},
 		{"bad budget", "search_budget_ms = 2500", "search_budget_ms = 2147478648"},
+		{"zero quote concurrency", "quote_concurrency = 4", "quote_concurrency = 0"},
 		{"public listen", `listen_addr = "127.0.0.1:8080"`, `listen_addr = "0.0.0.0:8080"`},
 		{"URL credentials", `engine_url = "http://127.0.0.1:8080"`, `engine_url = "http://user:secret@127.0.0.1:8080"`},
 		{"URL query", `engine_url = "http://127.0.0.1:8080"`, `engine_url = "http://127.0.0.1:8080?secret=value"`},
@@ -108,6 +110,39 @@ fees = [500, 2500]
 			t.Fatalf("accepted %s", test.new)
 		}
 	}
+}
+
+func TestLoadNormalizesPrefixlessConfiguredAddresses(t *testing.T) {
+	const prefixed = "0x1111111111111111111111111111111111111111"
+	text := validConfig + `[[chains.test-net.tokens]]
+address = "` + prefixed + `"
+symbol = "A"
+decimals = 18
+`
+	t.Run("prefixed control", func(t *testing.T) {
+		if _, err := loadText(t, text); err != nil {
+			t.Fatalf("prefixed control rejected: %v", err)
+		}
+	})
+	t.Run("prefixless token", func(t *testing.T) {
+		got, err := loadText(t, strings.Replace(text, prefixed, strings.TrimPrefix(prefixed, "0x"), 1))
+		if err != nil || got.Chains["test-net"].Tokens[0].Address != prefixed {
+			t.Fatalf("address = %q, error = %v", got.Chains["test-net"].Tokens[0].Address, err)
+		}
+	})
+	t.Run("prefixless deployment", func(t *testing.T) {
+		deploymentText := validConfig + `[chains.test-net.deployments.dex]
+kind = "uniswap-v3"
+factory = "3333333333333333333333333333333333333333"
+quoter = "4444444444444444444444444444444444444444"
+router = "5555555555555555555555555555555555555555"
+fees = [500]
+`
+		got, err := loadText(t, deploymentText)
+		if err != nil || got.Chains["test-net"].Deployments["dex"].Factory != "0x3333333333333333333333333333333333333333" {
+			t.Fatalf("deployment = %+v, error = %v", got.Chains["test-net"].Deployments["dex"], err)
+		}
+	})
 }
 
 func TestConfiguredNetworkTokensAndFeesHaveNoHiddenAllowlist(t *testing.T) {

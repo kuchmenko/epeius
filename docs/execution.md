@@ -12,6 +12,8 @@ For example, an A-to-C quote can offer a direct Uniswap A/C pool, a two-hop Unis
 
 Token addresses, factory, quoter, router, and deployment fee lists come only from TOML. There are no implicit Base WETH, USDC, Uniswap, or provider defaults. Pool addresses and parameters must match the configured factory. `uniswap-v3` and `pancake-v3` choose supported implementations; they do not make arbitrary ABIs configurable. Router addresses come from configuration, not user-supplied transaction targets. Native ETH swaps, transfer-tax tokens, rebasing tokens, Permit2, and arbitrary calldata execution are unsupported.
 
+Before confirmation and again before submission, the terminal checks the route against its local TOML token, deployment, router, and fee lists. It independently encodes the expected swap calldata from the displayed path, recipient, input, minimum output, and deadline, and requires an exact byte match. Uniswap permits one exact-input call inside its deadline multicall; Pancake permits its deadline-bearing exact-input call. Approval must target the local input token and authorize only the declared amount to the local router. An engine response alone cannot authorize a different target or operation. The local config itself must be trusted.
+
 ## Quotes and immutable preparations
 
 An informational quote does not need a wallet and does not authorize execution. A preparation binds one selected quote to the sender, recipient, amount, route, minimum output, deadline, and unsigned transaction. The sender and recipient are the same wallet in this milestone.

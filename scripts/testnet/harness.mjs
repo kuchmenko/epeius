@@ -108,7 +108,10 @@ export async function loadProfile(path) {
   const uni = raw.uniswap;
   const fixtures = raw.fixtures;
   const artifacts = raw.artifacts;
+  const engine = raw.engine;
   if (
+    !Number.isSafeInteger(engine?.quote_concurrency) ||
+    engine.quote_concurrency <= 0 ||
     typeof chain?.key !== "string" ||
     !/^[a-z][a-z0-9-]*$/.test(chain.key) ||
     !Number.isSafeInteger(chain.id) ||
@@ -150,7 +153,11 @@ export async function loadProfile(path) {
     !Object.keys(decimals).length ||
     Object.keys(decimals).some((symbol) => !symbol) ||
     Object.values(decimals).some(
-      (value) => !Number.isInteger(value) || value < 0 || value > 255,
+      (value) =>
+        !Number.isInteger(value) ||
+        value < 0 ||
+        value > 255 ||
+        1000000n * 10n ** BigInt(value) > (1n << 256n) - 1n,
     ) ||
     Object.entries(fixtures.pairs).some(
       ([id, pair]) =>
@@ -165,7 +172,7 @@ export async function loadProfile(path) {
     )
   )
     throw new Error("Malformed harness fixture config");
-  return { chain, uni, fixtures, decimals, artifacts };
+  return { chain, uni, fixtures, decimals, artifacts, engine };
 }
 function cast(args) {
   try {
@@ -215,6 +222,8 @@ export function fixture(
   spacing,
   narrow = false,
 ) {
+  if (!Number.isInteger(spacing) || spacing <= 0)
+    throw new Error("V3 tick spacing must be a positive integer");
   // One whole token0 = one whole token1. Keep raw-unit decimal asymmetry.
   const sqrtPriceX96 = sqrt(
     ((10n ** BigInt(token1Decimals)) << 192n) / 10n ** BigInt(token0Decimals),
@@ -224,21 +233,36 @@ export function fixture(
   );
   const center = Math.floor(tick / spacing) * spacing;
   const width = narrow ? 2 * spacing : Math.ceil(12000 / spacing) * spacing;
+  const lower = center - width;
+  const upper = center + width;
   // ~100 whole tokens for narrow pools, ~10,000 for wide pools.
   const liquidity =
     sqrt(10n ** BigInt(token0Decimals + token1Decimals)) * 10000n;
+  if (
+    sqrtPriceX96 < 4295128739n ||
+    sqrtPriceX96 >= 1461446703485210103287273052203988822378723970342n ||
+    !Number.isSafeInteger(lower) ||
+    !Number.isSafeInteger(upper) ||
+    lower < -887272 ||
+    upper > 887272 ||
+    lower >= upper ||
+    lower % spacing !== 0 ||
+    upper % spacing !== 0 ||
+    liquidity <= 0n ||
+    liquidity > (1n << 128n) - 1n
+  )
+    throw new Error("Generated V3 fixture exceeds protocol bounds");
   return {
     sqrtPriceX96: String(sqrtPriceX96),
-    lower: center - width,
-    upper: center + width,
+    lower,
+    upper,
     liquidity: String(liquidity),
   };
 }
 
 export async function run(o) {
-  const { chain, uni, fixtures, decimals, artifacts } = await loadProfile(
-    o.config,
-  );
+  const { chain, uni, fixtures, decimals, artifacts, engine } =
+    await loadProfile(o.config);
   const weth = chain.weth;
   const url = process.env[chain.rpc_url_env];
   if (!url || !/^https?:\/\//.test(url))
@@ -263,6 +287,8 @@ export async function run(o) {
   if (BigInt(await rpc("eth_chainId")) !== BigInt(chain.id))
     throw new Error(`Chain guard: expected ${chain.key} ${chain.id}`);
   const manifestExists = existsSync(o.manifest);
+  if (o.command === "check" && !manifestExists)
+    throw new Error(`Deployment manifest not found: ${o.manifest}`);
   const manifest = manifestExists
     ? JSON.parse(readFileSync(o.manifest))
     : {
@@ -554,7 +580,58 @@ export async function run(o) {
       throw new Error(
         "Explicit recipients must include --sender to pay for liquidity",
       );
-    for (const [symbol, token] of Object.entries(manifest.tokens)) {
+    const maxUint256 = (1n << 256n) - 1n;
+    const tokenAmounts = Object.entries(manifest.tokens).map(
+      ([symbol, token]) => {
+        const amount = 1000000n * 10n ** BigInt(token.decimals);
+        if (amount <= 0n || amount > maxUint256)
+          throw new Error(`Mint amount exceeds uint256: ${symbol}`);
+        return { symbol, token, amount };
+      },
+    );
+    const poolPlans = [];
+    for (const [provider, factory, fees] of [
+      ["uni", uni.factory, fixtures.uniswap_fees],
+      ["pancake", manifest.pancake.factory, fixtures.pancake_fees],
+    ]) {
+      for (const fee of fees) {
+        const spacing = Number(
+          BigInt(await call(factory, "feeAmountTickSpacing(uint24)", [fee])),
+        );
+        if (!Number.isSafeInteger(spacing) || spacing <= 0)
+          throw new Error(
+            `Unsupported ${provider} fee ${fee}: invalid tick spacing`,
+          );
+        for (const [pairID, pair] of Object.entries(fixtures.pairs)) {
+          const key = `${provider}-${pairID}-${fee}`;
+          const [t0, t1] = pair
+            .map((s) => manifest.tokens[s])
+            .sort((a, b) =>
+              a.address.toLowerCase().localeCompare(b.address.toLowerCase()),
+            );
+          const values = fixture(
+            t0.decimals,
+            t1.decimals,
+            spacing,
+            fee !== fixtures.broad_fee,
+          );
+          const pool = `0x${(await call(factory, "getPool(address,address,uint24)", [t0.address, t1.address, fee])).slice(-40)}`;
+          poolPlans.push({
+            provider,
+            factory,
+            fee,
+            pairID,
+            pair,
+            key,
+            t0,
+            t1,
+            pool,
+            values,
+          });
+        }
+      }
+    }
+    for (const { symbol, token, amount } of tokenAmounts) {
       for (const recipient of [
         ...new Set(o.recipients.map((r) => r.toLowerCase())),
       ]) {
@@ -562,84 +639,64 @@ export async function run(o) {
           `mint-${symbol}-${recipient}`,
           token.address,
           "mint(address,uint256)",
-          [recipient, 1000000n * 10n ** BigInt(token.decimals)],
+          [recipient, amount],
         );
       }
       await write(
         `approve-${symbol}`,
         token.address,
         "approve(address,uint256)",
-        [manifest.seeder, 1000000n * 10n ** BigInt(token.decimals)],
+        [manifest.seeder, amount],
       );
     }
-    for (const [provider, factory, fees] of [
-      ["uni", uni.factory, fixtures.uniswap_fees],
-      ["pancake", manifest.pancake.factory, fixtures.pancake_fees],
-    ]) {
-      for (const [pairID, pair] of Object.entries(fixtures.pairs))
-        for (const fee of fees) {
-          const key = `${provider}-${pairID}-${fee}`;
-          const [t0, t1] = pair
-            .map((s) => manifest.tokens[s])
-            .sort((a, b) =>
-              a.address.toLowerCase().localeCompare(b.address.toLowerCase()),
-            );
-          let pool = `0x${(await call(factory, "getPool(address,address,uint24)", [t0.address, t1.address, fee])).slice(-40)}`;
-          if (same(pool, zero)) {
-            await write(
-              `create-${key}`,
-              factory,
-              "createPool(address,address,uint24)",
-              [t0.address, t1.address, fee],
-            );
-            if (!o.broadcast) {
-              console.log(
-                `DRY ${key}: initialize and seed after creation (narrow=${fee !== fixtures.broad_fee})`,
-              );
-              continue;
-            }
-            pool = await addr(factory, "getPool(address,address,uint24)", [
-              t0.address,
-              t1.address,
-              fee,
-            ]);
-          }
-          const spacing = Number(
-            BigInt(await call(factory, "feeAmountTickSpacing(uint24)", [fee])),
+    for (const plan of poolPlans) {
+      const { provider, factory, fee, pair, key, t0, t1, values: f } = plan;
+      let { pool } = plan;
+      if (same(pool, zero)) {
+        await write(
+          `create-${key}`,
+          factory,
+          "createPool(address,address,uint24)",
+          [t0.address, t1.address, fee],
+        );
+        if (!o.broadcast) {
+          console.log(
+            `DRY ${key}: initialize and seed after creation (narrow=${fee !== fixtures.broad_fee})`,
           );
-          const f = fixture(
-            t0.decimals,
-            t1.decimals,
-            spacing,
-            fee !== fixtures.broad_fee,
-          );
-          const slot = await call(pool, "slot0()");
-          if (BigInt(`0x${slot.slice(2, 66)}`) === 0n)
-            await write(`initialize-${key}`, pool, "initialize(uint160)", [
-              f.sqrtPriceX96,
-            ]);
-          await write(
-            `seed-${key}`,
-            manifest.seeder,
-            "seed(address,address,int24,int24,uint128)",
-            [factory, pool, f.lower, f.upper, f.liquidity],
-          );
-          const entry = {
-            key,
-            provider,
-            pair,
-            fee,
-            address: pool,
-            token0: t0.address,
-            token1: t1.address,
-            ...f,
-            narrow: fee !== fixtures.broad_fee,
-          };
-          manifest.pools = manifest.pools
-            .filter((p) => p.key !== key)
-            .concat(entry);
-          save();
+          continue;
         }
+        pool = await addr(factory, "getPool(address,address,uint24)", [
+          t0.address,
+          t1.address,
+          fee,
+        ]);
+      }
+      const slot = await call(pool, "slot0()");
+      if (BigInt(`0x${slot.slice(2, 66)}`) === 0n)
+        await write(`initialize-${key}`, pool, "initialize(uint160)", [
+          f.sqrtPriceX96,
+        ]);
+      await write(
+        `seed-${key}`,
+        manifest.seeder,
+        "seed(address,address,int24,int24,uint128)",
+        [factory, pool, f.lower, f.upper, f.liquidity],
+      );
+      const entry = {
+        key,
+        provider,
+        pair,
+        fee,
+        address: pool,
+        token0: t0.address,
+        token1: t1.address,
+        ...f,
+        narrow: fee !== fixtures.broad_fee,
+      };
+      manifest.pools = manifest.pools
+        .filter((p) => p.key !== key)
+        .concat(entry);
+      save();
     }
   }
   if (o.command === "check") {
@@ -661,6 +718,7 @@ export async function run(o) {
       "",
       "[engine]",
       'listen_addr = "127.0.0.1:8080"',
+      `quote_concurrency = ${engine.quote_concurrency}`,
       "",
       `[chains.${chain.key}]`,
       `chain_id = ${chain.id}`,
