@@ -69,7 +69,7 @@ uniswap_deployment = "uniswap"
 pancake_deployment = "pancake"
 ```
 
-These IDs must name the correct kinds and distinct configured router addresses. Preparation verifies nonempty executor code and both router getters at the execution block, including recheck. These checks prove configured linkage, not bytecode provenance: operators must verify the deployed artifact and constructor arguments independently before admitting its address. No executor is deployed or enabled by this change.
+These IDs must name the correct kinds and distinct configured router addresses. Preparation verifies nonempty executor code and both router getters at the execution block, including recheck. These checks prove configured linkage, not bytecode provenance: operators must verify the deployed artifact and constructor arguments independently before admitting its address. No executor is implicitly enabled. The explicitly authorized [Base Sepolia deployment and acceptance](base-sepolia-acceptance.md) records one verified artifact and constructor combination.
 
 Clients admit tokens and metadata against local TOML before quoting. The engine retains cheap in-memory request checks for direct API callers; startup handles existing metadata/deployment checks. No additional token-classification RPC is added to quote search. Executor linkage, allowance reads, and Tenderly checks occur during preparation, not route search. No speedup is claimed.
 
@@ -89,7 +89,7 @@ Terminal validation independently checks local executor/deployment/token/fee con
 
 A revert rolls back that transaction's swaps and token transfers. Gas is still paid, and an earlier approval transaction remains confirmed. The same executor call will be used for simulation and actual execution; a simulation-only wrapper would not establish the same guarantee.
 
-Local proofs cover independent Go/TypeScript/cast encoding vectors, exact-size quote and rounding fixtures, CLI request/recheck/refusal paths, Tenderly token-owner/allowance mutations, and authentic-router Foundry tests. No live executor deployment, Tenderly response, funded execution, or public-network result has been verified. Live direct-route coverage and selected-route commands in [testnet checks](testnet.md) do not establish executor acceptance.
+Local proofs cover independent Go/TypeScript/cast encoding vectors, exact-size quote and rounding fixtures, CLI request/recheck/refusal paths, Tenderly token-owner/allowance mutations, and authentic-router Foundry tests. [Dated Base Sepolia evidence](base-sepolia-acceptance.md) separately records four live executor scenarios with exact Tenderly simulation and canonical receipts. Live direct-route coverage and selected-route commands in [testnet checks](testnet.md) do not by themselves establish executor acceptance.
 
 ## Public testnet checks
 

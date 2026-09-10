@@ -156,5 +156,6 @@ verify both immutable router getters, use exact per-allocation quotes, encode th
 golden ABI, simulate that exact transaction, and validate caller/executor/router
 token deltas and temporary allowances. The Go/proto/terminal integration and local
 Tenderly fixtures implement these checks; see [execution configuration](../docs/execution.md#configured-executor).
-Deployment provenance, production token admission, and live Tenderly/execution
-proof remain separately authorized work.
+The explicitly authorized [Base Sepolia acceptance](../docs/base-sepolia-acceptance.md)
+records one deployment's exact runtime correspondence and live Tenderly/execution
+proof. Other deployments and production token admission require separate review.
