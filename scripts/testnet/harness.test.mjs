@@ -156,63 +156,67 @@ const prepared =
     ),
   ) &&
   spawnSync("cast", ["--version"], { stdio: "ignore" }).status === 0;
-test("full dry deploy estimates every transaction without signing, broadcasting or writing manifest", {
-  skip: !prepared,
-}, async () => {
-  const dir = mkdtempSync(resolve(tmpdir(), "epeius-harness-"));
-  const previousFetch = globalThis.fetch;
-  const previousURL = process.env.BASE_SEPOLIA_RPC_URL;
-  process.env.BASE_SEPOLIA_RPC_URL = "https://example.invalid";
-  const methods = [];
-  globalThis.fetch = async (_url, request) => {
-    const { method, params } = JSON.parse(request.body);
-    methods.push(method);
-    let result;
-    if (method === "eth_chainId") result = "0x14a34";
-    else if (method === "eth_getCode") result = "0x6000";
-    else if (method === "eth_call") {
-      const target =
-        params[0].data === "0xc45a0155"
-          ? uni.factory
-          : "0x4200000000000000000000000000000000000006";
-      result = `0x${target.slice(2).padStart(64, "0")}`;
-    } else if (method === "eth_getTransactionCount") result = "0x0";
-    else if (method === "eth_estimateGas") result = "0x100000";
-    else if (method === "eth_gasPrice") result = "0x1000";
-    else throw new Error(`Unexpected method ${method}`);
-    return { ok: true, json: async () => ({ result }) };
-  };
-  try {
-    const path = resolve(dir, "manifest.json");
-    await run(options(["deploy", "--sender", sender, "--manifest", path]));
-    assert.equal(methods.filter((m) => m === "eth_estimateGas").length, 7);
-    assert.ok(methods.every((m) => !m.includes("send") && !m.includes("sign")));
-    assert.equal(existsSync(path), false);
-    writeFileSync(path, "{}");
-    await assert.rejects(
-      run(options(["deploy", "--sender", sender, "--manifest", path])),
-      /Malformed deployment manifest/,
-    );
-    writeFileSync(
-      path,
-      JSON.stringify({
-        version: 1,
-        chainId: 84532,
-        transactions: {},
-        tokens: {},
-        pancake: {},
-        pools: [],
-        sender: "0x0000000000000000000000000000000000000002",
-      }),
-    );
-    await assert.rejects(
-      run(options(["deploy", "--sender", sender, "--manifest", path])),
-      /signer mismatch/,
-    );
-  } finally {
-    globalThis.fetch = previousFetch;
-    if (previousURL === undefined) delete process.env.BASE_SEPOLIA_RPC_URL;
-    else process.env.BASE_SEPOLIA_RPC_URL = previousURL;
-    rmSync(dir, { recursive: true });
-  }
-});
+// Bun 1.3.9's node:test adapter ignores the skip option; the skip method works.
+(prepared ? test : test.skip)(
+  "full dry deploy estimates every transaction without signing, broadcasting or writing manifest",
+  async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), "epeius-harness-"));
+    const previousFetch = globalThis.fetch;
+    const previousURL = process.env.BASE_SEPOLIA_RPC_URL;
+    process.env.BASE_SEPOLIA_RPC_URL = "https://example.invalid";
+    const methods = [];
+    globalThis.fetch = async (_url, request) => {
+      const { method, params } = JSON.parse(request.body);
+      methods.push(method);
+      let result;
+      if (method === "eth_chainId") result = "0x14a34";
+      else if (method === "eth_getCode") result = "0x6000";
+      else if (method === "eth_call") {
+        const target =
+          params[0].data === "0xc45a0155"
+            ? uni.factory
+            : "0x4200000000000000000000000000000000000006";
+        result = `0x${target.slice(2).padStart(64, "0")}`;
+      } else if (method === "eth_getTransactionCount") result = "0x0";
+      else if (method === "eth_estimateGas") result = "0x100000";
+      else if (method === "eth_gasPrice") result = "0x1000";
+      else throw new Error(`Unexpected method ${method}`);
+      return { ok: true, json: async () => ({ result }) };
+    };
+    try {
+      const path = resolve(dir, "manifest.json");
+      await run(options(["deploy", "--sender", sender, "--manifest", path]));
+      assert.equal(methods.filter((m) => m === "eth_estimateGas").length, 7);
+      assert.ok(
+        methods.every((m) => !m.includes("send") && !m.includes("sign")),
+      );
+      assert.equal(existsSync(path), false);
+      writeFileSync(path, "{}");
+      await assert.rejects(
+        run(options(["deploy", "--sender", sender, "--manifest", path])),
+        /Malformed deployment manifest/,
+      );
+      writeFileSync(
+        path,
+        JSON.stringify({
+          version: 1,
+          chainId: 84532,
+          transactions: {},
+          tokens: {},
+          pancake: {},
+          pools: [],
+          sender: "0x0000000000000000000000000000000000000002",
+        }),
+      );
+      await assert.rejects(
+        run(options(["deploy", "--sender", sender, "--manifest", path])),
+        /signer mismatch/,
+      );
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousURL === undefined) delete process.env.BASE_SEPOLIA_RPC_URL;
+      else process.env.BASE_SEPOLIA_RPC_URL = previousURL;
+      rmSync(dir, { recursive: true });
+    }
+  },
+);
