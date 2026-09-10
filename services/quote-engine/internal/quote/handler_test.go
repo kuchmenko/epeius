@@ -33,12 +33,10 @@ func snapshot() rpc.Snapshot { return rpc.Snapshot{BlockNumber: "19283746", Bloc
 
 func validRequest() *quotev1.QuoteRequest {
 	return &quotev1.QuoteRequest{
-		Environment: quotev1.Environment_ENVIRONMENT_BASE_MAINNET,
-		Sender:      "0x1234567890123456789012345678901234567890",
-		Recipient:   "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		TokenIn:     uniswapv3.WETH.Hex(), TokenOut: uniswapv3.USDC.Hex(),
+		Chain: "base", ChainId: "8453",
+		TokenIn: uniswapv3.WETH.Hex(), TokenOut: uniswapv3.USDC.Hex(),
 		AmountInAtomic: "1606938044258990275541962092341162602522202993782793822955697",
-		SlippageBps:    137, SearchBudgetMs: 500,
+		SearchBudgetMs: 500,
 	}
 }
 
@@ -67,7 +65,7 @@ func calldataFee(data []byte) uint32 {
 }
 
 func callHandler(ctx context.Context, client Reader, request *quotev1.QuoteRequest) (*quotev1.QuoteFinal, error) {
-	response, err := (Handler{Client: client, Environment: quotev1.Environment_ENVIRONMENT_BASE_MAINNET}).GetQuote(ctx, connect.NewRequest(request))
+	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client}}}).GetQuote(ctx, connect.NewRequest(request))
 	if err != nil {
 		return nil, err
 	}
@@ -246,14 +244,13 @@ func TestHandlerValidationBoundaries(t *testing.T) {
 		mutate func(*quotev1.QuoteRequest)
 		code   connect.Code
 	}{
-		{"unspecified environment", func(r *quotev1.QuoteRequest) { r.Environment = quotev1.Environment_ENVIRONMENT_UNSPECIFIED }, connect.CodeInvalidArgument},
-		{"engine environment mismatch", func(r *quotev1.QuoteRequest) { r.Environment = quotev1.Environment_ENVIRONMENT_BASE_SEPOLIA }, connect.CodeFailedPrecondition},
-		{"bad address", func(r *quotev1.QuoteRequest) { r.Recipient = "0x1234" }, connect.CodeInvalidArgument},
+		{"unknown chain", func(r *quotev1.QuoteRequest) { r.Chain = "unknown" }, connect.CodeInvalidArgument},
+		{"chain ID mismatch", func(r *quotev1.QuoteRequest) { r.ChainId = "1" }, connect.CodeInvalidArgument},
+		{"bad address", func(r *quotev1.QuoteRequest) { r.TokenIn = "0x1234" }, connect.CodeInvalidArgument},
 		{"unsupported pair", func(r *quotev1.QuoteRequest) { r.TokenOut = r.TokenIn }, connect.CodeInvalidArgument},
 		{"zero amount", func(r *quotev1.QuoteRequest) { r.AmountInAtomic = "0" }, connect.CodeInvalidArgument},
 		{"signed amount", func(r *quotev1.QuoteRequest) { r.AmountInAtomic = "+1" }, connect.CodeInvalidArgument},
 		{"uint256 overflow", func(r *quotev1.QuoteRequest) { r.AmountInAtomic = tooLarge }, connect.CodeInvalidArgument},
-		{"slippage overflow", func(r *quotev1.QuoteRequest) { r.SlippageBps = 10001 }, connect.CodeInvalidArgument},
 		{"zero budget", func(r *quotev1.QuoteRequest) { r.SearchBudgetMs = 0 }, connect.CodeInvalidArgument},
 	}
 	client := readerFake{snapshot: func(context.Context) (rpc.Snapshot, error) {
@@ -270,10 +267,9 @@ func TestHandlerValidationBoundaries(t *testing.T) {
 			}
 		})
 	}
-	t.Run("maximum uint256, slippage, and positive budget accepted", func(t *testing.T) {
+	t.Run("maximum uint256 and positive budget accepted", func(t *testing.T) {
 		r := validRequest()
 		r.AmountInAtomic = maxUint256
-		r.SlippageBps = 10000
 		r.SearchBudgetMs = 4294967295
 		missing := readerFake{snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil }, call: func(context.Context, common.Address, []byte, common.Hash) ([]byte, error) {
 			return make([]byte, 32), nil
@@ -298,7 +294,7 @@ func TestHandlerEmptyResultsDistinguishMissingPoolsFromFailures(t *testing.T) {
 		}
 		request := validRequest()
 		request.TokenIn, request.TokenOut = request.TokenOut, request.TokenIn
-		request.AmountInAtomic, request.SlippageBps = "1", 0
+		request.AmountInAtomic = "1"
 		got, err := callHandler(context.Background(), client, request)
 		if err != nil || len(got.Routes) != 0 || !got.SearchComplete {
 			t.Fatalf("%+v %v", got, err)
@@ -310,5 +306,48 @@ func TestHandlerEmptyResultsDistinguishMissingPoolsFromFailures(t *testing.T) {
 		if len(got.Errors) != wantErrors {
 			t.Fatalf("errors = %v", got.Errors)
 		}
+	}
+}
+
+func TestStatusSortedWithStartupStateAndBaseTokens(t *testing.T) {
+	client := readerFake{}
+	handler := Handler{Chains: map[string]Chain{
+		"z-test": {ChainID: "84532", Error: "RPC unavailable"},
+		"base":   {ChainID: "8453", Client: client, Snapshot: snapshot()},
+	}}
+	response, err := handler.GetStatus(context.Background(), connect.NewRequest(&quotev1.GetStatusRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chains := response.Msg.Chains
+	if len(chains) != 2 || chains[0].Key != "base" || chains[1].Key != "z-test" {
+		t.Fatalf("chains not sorted: %+v", chains)
+	}
+	if !chains[0].Connected || !chains[0].QuotingSupported || len(chains[0].Tokens) != 2 || chains[0].Tokens[0].Symbol != "WETH" || chains[0].Block.Hash != blockHash {
+		t.Fatalf("wrong Base status: %+v", chains[0])
+	}
+	if chains[1].Connected || chains[1].QuotingSupported || chains[1].Error != "RPC unavailable" || chains[1].Block != nil {
+		t.Fatalf("wrong unavailable status: %+v", chains[1])
+	}
+}
+
+func TestQuoteRejectsUnavailableAndUnsupportedChains(t *testing.T) {
+	request := validRequest()
+	for _, test := range []struct {
+		name    string
+		chain   Chain
+		want    connect.Code
+		chainID string
+	}{
+		{"unavailable", Chain{ChainID: "8453", Error: "offline"}, connect.CodeUnavailable, "8453"},
+		{"unsupported", Chain{ChainID: "1", Client: readerFake{}}, connect.CodeFailedPrecondition, "1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request.ChainId = test.chainID
+			_, err := (Handler{Chains: map[string]Chain{"base": test.chain}}).GetQuote(context.Background(), connect.NewRequest(request))
+			if connect.CodeOf(err) != test.want {
+				t.Fatalf("code = %s, error = %v", connect.CodeOf(err), err)
+			}
+		})
 	}
 }

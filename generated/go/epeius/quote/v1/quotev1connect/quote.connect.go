@@ -33,6 +33,8 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
+	// QuoteServiceGetStatusProcedure is the fully-qualified name of the QuoteService's GetStatus RPC.
+	QuoteServiceGetStatusProcedure = "/epeius.quote.v1.QuoteService/GetStatus"
 	// QuoteServiceGetQuoteProcedure is the fully-qualified name of the QuoteService's GetQuote RPC.
 	QuoteServiceGetQuoteProcedure = "/epeius.quote.v1.QuoteService/GetQuote"
 	// QuoteServiceStreamQuoteProcedure is the fully-qualified name of the QuoteService's StreamQuote
@@ -45,6 +47,7 @@ const (
 
 // QuoteServiceClient is a client for the epeius.quote.v1.QuoteService service.
 type QuoteServiceClient interface {
+	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
 	GetQuote(context.Context, *connect.Request[v1.QuoteRequest]) (*connect.Response[v1.QuoteFinal], error)
 	StreamQuote(context.Context, *connect.Request[v1.QuoteRequest]) (*connect.ServerStreamForClient[v1.QuoteEvent], error)
 	PrepareExecution(context.Context, *connect.Request[v1.PrepareExecutionRequest]) (*connect.Response[v1.PrepareExecutionResponse], error)
@@ -61,6 +64,12 @@ func NewQuoteServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 	baseURL = strings.TrimRight(baseURL, "/")
 	quoteServiceMethods := v1.File_epeius_quote_v1_quote_proto.Services().ByName("QuoteService").Methods()
 	return &quoteServiceClient{
+		getStatus: connect.NewClient[v1.GetStatusRequest, v1.GetStatusResponse](
+			httpClient,
+			baseURL+QuoteServiceGetStatusProcedure,
+			connect.WithSchema(quoteServiceMethods.ByName("GetStatus")),
+			connect.WithClientOptions(opts...),
+		),
 		getQuote: connect.NewClient[v1.QuoteRequest, v1.QuoteFinal](
 			httpClient,
 			baseURL+QuoteServiceGetQuoteProcedure,
@@ -84,9 +93,15 @@ func NewQuoteServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 
 // quoteServiceClient implements QuoteServiceClient.
 type quoteServiceClient struct {
+	getStatus        *connect.Client[v1.GetStatusRequest, v1.GetStatusResponse]
 	getQuote         *connect.Client[v1.QuoteRequest, v1.QuoteFinal]
 	streamQuote      *connect.Client[v1.QuoteRequest, v1.QuoteEvent]
 	prepareExecution *connect.Client[v1.PrepareExecutionRequest, v1.PrepareExecutionResponse]
+}
+
+// GetStatus calls epeius.quote.v1.QuoteService.GetStatus.
+func (c *quoteServiceClient) GetStatus(ctx context.Context, req *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error) {
+	return c.getStatus.CallUnary(ctx, req)
 }
 
 // GetQuote calls epeius.quote.v1.QuoteService.GetQuote.
@@ -106,6 +121,7 @@ func (c *quoteServiceClient) PrepareExecution(ctx context.Context, req *connect.
 
 // QuoteServiceHandler is an implementation of the epeius.quote.v1.QuoteService service.
 type QuoteServiceHandler interface {
+	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
 	GetQuote(context.Context, *connect.Request[v1.QuoteRequest]) (*connect.Response[v1.QuoteFinal], error)
 	StreamQuote(context.Context, *connect.Request[v1.QuoteRequest], *connect.ServerStream[v1.QuoteEvent]) error
 	PrepareExecution(context.Context, *connect.Request[v1.PrepareExecutionRequest]) (*connect.Response[v1.PrepareExecutionResponse], error)
@@ -118,6 +134,12 @@ type QuoteServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewQuoteServiceHandler(svc QuoteServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	quoteServiceMethods := v1.File_epeius_quote_v1_quote_proto.Services().ByName("QuoteService").Methods()
+	quoteServiceGetStatusHandler := connect.NewUnaryHandler(
+		QuoteServiceGetStatusProcedure,
+		svc.GetStatus,
+		connect.WithSchema(quoteServiceMethods.ByName("GetStatus")),
+		connect.WithHandlerOptions(opts...),
+	)
 	quoteServiceGetQuoteHandler := connect.NewUnaryHandler(
 		QuoteServiceGetQuoteProcedure,
 		svc.GetQuote,
@@ -138,6 +160,8 @@ func NewQuoteServiceHandler(svc QuoteServiceHandler, opts ...connect.HandlerOpti
 	)
 	return "/epeius.quote.v1.QuoteService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case QuoteServiceGetStatusProcedure:
+			quoteServiceGetStatusHandler.ServeHTTP(w, r)
 		case QuoteServiceGetQuoteProcedure:
 			quoteServiceGetQuoteHandler.ServeHTTP(w, r)
 		case QuoteServiceStreamQuoteProcedure:
@@ -152,6 +176,10 @@ func NewQuoteServiceHandler(svc QuoteServiceHandler, opts ...connect.HandlerOpti
 
 // UnimplementedQuoteServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedQuoteServiceHandler struct{}
+
+func (UnimplementedQuoteServiceHandler) GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("epeius.quote.v1.QuoteService.GetStatus is not implemented"))
+}
 
 func (UnimplementedQuoteServiceHandler) GetQuote(context.Context, *connect.Request[v1.QuoteRequest]) (*connect.Response[v1.QuoteFinal], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("epeius.quote.v1.QuoteService.GetQuote is not implemented"))

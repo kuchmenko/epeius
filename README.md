@@ -2,108 +2,156 @@
 
 Epeius is a proof of concept trading terminal and quote engine for EVM, currently targeting Base.
 
-The Bun/TypeScript terminal calls a Go service over ConnectRPC. Base mainnet quoting supports direct WETH/USDC routes in both directions. No keys, signing, or transaction sending are supported.
+One Go engine serves all chains configured in `epeius.toml`. The Bun terminal calls it over ConnectRPC. Quotes currently support direct Uniswap V3 WETH/USDC routes on Base mainnet, in both directions. Base Sepolia supports connectivity checks only. No wallet keys, signing, or transaction sending are supported.
 
 ## Quick start
 
-Requires **Bun 1.3.7** and **Go 1.26.4**, on Linux or macOS. Run commands from the repository root.
+Requires **Bun 1.3.9** and **Go 1.26.4**. Run from the repository root:
 
 ```bash
 bun install --frozen-lockfile
 bun run setup
 bun run generate
 cp .env.example .env
-bun run dev
+bun run engine
 ```
 
-The example configuration uses the public Base Sepolia RPC. It verifies connectivity only; quoting is unsupported there. For quotes, configure Base mainnet below. Startup shows the verified network, block, and engine address. Keep it running and use a second terminal for commands. Ctrl+C stops the engine.
+If `.env` already exists, edit it instead of overwriting it. Public RPCs are rate-limited; replace their URLs with your provider's HTTPS URLs if needed. No test ETH is required.
 
-`setup` downloads Go dependencies and pinned generators into `.tools/bin`. Buf and TypeScript tooling come from the Bun lockfile; no global installation is needed. `dev` builds the Go executable but does not install dependencies or regenerate code.
+Keep the engine running. In another terminal:
 
-## Networks
+```bash
+bun run terminal -- status
+bun run terminal -- tokens --chain base
+bun run terminal -- quote --chain base --in WETH --out USDC --amount 0.01
+```
 
-Set both values in `.env`:
+Ctrl+C stops the engine and releases its port. `engine` builds the Go executable before starting; it does not install dependencies or regenerate bindings. `setup` installs pinned generators into `.tools/bin` and downloads Go dependencies. No global generators are needed.
+
+## Configuration and RPC credentials
+
+`epeius.toml` lives in the repository root:
+
+```toml
+[terminal]
+default_chain = "base"
+engine_url = "http://127.0.0.1:8080"
+search_budget_ms = 2000
+
+[engine]
+listen_addr = "127.0.0.1:8080"
+
+[chains.base]
+chain_id = 8453
+rpc_url_env = "BASE_RPC_URL"
+
+[chains.base-sepolia]
+chain_id = 84532
+rpc_url_env = "BASE_SEPOLIA_RPC_URL"
+```
+
+Each chain references its own environment variable. Keep URL values in the ignored `.env` file, not TOML:
 
 ```dotenv
-# Base Sepolia (chain ID 84532)
-EPEIUS_ENVIRONMENT=base-sepolia
-EPEIUS_RPC_URL=https://sepolia.base.org
+BASE_RPC_URL=https://mainnet.base.org
+BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 ```
 
-For Base mainnet (chain ID 8453):
+Bun loads `.env` and passes the environment to Go. Exported variables take precedence. The Go executable does not load `.env` itself. For a file outside the checkout, use an explicit path:
 
-```dotenv
-EPEIUS_ENVIRONMENT=base-mainnet
-EPEIUS_RPC_URL=https://mainnet.base.org
+```bash
+bun --env-file=/absolute/path/to/.env scripts/engine.ts
 ```
 
-Both are **read-only**. Wrong-chain RPCs fail startup. Public endpoints are rate-limited; use your provider URL if needed. Keep credentials in `.env`, which Git ignores. No test ETH is required.
+The default config path is `./epeius.toml` in the working directory. There is no parent-directory search or config merging. Select a different file explicitly:
 
-Remote RPC endpoints must use HTTPS. HTTP is allowed only for loopback IPs and `localhost`.
+```bash
+bun run engine -- --config /absolute/path/to/epeius.toml
+bun run terminal -- status --config /absolute/path/to/epeius.toml
+```
 
-`mainnet.base.org` can rate-limit a four-tier search. `https://base-rpc.publicnode.com` is another public Base mainnet endpoint; select it explicitly through `EPEIUS_RPC_URL`. There is no automatic retry or provider fallback.
+Unknown config fields and duplicate chain IDs are rejected. Chain keys use lowercase letters, digits, and hyphens, starting with a letter. IDs are positive integers up to 9,007,199,254,740,991. The default chain must exist in the config. When changing the listen port, update `terminal.engine_url` too, or pass `--engine-url` to the terminal.
 
-Optional settings: `EPEIUS_LISTEN_ADDR` defaults to `127.0.0.1:8080`; `EPEIUS_ENGINE_URL` defaults to `http://127.0.0.1:8080`. Change both when selecting a different port. The engine only binds loopback IPs.
+The engine checks all configured RPCs in parallel at startup. Each check has a 10-second timeout and verifies the actual chain ID. A failed chain stays unavailable with a reason; other chains can run. If every chain fails, startup fails. `status` shows startup verification, not continuous health monitoring. After fixing an unavailable chain, restart the engine. There is no automatic retry, reconnect, or provider fallback.
 
-Root Bun commands load `.env` and pass it to Go. Exported environment variables take precedence. Running the Go binary directly requires exported variables; it does not read `.env`.
+Remote RPC URLs require HTTPS; HTTP is allowed only for loopback IPs and `localhost`. The engine binds only to a loopback IP. Credentials and RPC URL values are not included in status output.
+
+Adding a TOML chain enables connectivity checks without changing a chain enum. It does **not** add quote support: providers, deployed contracts, and supported pairs must also exist. Contract configuration is deferred.
 
 ## Commands
 
+| Command | Purpose | Running engine needed |
+| --- | --- | --- |
+| `bun run engine` | Build and start all configured chains | No |
+| `bun run terminal -- chains` | List configured chains and whether RPC variables are set; no network calls | No |
+| `bun run terminal -- chain check base` | Verify one chain's RPC and read a block | No |
+| `bun run terminal -- status` | Show all chains known to the engine | Yes |
+| `bun run terminal -- tokens --chain base` | List supported token addresses, symbols, and decimals | Yes |
+| `bun run terminal -- quote ...` | Request an informational exact-input quote | Yes |
+| `bun run terminal --help` | Show CLI usage without configuration | No |
+
+`chains` and `chain check` use the Go configuration loader; they build the executable if it is missing. `--config PATH` works on terminal commands. `--engine-url URL` overrides the endpoint for `status`, `tokens`, and `quote`. `--chain` selects a chain, otherwise the terminal uses `terminal.default_chain`. Every quote sends the selected key and chain ID explicitly; the engine rejects mismatches.
+
+Add `--json` to terminal result commands for machine-readable stdout. Quote JSON follows Protobuf JSON conventions, including omission of default-valued fields. Diagnostics go to stderr. `quote` exits 0 when at least one route exists, otherwise 1. `chain check` exits 1 on a failed check; `status` exits 1 if any configured chain is unavailable. Failed chain checks still include their result in JSON stdout.
+
+## Tokens and amounts
+
+Use symbols or addresses. Symbols are case-insensitive and resolved only within the selected chain's supported tokens, supplied by the engine. Unknown or ambiguous symbols fail; `ETH` is not an alias for `WETH`. An address does not bypass pair restrictions.
+
 ```bash
-bun run dev                       # Engine and terminal startup view
-bun run engine                    # Engine only, with JSON readiness output
-bun run terminal -- quote --help   # CLI options
-bun run check                     # Formatting, lint, types, tests, builds
-bun run check:generated            # Compare bindings against fresh generation
-bun run smoke                     # Read-only live check using the selected network
-```
+# 25 USDC to WETH
+bun run terminal -- quote --in USDC --out WETH --amount 25
 
-`quote` accepts explicit token addresses and an atomic input amount. It exits 0 when at least one route is returned, otherwise 1. Human output includes exact decimal and atomic amounts, block data, fee tiers, pools, and provider errors. Add `--json` for protobuf JSON. `execute` exits 1 without signing or sending.
-
-The terminal's quote deadline is the search budget plus 5 seconds, allowing the engine to return partial results after the search budget expires. CLI budgets are limited to 2,147,478,647 ms to keep that deadline within Bun's timer range. Client cancellation or transport deadline expiry still fails the request rather than returning partial data.
-
-With engine running against Base mainnet, quote 1 WETH to native USDC:
-
-```bash
-bun run terminal -- quote \
-  --environment base-mainnet \
-  --sender 0x1111111111111111111111111111111111111111 \
-  --recipient 0x1111111111111111111111111111111111111111 \
+# 0.01 WETH to USDC, using explicit contracts and atomic units
+bun run terminal -- quote --chain base \
   --in 0x4200000000000000000000000000000000000006 \
   --out 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
-  --amount-atomic 1000000000000000000 \
-  --slippage-bps 50 \
-  --search-budget-ms 2000
+  --amount-atomic 10000000000000000 \
+  --search-budget-ms 2000 --json
 ```
 
-For 100 USDC to WETH, swap `--in` and `--out` and use `--amount-atomic 100000000`. Addresses and atomic units remain explicit.
+Provide exactly one of `--amount` or `--amount-atomic`. Decimal conversion uses token decimals and integer arithmetic, never floating point or rounding. For WETH, `0.01` means `10000000000000000` atomic units; for USDC, `12.345678` means `12345678`. Excess decimal places, scientific notation, zero, negative amounts, and uint256 overflow are rejected.
 
-`smoke` starts its own engine on a free port. On mainnet it checks positive WETH/USDC quotes in both directions; on Sepolia it checks connectivity and explicit rejection of quoting. It stops its engine when done.
+`--search-budget-ms` overrides the TOML default. It must be between 1 and 2,147,478,647 ms. The quote transport deadline is the budget plus 5 seconds, leaving time to return partial results. Cancellation or transport expiry fails the request rather than returning partial data.
 
-For either network without changing `.env`:
+## Troubleshooting and previous CLI versions
+
+- **Engine unavailable:** run `bun run engine`; verify `terminal.engine_url` and the listen port. The terminal never silently starts a server for a quote.
+- **RPC variable missing:** run `chains` to find its variable name, set it in `.env`, then restart the engine.
+- **Wrong chain ID:** use an RPC for the chain configured in TOML. Changing a key's name does not change network identity.
+- **Unsupported quoting:** a connected network is not necessarily quote-supported. Use Base WETH/USDC for this milestone.
+- **RPC failure or partial search:** inspect the route errors; check provider availability and rate limits. The engine never substitutes another endpoint.
+- **Old engine/client:** restart using the updated checkout. This protocol update requires matching engine and terminal versions.
+
+`bun run engine` replaces `bun run dev`. The old `EPEIUS_ENVIRONMENT`, `EPEIUS_RPC_URL`, `EPEIUS_LISTEN_ADDR`, and `EPEIUS_ENGINE_URL` settings are no longer used. Move endpoint settings to TOML and RPC credentials to the per-chain variables.
+
+`--environment` is replaced by `--chain`. `--sender`, `--recipient`, and `--slippage-bps` were removed from informational quotes because they did not affect QuoterV2 output. They are not silently ignored. Quotes do not promise an executable minimum output. `execute`, `StreamQuote`, and `PrepareExecution` remain unimplemented.
+
+## Verification and layout
 
 ```bash
-EPEIUS_ENVIRONMENT=base-mainnet EPEIUS_RPC_URL=https://mainnet.base.org bun run smoke
-EPEIUS_ENVIRONMENT=base-sepolia EPEIUS_RPC_URL=https://sepolia.base.org bun run smoke
+bun run check             # Lint, types, Go race tests, Bun tests, builds
+bun run check:generated   # Compare bindings against fresh generation
+bun run smoke             # Read-only checks against an already running engine
 ```
 
-## Layout
+`smoke` uses the root config's terminal endpoint, requires all engine chains to have connected, and checks positive Base WETH/USDC quotes in both directions. It never stops the running engine. CI uses credential-free local RPC and Connect fixtures; live checks are separate.
 
 ```text
-apps/terminal/                    Bun CLI and Connect client
-services/quote-engine/            Go module
-  cmd/epeius-engine/              Engine entry point
-  internal/rpc/                  Network verification and pinned reads
-  internal/quote/                Quote handler and transport tests
+epeius.toml                       Runtime settings and chain definitions
+apps/terminal/src/                Commands, terminal config, token input, output
+services/quote-engine/
+  cmd/epeius-engine/              Server and local inspection commands
+  internal/config/               Strict TOML loading and validation
+  internal/rpc/                  Chain verification and pinned reads
+  internal/quote/                Multi-chain status and quote handler
   internal/providers/uniswapv3/   Direct quotes and original local ABIs
-proto/epeius/quote/v1/            QuoteService contract
+proto/epeius/quote/v1/            Connect service contract
 generated/go/                    Generated Go module
 generated/ts/                    Generated TypeScript bindings
-scripts/                         Local launch and check commands
+scripts/                         Launch, tests, and smoke check
 ```
 
-`GetQuote` searches fee tiers 100, 500, 3000, and 10000 pips at one canonical block hash. This is a limited candidate set, not every pool on Base. Results follow fee order, not economic rank. `searchComplete` means all candidate attempts finished within the budget; individual failures remain in `errors`. A partial search retains finished quotes. RPCs must support EIP-1898 block-hash calls; the engine never falls back to latest state.
+The search covers fee tiers 100, 500, 3000, and 10000 pips at one canonical block hash. Results follow fee order, not economic rank. `searchComplete` means all candidate attempts finished within the budget; individual failures remain in `errors`. RPCs must support EIP-1898 block-hash calls; there is no fallback to latest state. Gas pricing, economic scoring, additional venues, intermediate or split routes, execution, forks, caches, databases, and indexing remain outside this milestone.
 
-Sender, recipient, and slippage are validated inputs but do not affect QuoterV2's raw output. Quotes are informational, not executable minimum-output guarantees. `StreamQuote` and `PrepareExecution` remain unimplemented. Generated files are checked in; edit the proto and run `bun run generate`, not the generated code.
-
-CI runs credential-free tests, including Bun-to-Go transport and local RPC fixtures. Live smoke checks are separate.
+Generated files are checked in. Edit the proto and run `bun run generate`, not the generated code. Removed request field numbers are reserved and are not reused.

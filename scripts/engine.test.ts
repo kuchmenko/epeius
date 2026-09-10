@@ -1,7 +1,32 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startEngine } from "./engine";
-import { smokeQuoteArgs } from "./smoke";
 import { root } from "./tasks";
+
+test("importing smoke does not run checks or change exit status", async () => {
+  const child = Bun.spawn(
+    [
+      "bun",
+      "-e",
+      'globalThis.fetch = () => { throw new Error("Unexpected network request"); }; await import("./scripts/smoke.ts");',
+    ],
+    {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 3000,
+      killSignal: "SIGKILL",
+    },
+  );
+  const [out, err, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect({ out, err, code }).toEqual({ out: "", err: "", code: 0 });
+});
 
 const zero = (bytes: number) => `0x${"00".repeat(bytes)}`;
 const header = {
@@ -22,7 +47,9 @@ const header = {
   nonce: zero(8),
 };
 
-function rpcFixture(chain = "0x14a34") {
+async function fixture() {
+  const directory = await mkdtemp(join(tmpdir(), "epeius-engine-"));
+  const config = join(directory, "epeius.toml");
   const methods: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -33,105 +60,179 @@ function rpcFixture(chain = "0x14a34") {
       return Response.json({
         jsonrpc: "2.0",
         id: body.id,
-        result: body.method === "eth_chainId" ? chain : header,
+        result: body.method === "eth_chainId" ? "0x14a34" : header,
       });
     },
   });
+  await Bun.write(
+    config,
+    `[terminal]
+default_chain = "testnet"
+engine_url = "http://127.0.0.1:8080"
+search_budget_ms = 2000
+[engine]
+listen_addr = "127.0.0.1:0"
+[chains.testnet]
+chain_id = 84532
+rpc_url_env = "TEST_RPC"
+[chains.unavailable]
+chain_id = 8453
+rpc_url_env = "MISSING_TEST_RPC"
+`,
+  );
   return {
+    config,
     server,
     methods,
     env: {
       ...process.env,
-      EPEIUS_ENVIRONMENT: "base-sepolia",
-      EPEIUS_RPC_URL: server.url.toString(),
-      EPEIUS_LISTEN_ADDR: "127.0.0.1:0",
+      TEST_RPC: server.url.toString(),
+      MISSING_TEST_RPC: "",
+    },
+    async close() {
+      await server.stop(true);
+      await rm(directory, { recursive: true });
     },
   };
 }
 
-test("real engine verifies RPC, serves CLI, and releases its port without stopping other services", async () => {
-  const fixture = rpcFixture();
-  const engine = await startEngine(fixture.env);
+async function cli(
+  config: string,
+  env: Record<string, string | undefined>,
+  args: string[],
+) {
+  const child = Bun.spawn(
+    ["bun", "apps/terminal/src/main.ts", "--config", config, ...args],
+    {
+      cwd: root,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [out, err, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { out, err, code };
+}
+
+test("one failed chain does not block startup; CLI reports reasons and shutdown preserves other services", async () => {
+  const f = await fixture();
+  const engine = await startEngine(f.env, undefined, ["--config", f.config]);
   try {
-    expect(engine.ready.environment).toBe("base-sepolia");
-    expect(engine.ready.chainId).toBe("84532");
-    expect(engine.ready.blockNumber).toBe("1234567");
-    expect(engine.ready.blockHash).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(fixture.methods).toEqual(["eth_chainId", "eth_getBlockByNumber"]);
-    const cli = Bun.spawn(
-      ["bun", "apps/terminal/src/main.ts", ...smokeQuoteArgs],
-      {
-        cwd: root,
-        env: { ...fixture.env, EPEIUS_ENGINE_URL: engine.ready.url },
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
-    expect(await new Response(cli.stdout).text()).toBe("");
-    expect(await new Response(cli.stderr).text()).toContain(
-      "Quoting is unsupported on Base Sepolia",
-    );
-    expect(await cli.exited).toBe(1);
+    expect(engine.ready.chains.map((c) => [c.key, c.connected])).toEqual([
+      ["testnet", true],
+      ["unavailable", false],
+    ]);
+    expect(engine.ready.chains[0].block?.number).toBe("1234567");
+    expect(f.methods).toEqual(["eth_chainId", "eth_getBlockByNumber"]);
+    const status = await cli(f.config, f.env, [
+      "status",
+      "--engine-url",
+      engine.ready.url,
+    ]);
+    expect(status.code).toBe(1);
+    expect(status.out).toContain("testnet (84532): connected");
+    expect(status.out).toContain("RPC URL environment variable is not set");
+    const quote = await cli(f.config, f.env, [
+      "quote",
+      "--engine-url",
+      engine.ready.url,
+      "--in",
+      "WETH",
+      "--out",
+      "USDC",
+      "--amount",
+      "1",
+    ]);
+    expect(quote.code).toBe(1);
+    expect(quote.err).toContain("Quoting is unsupported on chain testnet");
     await engine.stop();
     expect(await engine.child.exited).toBe(0);
     await expect(fetch(engine.ready.url)).rejects.toThrow();
-    const response = await fetch(fixture.server.url, {
-      method: "POST",
-      body: JSON.stringify({ id: 7, method: "eth_chainId" }),
-    });
-    expect(response.status).toBe(200);
+    expect(
+      (
+        await fetch(f.server.url, {
+          method: "POST",
+          body: JSON.stringify({ id: 7, method: "eth_chainId" }),
+        })
+      ).status,
+    ).toBe(200);
   } finally {
     await engine.stop();
-    await fixture.server.stop(true);
+    await f.close();
   }
 });
 
-test("wrong network and invalid configuration fail before readiness", async () => {
-  const fixture = rpcFixture("0x2105");
+test("chains is offline; chain check works without engine and returns failures as JSON", async () => {
+  const f = await fixture();
   try {
-    await expect(startEngine(fixture.env)).rejects.toThrow(
-      "does not match base-sepolia",
-    );
+    const list = await cli(f.config, f.env, ["chains", "--json"]);
+    expect(list.code).toBe(0);
+    expect(JSON.parse(list.out).chains[0].rpcConfigured).toBe(true);
+    expect(f.methods).toEqual([]);
+    const check = await cli(f.config, f.env, [
+      "chain",
+      "check",
+      "testnet",
+      "--json",
+    ]);
+    expect(check.code).toBe(0);
+    expect(JSON.parse(check.out).chain.chainId).toBe("84532");
+    const failed = await cli(f.config, f.env, [
+      "chain",
+      "check",
+      "unavailable",
+      "--json",
+    ]);
+    expect(failed.code).toBe(1);
+    expect(JSON.parse(failed.out).chain.connected).toBe(false);
     await expect(
-      startEngine({ ...fixture.env, EPEIUS_ENVIRONMENT: "" }),
-    ).rejects.toThrow("EPEIUS_ENVIRONMENT");
-    await expect(
-      startEngine({ ...fixture.env, EPEIUS_LISTEN_ADDR: "0.0.0.0:8080" }),
-    ).rejects.toThrow("loopback");
+      startEngine({ ...f.env, TEST_RPC: "" }, undefined, [
+        "--config",
+        f.config,
+      ]),
+    ).rejects.toThrow("all configured chains failed");
   } finally {
-    await fixture.server.stop(true);
+    await f.close();
   }
 });
 
-test("dev shows the verified environment and Ctrl+C stops its engine", async () => {
-  const fixture = rpcFixture();
-  const dev = Bun.spawn(["bun", "scripts/dev.ts"], {
-    cwd: root,
-    env: fixture.env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const reader = dev.stdout.pipeThrough(new TextDecoderStream()).getReader();
-  const errors = new Response(dev.stderr).text();
-  let output = "";
-  const timeout = setTimeout(() => dev.kill("SIGTERM"), 10000);
+test("named engine launcher shows all chains and Ctrl+C stops engine", async () => {
+  const f = await fixture();
+  const child = Bun.spawn(
+    ["bun", "run", "engine", "--", "--config", f.config],
+    {
+      cwd: root,
+      env: f.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const reader = child.stdout.pipeThrough(new TextDecoderStream()).getReader();
+  const errors = new Response(child.stderr).text();
+  const timeout = setTimeout(() => child.kill("SIGTERM"), 10000);
   try {
+    let output = "";
     while (!output.includes("Press Ctrl+C")) {
       const chunk = await reader.read();
-      if (chunk.done) throw new Error(`dev stopped: ${await errors}`);
+      if (chunk.done) throw new Error(`engine stopped: ${await errors}`);
       output += chunk.value;
     }
-    expect(output).toContain("base-sepolia (read-only)");
+    expect(output).toContain("testnet (84532): connected");
+    expect(output).toContain("unavailable (8453): unavailable");
     const url = output.match(/Engine: (http:\/\/[^\s]+)/)?.[1];
     expect(url).toBeDefined();
-    dev.kill("SIGINT");
-    expect(await dev.exited).toBe(0);
+    child.kill("SIGINT");
+    expect(await child.exited).toBe(0);
     await expect(fetch(url ?? "")).rejects.toThrow();
   } finally {
     clearTimeout(timeout);
     reader.releaseLock();
-    if (dev.exitCode === null) dev.kill("SIGTERM");
-    await dev.exited;
-    await fixture.server.stop(true);
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await child.exited;
+    await f.close();
   }
 }, 15000);

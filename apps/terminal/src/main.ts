@@ -2,168 +2,292 @@ import { parseArgs } from "node:util";
 import { toJsonString } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
 import {
-  Environment,
+  ChainStatusSchema,
+  GetStatusResponseSchema,
   QuoteFinalSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { quoteClient } from "./client";
-import { formatQuote } from "./format";
+import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
+import { formatQuote, formatStatus, formatTokens } from "./format";
+import {
+  chainFromStatus,
+  decimalToAtomic,
+  parseAtomic,
+  resolveToken,
+} from "./tokens";
 
-const help = `Epeius — EVM trading terminal and quote engine (currently Base)
+const help = `Epeius — EVM quote terminal
 
 Usage:
-  bun run dev
-  bun run terminal -- quote [options]
-  bun run terminal -- execute <quote-id> --route <route-id>
+  bun run terminal -- chains [--config PATH] [--json]
+  bun run terminal -- chain check KEY [--config PATH] [--json]
+  bun run terminal -- status [--engine-url URL] [--json]
+  bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
+  bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
+  bun run terminal -- execute
 
-Direct quotes are read-only. Execution is not implemented; no transactions are sent.
+Default config: ./epeius.toml. Execution is not implemented.`;
 
-Quote options (all trade fields are explicit):
-  --environment     base-mainnet or base-sepolia (or EPEIUS_ENVIRONMENT)
-  --sender          EVM address
-  --recipient       EVM address
-  --in              Input token address
-  --out             Output token address
-  --amount-atomic   Positive integer in the input token's smallest unit
-  --slippage-bps    Integer from 0 to 10000
-  --search-budget-ms Positive integer, at most 2147478647
-  --json            Print protobuf JSON
+type Globals = {
+  config?: string;
+  engineUrl?: string;
+  json: boolean;
+  args: string[];
+};
 
-Use token addresses and atomic units; token-symbol lookup is not implemented.`;
-
-export function showStartup(environment: string, url: string) {
-  console.log(
-    `Epeius — ${environment} (read-only)\nEngine: ${url}\nRun bun run terminal -- quote --help in another terminal.\nExecution is not implemented.\nPress Ctrl+C to stop.`,
-  );
+function globals(args: string[]): Globals {
+  const rest: string[] = [];
+  let config: string | undefined;
+  let engineUrl: string | undefined;
+  let json = false;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === "--json") json = true;
+    else if (arg === "--config" || arg === "--engine-url") {
+      const value = args[++index];
+      if (!value) throw new Error(`Provide a value for ${arg}.`);
+      if (arg === "--config") config = value;
+      else engineUrl = value;
+    } else if (arg.startsWith("--config=")) config = arg.slice(9);
+    else if (arg.startsWith("--engine-url=")) engineUrl = arg.slice(13);
+    else rest.push(arg);
+  }
+  return { config, engineUrl, json, args: rest };
 }
 
-export function quoteInput(args: string[], fallbackEnvironment?: string) {
-  let values: Record<string, string | boolean | undefined>;
+function options(args: string[], names: string[]) {
   try {
-    values = parseArgs({
+    return parseArgs({
       args,
       strict: true,
-      options: {
-        ...Object.fromEntries(
-          [
-            "environment",
-            "sender",
-            "recipient",
-            "in",
-            "out",
-            "amount-atomic",
-            "slippage-bps",
-            "search-budget-ms",
-          ].map((name) => [name, { type: "string" as const }]),
-        ),
-        json: { type: "boolean" },
-      },
-    }).values as Record<string, string | boolean | undefined>;
+      options: Object.fromEntries(
+        names.map((name) => [name, { type: "string" }]),
+      ),
+    }).values as Record<string, string | undefined>;
   } catch {
-    throw new Error(
-      "Invalid quote arguments. Run bun run terminal -- quote --help.",
-    );
+    throw new Error("Invalid arguments. Run bun run terminal --help.");
   }
-  const name = values.environment ?? fallbackEnvironment;
-  const environment =
-    name === "base-mainnet"
-      ? Environment.BASE_MAINNET
-      : name === "base-sepolia"
-        ? Environment.BASE_SEPOLIA
-        : undefined;
-  if (environment === undefined)
-    throw new Error("Choose --environment base-mainnet or base-sepolia.");
-  function address(key: string) {
-    const value = values[key];
-    if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value))
-      throw new Error(`Provide a 20-byte EVM address for --${key}.`);
-    return value;
-  }
-  const amountInAtomic = values["amount-atomic"];
-  if (
-    typeof amountInAtomic !== "string" ||
-    !/^[1-9][0-9]*$/.test(amountInAtomic) ||
-    amountInAtomic.length > 78 ||
-    BigInt(amountInAtomic) >= 1n << 256n
-  ) {
-    throw new Error("Use a positive uint256 integer for --amount-atomic.");
-  }
-  function integer(key: string, min: number, max: number) {
-    const value = values[key];
-    if (
-      typeof value !== "string" ||
-      !/^\d+$/.test(value) ||
-      Number(value) < min ||
-      Number(value) > max
-    )
-      throw new Error(`Provide an integer from ${min} to ${max} for --${key}.`);
-    return Number(value);
-  }
-  return {
-    environment,
-    sender: address("sender"),
-    recipient: address("recipient"),
-    tokenIn: address("in"),
-    tokenOut: address("out"),
-    amountInAtomic,
-    slippageBps: integer("slippage-bps", 0, 10000),
-    // Leave response time within Bun's signed 32-bit timer limit.
-    searchBudgetMs: integer("search-budget-ms", 1, 2147483647 - 5000),
-    json: values.json === true,
-  };
 }
 
-export async function main(args: string[]) {
-  if (args.length === 0 || args.includes("--help")) {
+async function goCommand(args: string[], json: boolean, signal: AbortSignal) {
+  if (!(await Bun.file(engineBinary).exists())) await buildEngine(signal);
+  signal.throwIfAborted();
+  const child = Bun.spawn([engineBinary, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stop = () => child.kill("SIGTERM");
+  signal.addEventListener("abort", stop, { once: true });
+  let stdout: string, stderr: string, code: number;
+  try {
+    [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    signal.throwIfAborted();
+  } finally {
+    signal.removeEventListener("abort", stop);
+  }
+  let result: unknown;
+  try {
+    result = JSON.parse(stdout);
+  } catch {
+    // The local Go command sanitizes configuration and RPC errors.
+    throw new Error(
+      stderr.trim() || "Engine command returned an invalid response.",
+    );
+  }
+  if (json) console.log(JSON.stringify(result));
+  else if (args[0] === "chains") {
+    const chains = (result as { chains: Array<Record<string, unknown>> })
+      .chains;
+    for (const chain of chains)
+      console.log(
+        `${chain.key} (${chain.chainId}): ${chain.rpcConfigured ? "RPC configured" : `set ${chain.rpcUrlEnv}`}`,
+      );
+  } else {
+    const chain = (result as { chain: Record<string, unknown> }).chain;
+    console.log(
+      `${chain.key} (${chain.chainId}): ${chain.connected ? "connected" : "unavailable"}${chain.block ? `, block ${(chain.block as { number: string }).number}` : ""}`,
+    );
+    if (chain.error) console.error(chain.error);
+  }
+  return code;
+}
+
+function diagnostic(error: unknown, json: boolean, quoting = false) {
+  let message = error instanceof Error ? error.message : "Command failed.";
+  let code = "invalid_input";
+  if (error instanceof ConnectError) {
+    code = Code[error.code].toLowerCase();
+    message =
+      error.code === Code.Unavailable || error.code === Code.Unknown
+        ? quoting
+          ? "Quote failed: RPC or engine connection unavailable. Check engine status and the chain's RPC provider."
+          : "Cannot reach engine. Start it with bun run engine and check terminal.engine_url."
+        : error.code === Code.InvalidArgument
+          ? "Engine rejected the request as invalid."
+          : error.code === Code.FailedPrecondition
+            ? "Chain is unsupported or not ready for quoting."
+            : error.code === Code.Canceled
+              ? "Request canceled."
+              : error.code === Code.DeadlineExceeded
+                ? "Request deadline expired before completion."
+                : "Engine request failed.";
+  }
+  console.error(json ? JSON.stringify({ error: { code, message } }) : message);
+}
+
+export async function main(rawArgs: string[]) {
+  if (!rawArgs.length || rawArgs.includes("--help")) {
     console.log(help);
     return 0;
   }
-  if (args[0] === "execute") {
-    console.error(
-      "Execution is not implemented. No transaction was signed or sent.",
-    );
-    return 1;
-  }
-  if (args[0] !== "quote") {
-    console.error("Unknown command. Run bun run terminal --help.");
-    return 1;
-  }
+  for (const removed of ["sender", "recipient", "slippage-bps", "environment"])
+    if (
+      rawArgs.some(
+        (arg) => arg === `--${removed}` || arg.startsWith(`--${removed}=`),
+      )
+    ) {
+      diagnostic(
+        new Error(`--${removed} was removed; delete it from this command.`),
+        rawArgs.includes("--json"),
+      );
+      return 1;
+    }
+  let json = rawArgs.includes("--json");
+  let quoting = false;
   const abort = new AbortController();
   const cancel = () => abort.abort();
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
-  let environment = Environment.UNSPECIFIED;
   try {
-    const { json, ...input } = quoteInput(
-      args.slice(1),
-      process.env.EPEIUS_ENVIRONMENT,
+    const parsed = globals(rawArgs);
+    json = parsed.json;
+    const [command, ...args] = parsed.args;
+    if (command === "execute") {
+      diagnostic(
+        new Error(
+          "Execution is not implemented. No transaction was signed or sent.",
+        ),
+        json,
+      );
+      return 1;
+    }
+    const config = await readConfig(parsed.config);
+    if (command === "chains" && args.length === 0)
+      return await goCommand(
+        ["chains", "--config", config.path],
+        json,
+        abort.signal,
+      );
+    if (
+      command === "chain" &&
+      args[0] === "check" &&
+      args[1] &&
+      args.length === 2
+    )
+      return await goCommand(
+        ["chain", "check", args[1], "--config", config.path],
+        json,
+        abort.signal,
+      );
+    if (command !== "status" && command !== "tokens" && command !== "quote")
+      throw new Error("Unknown command. Run bun run terminal --help.");
+    const values = options(
+      args,
+      command === "status"
+        ? []
+        : command === "tokens"
+          ? ["chain"]
+          : [
+              "chain",
+              "in",
+              "out",
+              "amount",
+              "amount-atomic",
+              "search-budget-ms",
+            ],
     );
-    environment = input.environment;
-    const client = quoteClient(
-      process.env.EPEIUS_ENGINE_URL ?? "http://127.0.0.1:8080",
+    const engineUrl = parsed.engineUrl
+      ? validateEngineUrl(parsed.engineUrl)
+      : config.engineUrl;
+    const client = quoteClient(engineUrl);
+    const status = await client.getStatus({}, { signal: abort.signal });
+    if (command === "status") {
+      console.log(
+        json
+          ? toJsonString(GetStatusResponseSchema, status)
+          : formatStatus(status.chains),
+      );
+      return status.chains.every((chain) => chain.connected) ? 0 : 1;
+    }
+    const chain = chainFromStatus(
+      status.chains,
+      values.chain ?? config.defaultChain,
     );
-    const quote = await client.getQuote(input, {
-      signal: abort.signal,
-      timeoutMs: input.searchBudgetMs + 5000,
-    });
+    if (command === "tokens") {
+      console.log(
+        json ? toJsonString(ChainStatusSchema, chain) : formatTokens(chain),
+      );
+      return chain.connected ? 0 : 1;
+    }
+    if (!chain.connected)
+      throw new Error(
+        `Chain ${chain.key} is not connected. ${chain.error} Fix its RPC settings and restart the engine.`,
+      );
+    if (!chain.quotingSupported)
+      throw new Error(`Quoting is unsupported on chain ${chain.key}.`);
+    if (!values.in || !values.out)
+      throw new Error("Provide --in and --out tokens.");
+    if (
+      (values.amount === undefined) ===
+      (values["amount-atomic"] === undefined)
+    )
+      throw new Error("Provide exactly one of --amount or --amount-atomic.");
+    const tokenIn = resolveToken(values.in, chain.tokens);
+    const tokenOut = resolveToken(values.out, chain.tokens);
+    const amountInAtomic =
+      values.amount !== undefined
+        ? decimalToAtomic(values.amount, tokenIn.decimals)
+        : parseAtomic(values["amount-atomic"] as string);
+    const budgetText = values["search-budget-ms"];
+    const searchBudgetMs =
+      budgetText === undefined
+        ? config.searchBudgetMs
+        : /^\d+$/.test(budgetText)
+          ? Number(budgetText)
+          : 0;
+    if (
+      !Number.isInteger(searchBudgetMs) ||
+      searchBudgetMs < 1 ||
+      searchBudgetMs > MAX_BUDGET
+    )
+      throw new Error(`--search-budget-ms must be from 1 to ${MAX_BUDGET}.`);
+    quoting = true;
+    const quote = await client.getQuote(
+      {
+        chain: chain.key,
+        chainId: chain.chainId,
+        tokenIn: tokenIn.address,
+        tokenOut: tokenOut.address,
+        amountInAtomic,
+        searchBudgetMs,
+      },
+      { signal: abort.signal, timeoutMs: searchBudgetMs + 5000 },
+    );
     console.log(
-      json ? toJsonString(QuoteFinalSchema, quote) : formatQuote(quote, input),
+      json
+        ? toJsonString(QuoteFinalSchema, quote)
+        : formatQuote(quote, chain, tokenIn, tokenOut, amountInAtomic),
     );
     if (json && !quote.searchComplete)
       console.error("WARNING: Search was partial; some routes may be missing.");
-    return quote.routes.length > 0 ? 0 : 1;
+    return quote.routes.length ? 0 : 1;
   } catch (error) {
-    if (error instanceof ConnectError) {
-      console.error(
-        error.code === Code.FailedPrecondition &&
-          environment === Environment.BASE_SEPOLIA
-          ? "Quoting is unsupported on Base Sepolia; use it for connectivity checks only."
-          : `Quote request failed (${Code[error.code]}). Check the engine address and availability.`,
-      );
-    } else {
-      console.error(
-        error instanceof Error ? error.message : "Unable to request a quote.",
-      );
-    }
+    diagnostic(error, json, quoting);
     return 1;
   } finally {
     process.off("SIGINT", cancel);

@@ -6,6 +6,8 @@ require (
 	connectrpc.com/connect v1.21.0
 	github.com/ethereum/go-ethereum v1.17.5
 	github.com/kuchmenko/epeius/generated/go v0.0.0
+	github.com/pelletier/go-toml/v2 v2.2.4
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -35,7 +37,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.41.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	google.golang.org/protobuf v1.36.12 // indirect
 )
 
 replace github.com/kuchmenko/epeius/generated/go => ../../generated/go

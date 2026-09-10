@@ -10,27 +10,118 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file epeius/quote/v1/quote.proto.
  */
 export const file_epeius_quote_v1_quote: GenFile = /*@__PURE__*/
-  fileDesc("ChtlcGVpdXMvcXVvdGUvdjEvcXVvdGUucHJvdG8SD2VwZWl1cy5xdW90ZS52MSLTAQoMUXVvdGVSZXF1ZXN0EjEKC2Vudmlyb25tZW50GAEgASgOMhwuZXBlaXVzLnF1b3RlLnYxLkVudmlyb25tZW50Eg4KBnNlbmRlchgCIAEoCRIRCglyZWNpcGllbnQYAyABKAkSEAoIdG9rZW5faW4YBCABKAkSEQoJdG9rZW5fb3V0GAUgASgJEhgKEGFtb3VudF9pbl9hdG9taWMYBiABKAkSFAoMc2xpcHBhZ2VfYnBzGAcgASgNEhgKEHNlYXJjaF9idWRnZXRfbXMYCCABKA0iLAoMQmxvY2tDb250ZXh0Eg4KBm51bWJlchgBIAEoCRIMCgRoYXNoGAIgASgJIk8KCFJvdXRlTGVnEgwKBHBvb2wYASABKAkSEAoIdG9rZW5faW4YAiABKAkSEQoJdG9rZW5fb3V0GAMgASgJEhAKCGZlZV9waXBzGAQgASgNIrQCCgpSb3V0ZVF1b3RlEhAKCHJvdXRlX2lkGAEgASgJEhAKCHByb3ZpZGVyGAIgASgJEicKBGxlZ3MYAyADKAsyGS5lcGVpdXMucXVvdGUudjEuUm91dGVMZWcSGQoRYW1vdW50X291dF9hdG9taWMYBCABKAkSJAoXbmV0d29ya19jb3N0X291dF9hdG9taWMYBSABKAlIAIgBARIhChRlZmZlY3RpdmVfb3V0X2F0b21pYxgGIAEoCUgBiAEBEiwKBWJsb2NrGAcgASgLMh0uZXBlaXVzLnF1b3RlLnYxLkJsb2NrQ29udGV4dBISCgpsYXRlbmN5X21zGAggASgNQhoKGF9uZXR3b3JrX2Nvc3Rfb3V0X2F0b21pY0IXChVfZWZmZWN0aXZlX291dF9hdG9taWMiVgoNUHJvdmlkZXJFcnJvchIQCghwcm92aWRlchgBIAEoCRIVCghyb3V0ZV9pZBgCIAEoCUgAiAEBEg8KB21lc3NhZ2UYAyABKAlCCwoJX3JvdXRlX2lkIvABCgpRdW90ZUZpbmFsEhAKCHF1b3RlX2lkGAEgASgJEisKBnJvdXRlcxgCIAMoCzIbLmVwZWl1cy5xdW90ZS52MS5Sb3V0ZVF1b3RlEi4KBmVycm9ycxgDIAMoCzIeLmVwZWl1cy5xdW90ZS52MS5Qcm92aWRlckVycm9yEhoKDWJlc3Rfcm91dGVfaWQYBCABKAlIAIgBARIsCgVibG9jaxgFIAEoCzIdLmVwZWl1cy5xdW90ZS52MS5CbG9ja0NvbnRleHQSFwoPc2VhcmNoX2NvbXBsZXRlGAYgASgIQhAKDl9iZXN0X3JvdXRlX2lkIqIBCgpRdW90ZUV2ZW50EiwKBXF1b3RlGAEgASgLMhsuZXBlaXVzLnF1b3RlLnYxLlJvdXRlUXVvdGVIABIvCgVlcnJvchgCIAEoCzIeLmVwZWl1cy5xdW90ZS52MS5Qcm92aWRlckVycm9ySAASLAoFZmluYWwYAyABKAsyGy5lcGVpdXMucXVvdGUudjEuUXVvdGVGaW5hbEgAQgcKBWV2ZW50Ij0KF1ByZXBhcmVFeGVjdXRpb25SZXF1ZXN0EhAKCHF1b3RlX2lkGAEgASgJEhAKCHJvdXRlX2lkGAIgASgJIlcKE1Vuc2lnbmVkVHJhbnNhY3Rpb24SEAoIY2hhaW5faWQYASABKAkSCgoCdG8YAiABKAkSDAoEZGF0YRgDIAEoCRIUCgx2YWx1ZV9hdG9taWMYBCABKAkimgEKGFByZXBhcmVFeGVjdXRpb25SZXNwb25zZRIyCgZzdGF0dXMYASABKA4yIi5lcGVpdXMucXVvdGUudjEuUHJlcGFyYXRpb25TdGF0dXMSOQoLdHJhbnNhY3Rpb24YAiABKAsyJC5lcGVpdXMucXVvdGUudjEuVW5zaWduZWRUcmFuc2FjdGlvbhIPCgdtZXNzYWdlGAMgASgJKmYKC0Vudmlyb25tZW50EhsKF0VOVklST05NRU5UX1VOU1BFQ0lGSUVEEAASHAoYRU5WSVJPTk1FTlRfQkFTRV9NQUlOTkVUEAESHAoYRU5WSVJPTk1FTlRfQkFTRV9TRVBPTElBEAIqyQEKEVByZXBhcmF0aW9uU3RhdHVzEiIKHlBSRVBBUkFUSU9OX1NUQVRVU19VTlNQRUNJRklFRBAAEhwKGFBSRVBBUkFUSU9OX1NUQVRVU19SRUFEWRABEigKJFBSRVBBUkFUSU9OX1NUQVRVU19BUFBST1ZBTF9SRVFVSVJFRBACEicKI1BSRVBBUkFUSU9OX1NUQVRVU19SRVFVT1RFX1JFUVVJUkVEEAMSHwobUFJFUEFSQVRJT05fU1RBVFVTX1JFSkVDVEVEEAQyjAIKDFF1b3RlU2VydmljZRJGCghHZXRRdW90ZRIdLmVwZWl1cy5xdW90ZS52MS5RdW90ZVJlcXVlc3QaGy5lcGVpdXMucXVvdGUudjEuUXVvdGVGaW5hbBJLCgtTdHJlYW1RdW90ZRIdLmVwZWl1cy5xdW90ZS52MS5RdW90ZVJlcXVlc3QaGy5lcGVpdXMucXVvdGUudjEuUXVvdGVFdmVudDABEmcKEFByZXBhcmVFeGVjdXRpb24SKC5lcGVpdXMucXVvdGUudjEuUHJlcGFyZUV4ZWN1dGlvblJlcXVlc3QaKS5lcGVpdXMucXVvdGUudjEuUHJlcGFyZUV4ZWN1dGlvblJlc3BvbnNlQkJaQGdpdGh1Yi5jb20va3VjaG1lbmtvL2VwZWl1cy9nZW5lcmF0ZWQvZ28vZXBlaXVzL3F1b3RlL3YxO3F1b3RldjFiBnByb3RvMw");
+  fileDesc("ChtlcGVpdXMvcXVvdGUvdjEvcXVvdGUucHJvdG8SD2VwZWl1cy5xdW90ZS52MSISChBHZXRTdGF0dXNSZXF1ZXN0IjoKBVRva2VuEg8KB2FkZHJlc3MYASABKAkSDgoGc3ltYm9sGAIgASgJEhAKCGRlY2ltYWxzGAMgASgNIr8BCgtDaGFpblN0YXR1cxILCgNrZXkYASABKAkSEAoIY2hhaW5faWQYAiABKAkSEQoJY29ubmVjdGVkGAMgASgIEg0KBWVycm9yGAQgASgJEhkKEXF1b3Rpbmdfc3VwcG9ydGVkGAUgASgIEiYKBnRva2VucxgGIAMoCzIWLmVwZWl1cy5xdW90ZS52MS5Ub2tlbhIsCgVibG9jaxgHIAEoCzIdLmVwZWl1cy5xdW90ZS52MS5CbG9ja0NvbnRleHQiQQoRR2V0U3RhdHVzUmVzcG9uc2USLAoGY2hhaW5zGAEgAygLMhwuZXBlaXVzLnF1b3RlLnYxLkNoYWluU3RhdHVzIs4BCgxRdW90ZVJlcXVlc3QSEAoIdG9rZW5faW4YBCABKAkSEQoJdG9rZW5fb3V0GAUgASgJEhgKEGFtb3VudF9pbl9hdG9taWMYBiABKAkSGAoQc2VhcmNoX2J1ZGdldF9tcxgIIAEoDRINCgVjaGFpbhgJIAEoCRIQCghjaGFpbl9pZBgKIAEoCUoECAEQAkoECAIQA0oECAMQBEoECAcQCFILZW52aXJvbm1lbnRSBnNlbmRlclIJcmVjaXBpZW50UgxzbGlwcGFnZV9icHMiLAoMQmxvY2tDb250ZXh0Eg4KBm51bWJlchgBIAEoCRIMCgRoYXNoGAIgASgJIk8KCFJvdXRlTGVnEgwKBHBvb2wYASABKAkSEAoIdG9rZW5faW4YAiABKAkSEQoJdG9rZW5fb3V0GAMgASgJEhAKCGZlZV9waXBzGAQgASgNIrQCCgpSb3V0ZVF1b3RlEhAKCHJvdXRlX2lkGAEgASgJEhAKCHByb3ZpZGVyGAIgASgJEicKBGxlZ3MYAyADKAsyGS5lcGVpdXMucXVvdGUudjEuUm91dGVMZWcSGQoRYW1vdW50X291dF9hdG9taWMYBCABKAkSJAoXbmV0d29ya19jb3N0X291dF9hdG9taWMYBSABKAlIAIgBARIhChRlZmZlY3RpdmVfb3V0X2F0b21pYxgGIAEoCUgBiAEBEiwKBWJsb2NrGAcgASgLMh0uZXBlaXVzLnF1b3RlLnYxLkJsb2NrQ29udGV4dBISCgpsYXRlbmN5X21zGAggASgNQhoKGF9uZXR3b3JrX2Nvc3Rfb3V0X2F0b21pY0IXChVfZWZmZWN0aXZlX291dF9hdG9taWMiVgoNUHJvdmlkZXJFcnJvchIQCghwcm92aWRlchgBIAEoCRIVCghyb3V0ZV9pZBgCIAEoCUgAiAEBEg8KB21lc3NhZ2UYAyABKAlCCwoJX3JvdXRlX2lkIvABCgpRdW90ZUZpbmFsEhAKCHF1b3RlX2lkGAEgASgJEisKBnJvdXRlcxgCIAMoCzIbLmVwZWl1cy5xdW90ZS52MS5Sb3V0ZVF1b3RlEi4KBmVycm9ycxgDIAMoCzIeLmVwZWl1cy5xdW90ZS52MS5Qcm92aWRlckVycm9yEhoKDWJlc3Rfcm91dGVfaWQYBCABKAlIAIgBARIsCgVibG9jaxgFIAEoCzIdLmVwZWl1cy5xdW90ZS52MS5CbG9ja0NvbnRleHQSFwoPc2VhcmNoX2NvbXBsZXRlGAYgASgIQhAKDl9iZXN0X3JvdXRlX2lkIqIBCgpRdW90ZUV2ZW50EiwKBXF1b3RlGAEgASgLMhsuZXBlaXVzLnF1b3RlLnYxLlJvdXRlUXVvdGVIABIvCgVlcnJvchgCIAEoCzIeLmVwZWl1cy5xdW90ZS52MS5Qcm92aWRlckVycm9ySAASLAoFZmluYWwYAyABKAsyGy5lcGVpdXMucXVvdGUudjEuUXVvdGVGaW5hbEgAQgcKBWV2ZW50Ij0KF1ByZXBhcmVFeGVjdXRpb25SZXF1ZXN0EhAKCHF1b3RlX2lkGAEgASgJEhAKCHJvdXRlX2lkGAIgASgJIlcKE1Vuc2lnbmVkVHJhbnNhY3Rpb24SEAoIY2hhaW5faWQYASABKAkSCgoCdG8YAiABKAkSDAoEZGF0YRgDIAEoCRIUCgx2YWx1ZV9hdG9taWMYBCABKAkimgEKGFByZXBhcmVFeGVjdXRpb25SZXNwb25zZRIyCgZzdGF0dXMYASABKA4yIi5lcGVpdXMucXVvdGUudjEuUHJlcGFyYXRpb25TdGF0dXMSOQoLdHJhbnNhY3Rpb24YAiABKAsyJC5lcGVpdXMucXVvdGUudjEuVW5zaWduZWRUcmFuc2FjdGlvbhIPCgdtZXNzYWdlGAMgASgJKskBChFQcmVwYXJhdGlvblN0YXR1cxIiCh5QUkVQQVJBVElPTl9TVEFUVVNfVU5TUEVDSUZJRUQQABIcChhQUkVQQVJBVElPTl9TVEFUVVNfUkVBRFkQARIoCiRQUkVQQVJBVElPTl9TVEFUVVNfQVBQUk9WQUxfUkVRVUlSRUQQAhInCiNQUkVQQVJBVElPTl9TVEFUVVNfUkVRVU9URV9SRVFVSVJFRBADEh8KG1BSRVBBUkFUSU9OX1NUQVRVU19SRUpFQ1RFRBAEMuACCgxRdW90ZVNlcnZpY2USUgoJR2V0U3RhdHVzEiEuZXBlaXVzLnF1b3RlLnYxLkdldFN0YXR1c1JlcXVlc3QaIi5lcGVpdXMucXVvdGUudjEuR2V0U3RhdHVzUmVzcG9uc2USRgoIR2V0UXVvdGUSHS5lcGVpdXMucXVvdGUudjEuUXVvdGVSZXF1ZXN0GhsuZXBlaXVzLnF1b3RlLnYxLlF1b3RlRmluYWwSSwoLU3RyZWFtUXVvdGUSHS5lcGVpdXMucXVvdGUudjEuUXVvdGVSZXF1ZXN0GhsuZXBlaXVzLnF1b3RlLnYxLlF1b3RlRXZlbnQwARJnChBQcmVwYXJlRXhlY3V0aW9uEiguZXBlaXVzLnF1b3RlLnYxLlByZXBhcmVFeGVjdXRpb25SZXF1ZXN0GikuZXBlaXVzLnF1b3RlLnYxLlByZXBhcmVFeGVjdXRpb25SZXNwb25zZUJCWkBnaXRodWIuY29tL2t1Y2htZW5rby9lcGVpdXMvZ2VuZXJhdGVkL2dvL2VwZWl1cy9xdW90ZS92MTtxdW90ZXYxYgZwcm90bzM");
+
+/**
+ * @generated from message epeius.quote.v1.GetStatusRequest
+ */
+export type GetStatusRequest = Message<"epeius.quote.v1.GetStatusRequest"> & {
+};
+
+/**
+ * Describes the message epeius.quote.v1.GetStatusRequest.
+ * Use `create(GetStatusRequestSchema)` to create a new message.
+ */
+export const GetStatusRequestSchema: GenMessage<GetStatusRequest> = /*@__PURE__*/
+  messageDesc(file_epeius_quote_v1_quote, 0);
+
+/**
+ * @generated from message epeius.quote.v1.Token
+ */
+export type Token = Message<"epeius.quote.v1.Token"> & {
+  /**
+   * @generated from field: string address = 1;
+   */
+  address: string;
+
+  /**
+   * @generated from field: string symbol = 2;
+   */
+  symbol: string;
+
+  /**
+   * @generated from field: uint32 decimals = 3;
+   */
+  decimals: number;
+};
+
+/**
+ * Describes the message epeius.quote.v1.Token.
+ * Use `create(TokenSchema)` to create a new message.
+ */
+export const TokenSchema: GenMessage<Token> = /*@__PURE__*/
+  messageDesc(file_epeius_quote_v1_quote, 1);
+
+/**
+ * @generated from message epeius.quote.v1.ChainStatus
+ */
+export type ChainStatus = Message<"epeius.quote.v1.ChainStatus"> & {
+  /**
+   * @generated from field: string key = 1;
+   */
+  key: string;
+
+  /**
+   * @generated from field: string chain_id = 2;
+   */
+  chainId: string;
+
+  /**
+   * Connectivity verified at startup, not a continuous health check.
+   *
+   * @generated from field: bool connected = 3;
+   */
+  connected: boolean;
+
+  /**
+   * @generated from field: string error = 4;
+   */
+  error: string;
+
+  /**
+   * @generated from field: bool quoting_supported = 5;
+   */
+  quotingSupported: boolean;
+
+  /**
+   * @generated from field: repeated epeius.quote.v1.Token tokens = 6;
+   */
+  tokens: Token[];
+
+  /**
+   * @generated from field: epeius.quote.v1.BlockContext block = 7;
+   */
+  block?: BlockContext | undefined;
+};
+
+/**
+ * Describes the message epeius.quote.v1.ChainStatus.
+ * Use `create(ChainStatusSchema)` to create a new message.
+ */
+export const ChainStatusSchema: GenMessage<ChainStatus> = /*@__PURE__*/
+  messageDesc(file_epeius_quote_v1_quote, 2);
+
+/**
+ * @generated from message epeius.quote.v1.GetStatusResponse
+ */
+export type GetStatusResponse = Message<"epeius.quote.v1.GetStatusResponse"> & {
+  /**
+   * @generated from field: repeated epeius.quote.v1.ChainStatus chains = 1;
+   */
+  chains: ChainStatus[];
+};
+
+/**
+ * Describes the message epeius.quote.v1.GetStatusResponse.
+ * Use `create(GetStatusResponseSchema)` to create a new message.
+ */
+export const GetStatusResponseSchema: GenMessage<GetStatusResponse> = /*@__PURE__*/
+  messageDesc(file_epeius_quote_v1_quote, 3);
 
 /**
  * @generated from message epeius.quote.v1.QuoteRequest
  */
 export type QuoteRequest = Message<"epeius.quote.v1.QuoteRequest"> & {
-  /**
-   * @generated from field: epeius.quote.v1.Environment environment = 1;
-   */
-  environment: Environment;
-
-  /**
-   * @generated from field: string sender = 2;
-   */
-  sender: string;
-
-  /**
-   * @generated from field: string recipient = 3;
-   */
-  recipient: string;
-
   /**
    * @generated from field: string token_in = 4;
    */
@@ -49,14 +140,19 @@ export type QuoteRequest = Message<"epeius.quote.v1.QuoteRequest"> & {
   amountInAtomic: string;
 
   /**
-   * @generated from field: uint32 slippage_bps = 7;
-   */
-  slippageBps: number;
-
-  /**
    * @generated from field: uint32 search_budget_ms = 8;
    */
   searchBudgetMs: number;
+
+  /**
+   * @generated from field: string chain = 9;
+   */
+  chain: string;
+
+  /**
+   * @generated from field: string chain_id = 10;
+   */
+  chainId: string;
 };
 
 /**
@@ -64,7 +160,7 @@ export type QuoteRequest = Message<"epeius.quote.v1.QuoteRequest"> & {
  * Use `create(QuoteRequestSchema)` to create a new message.
  */
 export const QuoteRequestSchema: GenMessage<QuoteRequest> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 0);
+  messageDesc(file_epeius_quote_v1_quote, 4);
 
 /**
  * @generated from message epeius.quote.v1.BlockContext
@@ -86,7 +182,7 @@ export type BlockContext = Message<"epeius.quote.v1.BlockContext"> & {
  * Use `create(BlockContextSchema)` to create a new message.
  */
 export const BlockContextSchema: GenMessage<BlockContext> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 1);
+  messageDesc(file_epeius_quote_v1_quote, 5);
 
 /**
  * @generated from message epeius.quote.v1.RouteLeg
@@ -120,7 +216,7 @@ export type RouteLeg = Message<"epeius.quote.v1.RouteLeg"> & {
  * Use `create(RouteLegSchema)` to create a new message.
  */
 export const RouteLegSchema: GenMessage<RouteLeg> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 2);
+  messageDesc(file_epeius_quote_v1_quote, 6);
 
 /**
  * @generated from message epeius.quote.v1.RouteQuote
@@ -174,7 +270,7 @@ export type RouteQuote = Message<"epeius.quote.v1.RouteQuote"> & {
  * Use `create(RouteQuoteSchema)` to create a new message.
  */
 export const RouteQuoteSchema: GenMessage<RouteQuote> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 3);
+  messageDesc(file_epeius_quote_v1_quote, 7);
 
 /**
  * @generated from message epeius.quote.v1.ProviderError
@@ -201,7 +297,7 @@ export type ProviderError = Message<"epeius.quote.v1.ProviderError"> & {
  * Use `create(ProviderErrorSchema)` to create a new message.
  */
 export const ProviderErrorSchema: GenMessage<ProviderError> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 4);
+  messageDesc(file_epeius_quote_v1_quote, 8);
 
 /**
  * @generated from message epeius.quote.v1.QuoteFinal
@@ -245,7 +341,7 @@ export type QuoteFinal = Message<"epeius.quote.v1.QuoteFinal"> & {
  * Use `create(QuoteFinalSchema)` to create a new message.
  */
 export const QuoteFinalSchema: GenMessage<QuoteFinal> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 5);
+  messageDesc(file_epeius_quote_v1_quote, 9);
 
 /**
  * @generated from message epeius.quote.v1.QuoteEvent
@@ -280,7 +376,7 @@ export type QuoteEvent = Message<"epeius.quote.v1.QuoteEvent"> & {
  * Use `create(QuoteEventSchema)` to create a new message.
  */
 export const QuoteEventSchema: GenMessage<QuoteEvent> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 6);
+  messageDesc(file_epeius_quote_v1_quote, 10);
 
 /**
  * @generated from message epeius.quote.v1.PrepareExecutionRequest
@@ -302,7 +398,7 @@ export type PrepareExecutionRequest = Message<"epeius.quote.v1.PrepareExecutionR
  * Use `create(PrepareExecutionRequestSchema)` to create a new message.
  */
 export const PrepareExecutionRequestSchema: GenMessage<PrepareExecutionRequest> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 7);
+  messageDesc(file_epeius_quote_v1_quote, 11);
 
 /**
  * @generated from message epeius.quote.v1.UnsignedTransaction
@@ -334,7 +430,7 @@ export type UnsignedTransaction = Message<"epeius.quote.v1.UnsignedTransaction">
  * Use `create(UnsignedTransactionSchema)` to create a new message.
  */
 export const UnsignedTransactionSchema: GenMessage<UnsignedTransaction> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 8);
+  messageDesc(file_epeius_quote_v1_quote, 12);
 
 /**
  * @generated from message epeius.quote.v1.PrepareExecutionResponse
@@ -363,33 +459,7 @@ export type PrepareExecutionResponse = Message<"epeius.quote.v1.PrepareExecution
  * Use `create(PrepareExecutionResponseSchema)` to create a new message.
  */
 export const PrepareExecutionResponseSchema: GenMessage<PrepareExecutionResponse> = /*@__PURE__*/
-  messageDesc(file_epeius_quote_v1_quote, 9);
-
-/**
- * @generated from enum epeius.quote.v1.Environment
- */
-export enum Environment {
-  /**
-   * @generated from enum value: ENVIRONMENT_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: ENVIRONMENT_BASE_MAINNET = 1;
-   */
-  BASE_MAINNET = 1,
-
-  /**
-   * @generated from enum value: ENVIRONMENT_BASE_SEPOLIA = 2;
-   */
-  BASE_SEPOLIA = 2,
-}
-
-/**
- * Describes the enum epeius.quote.v1.Environment.
- */
-export const EnvironmentSchema: GenEnum<Environment> = /*@__PURE__*/
-  enumDesc(file_epeius_quote_v1_quote, 0);
+  messageDesc(file_epeius_quote_v1_quote, 13);
 
 /**
  * @generated from enum epeius.quote.v1.PreparationStatus
@@ -425,7 +495,7 @@ export enum PreparationStatus {
  * Describes the enum epeius.quote.v1.PreparationStatus.
  */
 export const PreparationStatusSchema: GenEnum<PreparationStatus> = /*@__PURE__*/
-  enumDesc(file_epeius_quote_v1_quote, 1);
+  enumDesc(file_epeius_quote_v1_quote, 0);
 
 /**
  * QuoteService is non-signing. Streaming and execution preparation are deferred.
@@ -433,6 +503,14 @@ export const PreparationStatusSchema: GenEnum<PreparationStatus> = /*@__PURE__*/
  * @generated from service epeius.quote.v1.QuoteService
  */
 export const QuoteService: GenService<{
+  /**
+   * @generated from rpc epeius.quote.v1.QuoteService.GetStatus
+   */
+  getStatus: {
+    methodKind: "unary";
+    input: typeof GetStatusRequestSchema;
+    output: typeof GetStatusResponseSchema;
+  },
   /**
    * @generated from rpc epeius.quote.v1.QuoteService.GetQuote
    */

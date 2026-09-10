@@ -17,8 +17,8 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-func Verify(ctx context.Context, environment, endpoint string) (Snapshot, error) {
-	client, snapshot, err := Open(ctx, environment, endpoint)
+func Verify(ctx context.Context, key string, chainID int64, endpoint string) (Snapshot, error) {
+	client, snapshot, err := Open(ctx, key, chainID, endpoint)
 	if client != nil {
 		client.Close()
 	}
@@ -85,10 +85,13 @@ func TestPinnedCall(t *testing.T) {
 }
 
 func TestVerifyNetworksAndSnapshot(t *testing.T) {
-	for _, tc := range []struct{ environment, chain, want string }{
-		{"base-mainnet", "0x2105", "8453"}, {"base-sepolia", "0x14a34", "84532"},
+	for _, tc := range []struct {
+		key, chain, want string
+		chainID          int64
+	}{
+		{"base", "0x2105", "8453", 8453}, {"test", "0x14a34", "84532", 84532},
 	} {
-		t.Run(tc.environment, func(t *testing.T) {
+		t.Run(tc.key, func(t *testing.T) {
 			header := &types.Header{Number: big.NewInt(1234567), Difficulty: big.NewInt(0), GasLimit: 30000000, Time: 1700000013}
 			methods := []string{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,11 +117,11 @@ func TestVerifyNetworksAndSnapshot(t *testing.T) {
 				json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
 			}))
 			defer server.Close()
-			got, err := Verify(context.Background(), tc.environment, server.URL)
+			got, err := Verify(context.Background(), tc.key, tc.chainID, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Environment != tc.environment || got.ChainID != tc.want || got.BlockNumber != "1234567" || got.BlockHash != header.Hash().Hex() {
+			if got.Key != tc.key || got.ChainID != tc.want || got.BlockNumber != "1234567" || got.BlockHash != header.Hash().Hex() {
 				t.Fatalf("wrong snapshot: %+v", got)
 			}
 			if strings.Join(methods, ",") != "eth_chainId,eth_getBlockByNumber" {
@@ -148,7 +151,7 @@ func TestEndpointTransportPolicy(t *testing.T) {
 			// Cancellation prevents network access after successful URL validation.
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			client, _, err := Open(ctx, "base-mainnet", tc.endpoint)
+			client, _, err := Open(ctx, "base", 8453, tc.endpoint)
 			if client != nil {
 				client.Close()
 				t.Fatal("unexpected live client")
@@ -166,17 +169,14 @@ func TestEndpointTransportPolicy(t *testing.T) {
 	}
 }
 
-func TestRejectInvalidEnvironmentAndEndpoint(t *testing.T) {
-	for _, tc := range []struct{ name, environment, endpoint string }{
-		{"missing environment", "", "https://example.com"},
-		{"unsupported", "ethereum-sepolia", "https://example.com"},
-		{"removed fork", "base-fork", "http://127.0.0.1:8545"},
-		{"missing URL", "base-mainnet", ""},
-		{"wrong scheme", "base-sepolia", "file:///secret"},
-		{"bad URL", "base-mainnet", "https://user:secret@%zz"},
+func TestRejectInvalidEndpoint(t *testing.T) {
+	for _, tc := range []struct{ name, endpoint string }{
+		{"missing URL", ""},
+		{"wrong scheme", "file:///secret"},
+		{"bad URL", "https://user:secret@%zz"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Verify(context.Background(), tc.environment, tc.endpoint)
+			_, err := Verify(context.Background(), "any-key", 8453, tc.endpoint)
 			if err == nil || strings.Contains(err.Error(), "secret") {
 				t.Fatalf("unsafe error: %v", err)
 			}
@@ -194,19 +194,19 @@ func TestWrongChainAndProviderErrorsAreSafe(t *testing.T) {
 				w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(req["id"]) + `,"result":` + result + `}`))
 			}))
 			defer server.Close()
-			_, err := Verify(context.Background(), "base-mainnet", server.URL+"/secret")
+			_, err := Verify(context.Background(), "base", 8453, server.URL+"/secret")
 			if err == nil || strings.Contains(err.Error(), "secret") {
 				t.Fatalf("wrong-chain check: %v", err)
 			}
 		})
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "provider echoed secret", 401) }))
-	_, err := Verify(context.Background(), "base-mainnet", server.URL+"/secret")
+	_, err := Verify(context.Background(), "base", 8453, server.URL+"/secret")
 	server.Close()
 	if err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("provider error leaked: %v", err)
 	}
-	_, err = Verify(context.Background(), "base-mainnet", server.URL+"/secret")
+	_, err = Verify(context.Background(), "base", 8453, server.URL+"/secret")
 	if err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("connection error leaked: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestRPCCancellationAndDeadline(t *testing.T) {
 			}
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { _, err := Verify(ctx, "base-mainnet", server.URL); done <- err }()
+			go func() { _, err := Verify(ctx, "base", 8453, server.URL); done <- err }()
 			select {
 			case <-entered:
 			case <-time.After(time.Second):
