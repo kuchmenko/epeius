@@ -17,6 +17,24 @@ import {
 const sender = "0x0000000000000000000000000000000000000001";
 const defaultProfilePath = new URL("./harness.toml", import.meta.url).pathname;
 const { uni } = await loadProfile(defaultProfilePath);
+test("pinned Uniswap artifacts are deployable without external library links", async () => {
+  for (const [name, version, contract] of [
+    ["@uniswap/v3-core", "1.0.1", "UniswapV3Factory"],
+    ["@uniswap/swap-router-contracts", "1.1.0", "SwapRouter02"],
+  ]) {
+    const root = new URL(`./node_modules/${name}/`, import.meta.url);
+    const pkg = await Bun.file(new URL("package.json", root)).json();
+    assert.equal(pkg.version, version);
+    const artifact = await Bun.file(
+      new URL(`artifacts/contracts/${contract}.sol/${contract}.json`, root),
+    ).json();
+    assert.match(artifact.bytecode, /^0x[0-9a-fA-F]+$/);
+    assert.ok(artifact.bytecode.length > 2);
+    assert.deepEqual(artifact.linkReferences, {});
+    assert.equal(artifact.contractName, contract);
+  }
+});
+
 test("Bun env files reach the CLI while exported RPC values take precedence", async () => {
   const dir = mkdtempSync(resolve(tmpdir(), "epeius-env-"));
   const paths = [];
