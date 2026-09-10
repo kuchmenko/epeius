@@ -20,6 +20,98 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestTenderlyExecutorVerifiesEveryTouchedTokenOwner(t *testing.T) {
+	const tokenD = "0x4444444444444444444444444444444444444444"
+	uni, pan := testRoute(), testRoute()
+	pan.DeploymentId = "pan"
+	pan.Legs[0].TokenOut, pan.Legs[1].TokenIn = tokenD, tokenD
+	allocations := []*quotev1.QuotedAllocation{{AmountInAtomic: "37", Route: uni}, {AmountInAtomic: "64", Route: pan}}
+	expected := []balanceProbe{
+		{tokenA, wallet}, {tokenC, wallet},
+		{tokenA, executorAddress}, {tokenA, router},
+		{tokenB, wallet}, {tokenB, executorAddress}, {tokenB, router},
+		{tokenC, executorAddress}, {tokenC, router}, {tokenA, pancakeAddress},
+		{tokenD, wallet}, {tokenD, executorAddress}, {tokenD, pancakeAddress}, {tokenC, pancakeAddress},
+	}
+	allowances := []balanceProbe{{tokenA, router}, {tokenB, router}, {tokenA, pancakeAddress}, {tokenD, pancakeAddress}}
+	for changed := -1; changed < len(expected)+len(allowances); changed++ {
+		service := NewTenderly(func(string) string { return "test" })
+		service.client.Transport = roundTrip(func(request *http.Request) (*http.Response, error) {
+			var payload struct {
+				Simulations []simulationCall `json:"simulations"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			count := len(expected)
+			if len(payload.Simulations) != count*2+1+len(allowances) {
+				t.Fatal("missing executor token-owner evidence")
+			}
+			results := make([]simulationResult, len(payload.Simulations))
+			for i, call := range payload.Simulations {
+				value := uint64(1000)
+				if call.TransactionIndex != -1 || call.From != wallet || call.NetworkID != "11155111" || call.BlockNumber != 112233 {
+					t.Fatal("simulation identity changed")
+				}
+				if i > count*2 {
+					index := i - count*2 - 1
+					probe := allowances[index]
+					data, _ := hexutil.Decode(call.Input)
+					if call.To != probe.token || len(data) != 68 || hexutil.Encode(data[:4]) != "0xdd62ed3e" || common.BytesToAddress(data[4:36]) != common.HexToAddress(executorAddress) || common.BytesToAddress(data[36:]) != common.HexToAddress(probe.owner) {
+						t.Fatal("wrong cleared-allowance probe")
+					}
+					value = 0
+					if changed == count+index {
+						value = 1
+					}
+				} else if i == count {
+					if call.To != executorAddress || call.Input != "0x19b5e3d5abcd" {
+						t.Fatal("not exact executor transaction")
+					}
+				} else {
+					index := i
+					if i > count {
+						index -= count + 1
+					}
+					data, _ := hexutil.Decode(call.Input)
+					if call.To != expected[index].token || len(data) != 36 || common.BytesToAddress(data[4:]) != common.HexToAddress(expected[index].owner) {
+						t.Fatal("wrong token-owner probe")
+					}
+					if i > count {
+						if index == 0 {
+							value = 899
+						}
+						if index == 1 {
+							value = 1252
+						}
+						if index == changed {
+							value--
+						}
+					}
+				}
+				identity := simulationIdentity{NetworkID: call.NetworkID, BlockNumber: call.BlockNumber, From: call.From, To: call.To, Input: call.Input, Value: "0", Status: true}
+				results[i].Simulation.simulationIdentity = identity
+				results[i].Transaction.simulationIdentity = identity
+				results[i].Simulation.TransactionIndex = -1
+				results[i].Simulation.BlockHeader.Number = "0x1b669"
+				results[i].Simulation.BlockHeader.Hash = blockHash
+				results[i].Simulation.BlockHeader.Timestamp = "0x4321"
+				trace := &results[i].Transaction.TransactionInfo.CallTrace
+				trace.From, trace.To, trace.Input, trace.Output = call.From, call.To, call.Input, hexutil.Encode(uintWord(value))
+			}
+			body, _ := json.Marshal(map[string]any{"simulation_results": results})
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+		})
+		output, err := service.SimulateAllocations(context.Background(), &quotev1.UnsignedTransaction{ChainId: "11155111", From: wallet, To: executorAddress, Data: "0x19b5e3d5abcd", ValueAtomic: "0", GasLimit: "3000000"}, allocations, map[string]string{"uni": router, "pan": pancakeAddress}, rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(101), big.NewInt(252))
+		if changed == -1 && (err != nil || output != "252") {
+			t.Fatalf("valid executor simulation failed: %v", err)
+		}
+		if changed >= 0 && err == nil {
+			t.Fatalf("changed probe %d accepted", changed)
+		}
+	}
+}
+
 func TestTenderlySequentialBundleExactBalancesAndFailClosed(t *testing.T) {
 	tests := []struct {
 		name   string

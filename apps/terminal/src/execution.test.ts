@@ -10,12 +10,14 @@ import {
   PreparationStatus,
   PrepareExecutionRequestSchema,
   PrepareExecutionResponseSchema,
+  QuotedAllocationSchema,
   QuoteFinalSchema,
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import {
   type ExecutionIO,
   executePrepared,
+  expectedExecutorData,
   expectedSwapData,
   type Receipt,
   validatePreparation,
@@ -852,7 +854,9 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         config,
         ...(args[0] === "trade"
           ? ["--in", "IN", "--out", "OUT", "--amount-atomic", "101"]
-          : ["--quote-id", "q1", "--route-id", "r1"]),
+          : args.includes("--allocations")
+            ? ["--quote-id", "q1"]
+            : ["--quote-id", "q1", "--route-id", "r1"]),
         "--keystore",
         "/fixture/keystore",
         "--password-file",
@@ -1064,6 +1068,58 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect(
       (await calls()).filter((call) => call.args[0] === "send"),
     ).toHaveLength(4);
+    alterTradeAmount = false;
+    const executor = addr("9");
+    await Bun.write(
+      config,
+      `${await Bun.file(config).text()}\n[chains.testnet.deployments.pan]\nkind='pancake-v3'\nrouter='${addr("8")}'\nfees=[0,2500]\n[chains.testnet.executor]\naddress='${executor}'\nuniswap_deployment='uni'\npancake_deployment='pan'\n`,
+    );
+    p = prepared();
+    assert(p.route && p.transaction);
+    p.route.block = {
+      $typeName: "epeius.quote.v1.BlockContext",
+      number: "123",
+      hash: blockHash,
+    };
+    p.allocations = [
+      create(QuotedAllocationSchema, { amountInAtomic: "101", route: p.route }),
+    ];
+    p.route = undefined;
+    p.transaction.to = executor;
+    p.transaction.data = expectedExecutorData(p);
+    const allocationArgs = [
+      "--allocations",
+      '[{"routeId":"r1","amountInAtomic":"101"}]',
+    ];
+    const executorPreview = await run(["prepare", ...allocationArgs]);
+    expect(executorPreview.code).toBe(0);
+    expect(executorPreview.out).toContain('"allocations"');
+    expect(requests.at(-1)).toMatchObject({
+      routeId: "",
+      allocations: [{ routeId: "r1", amountInAtomic: "101" }],
+    });
+    const executed = await run([
+      "execute",
+      ...allocationArgs,
+      "--confirm-swap",
+      "yes",
+    ]);
+    expect(executed.code).toBe(0);
+    const executorSends = (await calls()).filter(
+      (call) => call.args[0] === "send",
+    );
+    expect(executorSends).toHaveLength(5);
+    expect(executorSends.at(-1)?.args.slice(1, 3)).toEqual([
+      executor,
+      p.transaction.data,
+    ]);
+    p.allocations[0].amountInAtomic = "102";
+    expect(
+      (await run(["execute", ...allocationArgs, "--confirm-swap", "yes"])).err,
+    ).toContain("different allocations");
+    expect(
+      (await calls()).filter((call) => call.args[0] === "send"),
+    ).toHaveLength(5);
   } finally {
     await server.stop(true);
     await rm(directory, { recursive: true });

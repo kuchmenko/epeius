@@ -83,6 +83,8 @@ bun run terminal -- execute --chain base-sepolia --config .testnet/runtime.toml 
 1. A submitted hash with `submission: "submitted"` and `verification.outcome: "pending"`.
 2. A separate receipt verification event, or a pending/unknown event if verification cannot finish.
 
+For a verified, TOML-configured executor, replace `--route-id` with `--allocations '[{"routeId":"UNI_ROUTE","amountInAtomic":"37"},{"routeId":"PANCAKE_ROUTE","amountInAtomic":"64"}]'`. This example requires an original quote of 101 atomic units. One or two explicit allocations are supported; two must use different venues. See [executor preparation and evidence](execution.md#configured-executor) for admission, exact re-quotes, aggregate slippage, approval spender, and remaining live checks. `trade` remains a single direct-router route; it does not choose allocations or use the executor.
+
 For swaps, `verification.outcome: "passed"` means the canonical successful receipt's exact-transaction ERC20 Transfer logs show full wallet input consumption, output at least the configured minimum, and no net intermediate-token residue in the router. `receipt_success` is used for approval receipts; it does not make the old quote executable. Obtain a fresh quote after approval.
 
 `failed` means the receipt or measured token movement did not satisfy checks. `unavailable`, `pending_or_unknown`, or a null hash means outcome is inconclusive. A send may have reached the network even when its hash could not be returned. Inspect wallet transactions before any retry; never resend automatically.

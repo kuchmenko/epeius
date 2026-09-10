@@ -34,7 +34,7 @@ forge test --root contracts
 - `check` runs Biome, TypeScript checks, Go race tests, Bun tests, and builds. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
 - `check:generated` regenerates bindings in a temporary directory and compares them with checked-in files.
 - `smoke` uses root TOML endpoint and an already running engine. It requires every engine chain to be connected and checks positive Base WETH/USDC quotes in both directions. It is read-only and does not stop the engine.
-- `forge test` runs local contract tests, including authentic Pancake partial-input behavior. It does not deploy to Base Sepolia.
+- `forge test` runs local executor and harness tests, including authentic Uniswap/Pancake partial-input behavior. Use `forge test --root contracts --fuzz-runs 10000` for the larger valid-allocation fuzz run. It does not deploy to Base Sepolia.
 
 CI uses credential-free local RPC and Connect fixtures. Live testnet checks are separate. Passing local or dev checks is not evidence of production behavior.
 

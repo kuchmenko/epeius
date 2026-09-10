@@ -45,6 +45,41 @@ func TestLoadValidConfig(t *testing.T) {
 	}
 }
 
+func TestExecutorConfigNamesTwoFixedDeploymentRouters(t *testing.T) {
+	text := validConfig + `
+[chains.test-net.deployments.uni]
+kind = "uniswap-v3"
+factory = "0x1111111111111111111111111111111111111111"
+quoter = "0x2222222222222222222222222222222222222222"
+router = "0x3333333333333333333333333333333333333333"
+fees = [0, 500]
+[chains.test-net.deployments.pan]
+kind = "pancake-v3"
+factory = "0x4444444444444444444444444444444444444444"
+quoter = "0x5555555555555555555555555555555555555555"
+router = "0x6666666666666666666666666666666666666666"
+fees = [0, 2500]
+[chains.test-net.executor]
+address = "0x7777777777777777777777777777777777777777"
+uniswap_deployment = "uni"
+pancake_deployment = "pan"
+`
+	got, err := loadText(t, text)
+	if err != nil || got.Chains["test-net"].Executor.UniswapDeployment != "uni" {
+		t.Fatalf("executor config rejected: %v", err)
+	}
+	for _, change := range [][2]string{
+		{`uniswap_deployment = "uni"`, `uniswap_deployment = "pan"`},
+		{`pancake_deployment = "pan"`, `pancake_deployment = "missing"`},
+		{"0x7777777777777777777777777777777777777777", "0x0000000000000000000000000000000000000000"},
+		{"0x6666666666666666666666666666666666666666", "0x3333333333333333333333333333333333333333"},
+	} {
+		if _, err := loadText(t, strings.Replace(text, change[0], change[1], 1)); err == nil {
+			t.Fatalf("invalid executor accepted: %s", change[1])
+		}
+	}
+}
+
 func TestLoadRejectsInvalidConfig(t *testing.T) {
 	tests := []struct{ name, old, replacement string }{
 		{"unknown field", "search_budget_ms = 2500", "search_budget_ms = 2500\nunknown = true"},

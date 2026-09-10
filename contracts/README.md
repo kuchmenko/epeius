@@ -154,5 +154,7 @@ bunx biome check contracts/fixtures contracts/abi
 Integration must target the executor as spender and transaction destination;
 verify both immutable router getters, use exact per-allocation quotes, encode the
 golden ABI, simulate that exact transaction, and validate caller/executor/router
-token deltas and temporary allowances. Deployment, production token admission,
-Go/proto changes, terminal review, and Tenderly proof are separate work.
+token deltas and temporary allowances. The Go/proto/terminal integration and local
+Tenderly fixtures implement these checks; see [execution configuration](../docs/execution.md#configured-executor).
+Deployment provenance, production token admission, and live Tenderly/execution
+proof remain separately authorized work.

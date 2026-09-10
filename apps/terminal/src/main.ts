@@ -29,7 +29,7 @@ Usage:
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
   bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH [--route-id ID] [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
-  bun run terminal -- prepare|execute --chain KEY --quote-id ID --route-id ID --keystore PATH --password-file PATH [--slippage-bps N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- prepare|execute --chain KEY --quote-id ID (--route-id ID | --allocations JSON) --keystore PATH --password-file PATH [--slippage-bps N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
 prepare previews without sending. execute displays terms and asks approval or swap confirmation.
@@ -183,6 +183,7 @@ export async function main(rawArgs: string[]) {
         "chain",
         "quote-id",
         "route-id",
+        "allocations",
         "keystore",
         "password-file",
         "slippage-bps",
@@ -193,10 +194,10 @@ export async function main(rawArgs: string[]) {
         !values.keystore ||
         !values["password-file"] ||
         !values["quote-id"] ||
-        !values["route-id"]
+        !!values["route-id"] === !!values.allocations
       )
         throw new Error(
-          "Provide --keystore, --password-file, --quote-id and --route-id.",
+          "Provide --keystore, --password-file, --quote-id and either --route-id or --allocations.",
         );
       const client = quoteClient(
         parsed.engineUrl

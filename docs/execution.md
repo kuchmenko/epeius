@@ -1,6 +1,6 @@
 # Execution contract
 
-Epeius uses direct Uniswap V3 and Pancake V3 router calls on chains explicitly enabled in TOML. Any configured positive chain ID can be enabled, but local TOML, engine status, terminal RPC, and prepared transaction identities must all match. The Go engine builds and simulates unsigned transactions. The terminal owns the local signer, confirmation, submission, and receipt checks. The checked-in root TOML keeps execution disabled on every chain.
+Epeius supports direct Uniswap V3/Pancake V3 calls and an explicitly configured exact-input executor on chains enabled in TOML. Any configured positive chain ID can be enabled, but local TOML, engine status, terminal RPC, and prepared transaction identities must all match. The Go engine builds and simulates unsigned transactions. The terminal owns the local signer, confirmation, submission, and receipt checks. Execution remains opt-in; adding an executor does not enable it.
 
 This policy supersedes the earlier milestone restriction to Base Sepolia (chain ID 84532). Base Sepolia remains the verified and default test setup. Every new network or provider needs separate capability and simulation-support validation; current tests are not multi-network live proof.
 
@@ -8,11 +8,11 @@ This policy supersedes the earlier milestone restriction to Base Sepolia (chain 
 
 A route uses one configured deployment and one or two pools. Arbitrary-length routes are not supported. Each hop names the pool, input token, output token, and pool selector. Uniswap V3 and Pancake V3 use `fee_pips`, measured in millionths. Configured fees may range from 0 through 999,999; fee 0 is usable only when the configured factory has that pool. Slipstream uses signed `tick_spacing`, which is not a fee; its execution is outside this milestone.
 
-For example, an A-to-C quote can offer a direct Uniswap A/C pool, a two-hop Uniswap A/B and B/C route, and a separate Pancake route. These are alternatives, not sequential trades. The second hop consumes the actual output of the first hop, not an independently fixed estimate. Split execution across venues is deferred.
+For example, an A-to-C quote can offer a direct Uniswap A/C pool, a two-hop Uniswap A/B and B/C route, and a separate Pancake route. Direct execution selects one alternative. Executor preparation accepts one or two caller-chosen allocations; two allocations must use different venues. Each second hop consumes actual first-hop output, not an independently fixed estimate. There is no allocation optimizer.
 
 Token addresses, factory, quoter, router, and deployment fee lists come only from TOML. There are no implicit Base WETH, USDC, Uniswap, or provider defaults. Pool addresses and parameters must match the configured factory. `uniswap-v3` and `pancake-v3` choose supported implementations; they do not make arbitrary ABIs configurable. Router addresses come from configuration, not user-supplied transaction targets. Native ETH swaps, transfer-tax tokens, rebasing tokens, Permit2, and arbitrary calldata execution are unsupported.
 
-Before confirmation and again before submission, the terminal checks the route against its local TOML token, deployment, router, and fee lists. It independently encodes the expected swap calldata from the displayed path, recipient, input, minimum output, and deadline, and requires an exact byte match. Uniswap permits one exact-input call inside its deadline multicall; Pancake permits its deadline-bearing exact-input call. Approval must target the local input token and authorize only the declared amount to the local router. An engine response alone cannot authorize a different target or operation. The local config itself must be trusted.
+Before confirmation and again before submission, the terminal checks the route against its local TOML token, deployment, router, and fee lists. It independently encodes the expected swap calldata from the displayed path, recipient, input, minimum output, and deadline, and requires an exact byte match. For direct execution, Uniswap permits one exact-input call inside its deadline multicall; Pancake permits its deadline-bearing exact-input call. Approval must target the local input token and authorize only the declared amount to the configured spender: router for direct execution, executor for allocations. An engine response alone cannot authorize a different target or operation. The local config itself must be trusted.
 
 ## Quotes and immutable preparations
 
@@ -20,7 +20,7 @@ An informational quote does not need a wallet and does not authorize execution. 
 
 Rechecking a preparation can update the simulation result, but cannot silently change the transaction's conditions. Changing the route, minimum output, or deadline requires a new preparation and confirmation. Preparations are held in memory; restarting the engine invalidates their identifiers.
 
-The terminal verifies the minimum against the requested `--slippage-bps`: `floor(route.amountOutAtomic * (10000 - slippageBps) / 10000)`. The basis is the saved route quote, not a refreshed simulation estimate. The minimum must remain positive. All encoded amounts and deadlines must fit `uint256`. These checks establish consistency with the displayed quote, not an independent fair-market price: the engine still supplies the quoted output.
+The terminal verifies the minimum against the requested `--slippage-bps`: `floor(quotedOutput * (10000 - slippageBps) / 10000)`. The basis is the saved route output for direct execution or summed exact-allocation outputs for the executor, not a refreshed simulation estimate. The minimum must remain positive. All encoded amounts and deadlines must fit `uint256`. These checks establish consistency with the displayed quote, not an independent fair-market price: the engine still supplies the quoted output.
 
 Application expiry and the on-chain deadline have different jobs. Application expiry limits how long the terminal accepts a preparation. The router checks the deadline against the block timestamp. Neither reserves pool liquidity or guarantees inclusion before expiry.
 
@@ -44,25 +44,52 @@ Simulate alternative routes separately from the same starting block. A sequentia
 
 Simulation does not guarantee future success. Other transactions can change pool state before inclusion. RPC or simulator failure must not silently bypass the pre-send check.
 
-## Known limitation: partial input consumption
+## Direct-router limitation: partial input consumption
 
 `amountOutMinimum` constrains the output, not full input consumption. A V3 pool can reach its limiting price before consuming all requested input. If the output still satisfies the minimum, the router call can succeed.
 
 In an ordinary single-hop swap paid directly from the wallet, unconsumed input stays in the wallet. For a two-hop swap, intermediate tokens can instead remain in the router. For example, the first hop can exchange 100 A for 80 B, while the second hop consumes only 60 B. The remaining 20 B can stay in the router even though the transaction succeeds.
 
-This milestone checks consumption before submission through simulation and after execution through actual transaction evidence. It does **not** enforce an on-chain full-consumption-or-revert guarantee. A change in pool state between simulation and inclusion can still produce an unexpected result. A post-execution failure report cannot undo a confirmed trade or automatically recover stranded tokens.
+The direct-router path checks consumption before submission through simulation and after execution through actual transaction evidence. It does **not** enforce an on-chain full-consumption-or-revert guarantee. A change in pool state between simulation and inclusion can still produce an unexpected result. A post-execution failure report cannot undo a confirmed trade or automatically recover stranded tokens. `trade` currently uses this direct path; choosing `--allocations` on `prepare`/`execute` opts into the executor instead.
 
 The terminal must distinguish a confirmed successful receipt from a trade whose amounts passed verification. Neither a successful receipt nor the final output balance alone proves full input and intermediate-token consumption. Existing router balances must not be counted as this trade's output or residue.
 
 Base RPC can return a preliminary receipt with `status = 1` and an all-zero `blockHash` before the block is sealed. That is not confirmed execution. Wait for a nonzero block hash that matches the canonical block at the receipt's block number before checking amounts or using newly deployed contracts. This check is not a claim of L1 finality; later reorgs remain possible.
 
-## Future executor guarantee
+## Configured executor
 
-The future typed executor will receive the intermediate tokens itself and measure consumption at each hop. Incomplete input or intermediate-token consumption will revert the entire swap transaction. It will preserve balances that existed before the trade and clear its router allowances.
+The [typed executor](../contracts/README.md) receives intermediate tokens and measures each hop's actual input consumption and output. Incomplete consumption reverts the entire swap transaction, including earlier route swaps. It preserves pre-existing touched-token balances, clears temporary router allowances, and sends only new aggregate output to the caller. Its two immutable router identities are Uniswap SwapRouter02 and Pancake V3-only SwapRouter. The constructor has no token allowlist or admin; reviewed standard ERC20 admission remains TOML policy. Direct contract callers can bypass application admission, and malicious tokens are not supported.
+
+After separately authorizing and verifying a deployment, add its address and existing deployment IDs to both engine and terminal TOML. Replace the placeholder before use:
+
+```toml
+[chains.base-sepolia.executor]
+address = "DEPLOYED_EXECUTOR_ADDRESS"
+uniswap_deployment = "uniswap"
+pancake_deployment = "pancake"
+```
+
+These IDs must name the correct kinds and distinct configured router addresses. Preparation verifies nonempty executor code and both router getters at the execution block, including recheck. These checks prove configured linkage, not bytecode provenance: operators must verify the deployed artifact and constructor arguments independently before admitting its address. No executor is deployed or enabled by this change.
+
+Clients admit tokens and metadata against local TOML before quoting. The engine retains cheap in-memory request checks for direct API callers; startup handles existing metadata/deployment checks. No additional token-classification RPC is added to quote search. Executor linkage, allowance reads, and Tenderly checks occur during preparation, not route search. No speedup is claimed.
+
+`--allocations` is a JSON array of one or two `{ "routeId": "...", "amountInAtomic": "..." }` entries, mutually exclusive with `--route-id`. Their positive atomic inputs must sum exactly to the original quote's input. The engine re-quotes each selected path at its exact allocation amount and the same original canonical block, including actual quoted first-hop output as the second-hop input. It never scales full-input outputs. Add outputs first, then calculate one slippage floor. Response `allocations` contains this new quote evidence; legacy `route` is absent. Costs remain unknown/absent.
+
+```bash
+# Quote the full total first. Use real returned route IDs and exact atomic amounts.
+bun run terminal -- prepare --chain base-sepolia --config .testnet/runtime.toml \
+  --quote-id QUOTE_ID \
+  --allocations '[{"routeId":"UNISWAP_ROUTE_ID","amountInAtomic":"37"},{"routeId":"PANCAKE_ROUTE_ID","amountInAtomic":"64"}]' \
+  --slippage-bps 75 --keystore "$TERMINAL_KEYSTORE" --password-file "$TERMINAL_PASSWORD_FILE"
+```
+
+The example requires a quote whose input is 101 atomic units, not 101 whole tokens. `prepare` sends nothing. Only after explicit transaction authorization, use `execute` with the reviewed arguments and confirm the displayed approval or swap. Approval targets the executor for the exact total, never a router. A confirmed approval requires a fresh quote and preparation; old IDs cannot upgrade into swaps. There is no automatic split refresh or allocation choice.
+
+Terminal validation independently checks local executor/deployment/token/fee config, allocation totals, distinct venues, shared quote block, aggregate slippage, and exact ABI calldata. Recheck preserves all allocation terms, deadline, and transaction bytes. The Tenderly bundle simulates that exact executor transaction, probes touched balances at caller/executor/each used router before and after, and proves temporary executor-to-router allowances are zero afterward. Missing evidence rejects preparation. Canonical receipt verification checks exact-transaction Transfer deltas for the same touched owners; it is not independent proof of arbitrary-token behavior or allowance state.
 
 A revert rolls back that transaction's swaps and token transfers. Gas is still paid, and an earlier approval transaction remains confirmed. The same executor call will be used for simulation and actual execution; a simulation-only wrapper would not establish the same guarantee.
 
-The executor will support fixed allocations across two venues without arbitrary targets or delegatecalls. It is not part of the direct-router milestone.
+Local proofs cover independent Go/TypeScript/cast encoding vectors, exact-size quote and rounding fixtures, CLI request/recheck/refusal paths, Tenderly token-owner/allowance mutations, and authentic-router Foundry tests. No live executor deployment, Tenderly response, funded execution, or public-network result has been verified. Live direct-route coverage and selected-route commands in [testnet checks](testnet.md) do not establish executor acceptance.
 
 ## Public testnet checks
 
