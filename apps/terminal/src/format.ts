@@ -57,7 +57,7 @@ export function formatQuote(
       lines.push(`Route block: ${route.block.number} (${route.block.hash})`);
     for (const [index, leg] of route.legs.entries())
       lines.push(
-        `Leg ${index + 1}: pool ${leg.pool}; fee ${leg.feePips} pips; ${leg.tokenIn} to ${leg.tokenOut}`,
+        `Leg ${index + 1}: pool ${leg.pool}; ${leg.selector.case === "feePips" ? `fee ${leg.selector.value} pips` : leg.selector.case === "tickSpacing" ? `tick spacing ${leg.selector.value}` : "unknown selector"}; ${leg.tokenIn} to ${leg.tokenOut}`,
       );
     lines.push(`Latency: ${route.latencyMs} ms`);
   }

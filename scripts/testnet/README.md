@@ -1,0 +1,26 @@
+# Base Sepolia deployment harness
+
+Operator workflow, safety rules, output interpretation, and recovery instructions are in the unified [testnet documentation](../../docs/testnet.md). This file keeps dependency and contract provenance beside the harness code.
+
+## Fixtures and real swap semantics
+
+Tokens use OpenZeppelin's standard ERC20 with deployer-only minting: A has 18 decimals, B 6, C 8. Explicit recipients each receive 1,000,000 whole units per token. Recipients must include the liquidity payer. Repeating the same seed command does not mint again.
+
+Both providers have A/B, B/C and A/C pools. Fee 500 pools have a broad concentrated range (~±12,000 ticks). Uniswap fee 3000 and Pancake fee 2500 pools have narrow ranges (±two tick spacings). Initialization represents one whole token per whole token, not equal raw units. Integer square roots preserve 18/6/8 decimal scaling regardless of address ordering. The manifest includes sorted tokens, initialization price, tick range and liquidity for each pool.
+
+The owner-only `LiquiditySeeder` calls real `pool.mint`, authenticates the selected pool through the factory, and pays only during the synchronous callback. Positions remain in this helper permanently; no NFT manager or withdrawal UI is needed for disposable test liquidity. Both providers' real routers and callback checks remain unchanged. No gauges, farming contracts, descriptors, proxies, or mocked DEX are deployed.
+
+`testRealPancakeMintAndPartialInputConsumption` deploys authentic compiled core and released router bytecode in Foundry, seeds an asymmetric 18/6 narrow pool, and swaps 100,000 whole A. It asserts both callback payments, positive output, input consumption below 1% of requested input, exact recipient output balance delta, and exhaustion of active liquidity. This demonstrates the partial-consumption caveat without a mocked pool. On testnet use a narrow pool and an extreme amount in simulation, not a destructive swap against fixtures needed by other scenarios. Quoter output alone does not prove full input consumption. A later on-chain executor must enforce actual input balance deltas.
+
+`testRealPancakeTwoHopLeavesIntermediateResidue` uses a broad A/B first pool and narrow B/C second pool. The real router successfully spends exactly 1,000 A and delivers positive C while retaining more than 100 B. A future no-intermediate-residue invariant must reject this outcome even though the ordinary router transaction succeeds with `amountOutMinimum = 1`.
+
+## Pinned provenance
+
+- Pancake source: [pancakeswap/pancake-v3-contracts, commit 986847948755cba528324d41be19480731c36c2a](https://github.com/pancakeswap/pancake-v3-contracts/tree/986847948755cba528324d41be19480731c36c2a), GPL-2.0-or-later. Downloaded under ignored `.testnet/pancake`; preparation rejects a changed checkout. The repo retains its license files and source SPDX notices.
+- Core compilation: Foundry runs native solc 0.7.6 with Istanbul, optimizer 400, metadata hash none, matching upstream pool settings. Settings live in `contracts/pancake/foundry.toml`. Preparation compares the entire compiled pool creation bytecode with npm `@pancakeswap/v3-core@1.0.2`, and verifies init-code hash `0x6ce8eb472fa82df5469c6ab6d485f17c3ad13c8cd7af59b3d4a8026c5ce0f7e2`. This is the hash embedded in authentic Pancake periphery address derivation. Core factory is compiled with the same settings; pool bytecode is unchanged. Native compilation avoids the intermittent solc-js WebAssembly null-reference failure observed under Bun 1.3.9; no Node runtime or retry fallback is used.
+- `@pancakeswap/v3-periphery@1.0.2` supplies authentic released SwapRouter and QuoterV2 artifacts (GPL-2.0-or-later); package integrity is locked in `bun.lock`. No external link placeholders are accepted.
+- `contracts/pancake/PancakeBootstrap.sol` is GPL-2.0-or-later. It atomically deploys unmodified core contracts and sets their links because upstream `setFactoryAddress` is public and one-time. Factory ownership returns to the signer. Pool addresses derive from the pool deployer, not factory.
+- Custom ERC20/seeder source: MIT; dependency `@openzeppelin/contracts@5.0.2` MIT, compiled with solc 0.8.24/Paris. Package dependencies are pinned in the Bun lockfile; install with `--ignore-scripts`.
+- Uniswap uses [official Base Sepolia deployments](https://docs.uniswap.org/contracts/v3/reference/deployments/base-deployments): v3-core 1.0.0, v3-periphery 1.0.0, swap-router-contracts 1.1.0. No Uniswap code is copied or redeployed. The harness checks nonempty bytecode and factory/WETH links before use and stores runtime code hashes. Router02 exposes `factory()`, not `factoryV3()`; its exactInput selector is `0xb858183f` and deadline multicall selector is `0x5ae401dc`.
+
+All local downloads, deployment records and outputs use existing `.testnet/` and `contracts/{out,cache,broadcast}/` ignores. Do not commit these artifacts or credentials.

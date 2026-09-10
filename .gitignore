@@ -6,3 +6,7 @@ node_modules/
 dist/
 coverage/
 /plans/
+/contracts/out/
+/contracts/cache/
+/contracts/broadcast/
+/.testnet/

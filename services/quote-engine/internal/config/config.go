@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -26,12 +27,30 @@ type Terminal struct {
 }
 
 type Engine struct {
-	ListenAddr string `toml:"listen_addr"`
+	ListenAddr       string `toml:"listen_addr"`
+	QuoteConcurrency int    `toml:"quote_concurrency"`
 }
 
 type Chain struct {
-	ChainID   int64  `toml:"chain_id"`
-	RPCURLEnv string `toml:"rpc_url_env"`
+	ChainID          int64                 `toml:"chain_id"`
+	RPCURLEnv        string                `toml:"rpc_url_env"`
+	ExecutionEnabled bool                  `toml:"execution_enabled"`
+	Tokens           []Token               `toml:"tokens"`
+	Deployments      map[string]Deployment `toml:"deployments"`
+}
+
+type Token struct {
+	Address  string `toml:"address"`
+	Symbol   string `toml:"symbol"`
+	Decimals uint32 `toml:"decimals"`
+}
+
+type Deployment struct {
+	Kind    string   `toml:"kind"`
+	Factory string   `toml:"factory"`
+	Quoter  string   `toml:"quoter"`
+	Router  string   `toml:"router"`
+	Fees    []uint32 `toml:"fees"`
 }
 
 var chainKey = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -48,15 +67,42 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&result); err != nil {
 		return Config{}, errors.New("could not parse config file")
 	}
+	result.normalizeAddresses()
 	if err := result.validate(); err != nil {
 		return Config{}, err
 	}
 	return result, nil
 }
 
+func (c Config) normalizeAddresses() {
+	for key, chain := range c.Chains {
+		for i := range chain.Tokens {
+			if common.IsHexAddress(chain.Tokens[i].Address) {
+				chain.Tokens[i].Address = common.HexToAddress(chain.Tokens[i].Address).Hex()
+			}
+		}
+		for id, deployment := range chain.Deployments {
+			if common.IsHexAddress(deployment.Factory) {
+				deployment.Factory = common.HexToAddress(deployment.Factory).Hex()
+			}
+			if common.IsHexAddress(deployment.Quoter) {
+				deployment.Quoter = common.HexToAddress(deployment.Quoter).Hex()
+			}
+			if common.IsHexAddress(deployment.Router) {
+				deployment.Router = common.HexToAddress(deployment.Router).Hex()
+			}
+			chain.Deployments[id] = deployment
+		}
+		c.Chains[key] = chain
+	}
+}
+
 func (c Config) validate() error {
 	if c.Terminal.DefaultChain == "" || c.Terminal.EngineURL == "" || c.Terminal.SearchBudgetMS == 0 || c.Engine.ListenAddr == "" || len(c.Chains) == 0 {
 		return errors.New("terminal, engine, and at least one chain must be fully configured")
+	}
+	if c.Engine.QuoteConcurrency < 1 {
+		return errors.New("engine.quote_concurrency must be positive")
 	}
 	if c.Terminal.SearchBudgetMS < 1 || c.Terminal.SearchBudgetMS > 2147478647 {
 		return errors.New("terminal.search_budget_ms must be between 1 and 2147478647")
@@ -69,7 +115,6 @@ func (c Config) validate() error {
 	if err != nil || !net.ParseIP(host).IsLoopback() {
 		return errors.New("engine.listen_addr must use a loopback IP and port")
 	}
-	ids := make(map[int64]bool, len(c.Chains))
 	for key, chain := range c.Chains {
 		if !chainKey.MatchString(key) {
 			return errors.New("chain keys must start with a lowercase letter and contain only lowercase letters, digits, or hyphens")
@@ -77,10 +122,34 @@ func (c Config) validate() error {
 		if chain.ChainID < 1 || chain.ChainID > 9007199254740991 {
 			return errors.New("chains.*.chain_id must be between 1 and 9007199254740991")
 		}
-		if ids[chain.ChainID] {
-			return errors.New("chain IDs must be unique")
+		if chain.ExecutionEnabled && (len(chain.Tokens) < 2 || len(chain.Deployments) == 0) {
+			return errors.New("execution needs at least two tokens and a deployment")
 		}
-		ids[chain.ChainID] = true
+		seen := map[common.Address]bool{}
+		for _, token := range chain.Tokens {
+			a := common.HexToAddress(token.Address)
+			if !common.IsHexAddress(token.Address) || a == (common.Address{}) || seen[a] || token.Symbol == "" || token.Decimals > 255 {
+				return errors.New("invalid or duplicate configured token")
+			}
+			seen[a] = true
+		}
+		for id, deployment := range chain.Deployments {
+			if !chainKey.MatchString(id) || (deployment.Kind != "uniswap-v3" && deployment.Kind != "pancake-v3") || len(deployment.Fees) == 0 {
+				return errors.New("invalid deployment kind, identifier, or fees")
+			}
+			for _, a := range []string{deployment.Factory, deployment.Quoter, deployment.Router} {
+				if !common.IsHexAddress(a) || common.HexToAddress(a) == (common.Address{}) {
+					return errors.New("deployment addresses must be nonzero EVM addresses")
+				}
+			}
+			fees := map[uint32]bool{}
+			for _, fee := range deployment.Fees {
+				if fee >= 1000000 || fees[fee] {
+					return errors.New("invalid or duplicate pool fee")
+				}
+				fees[fee] = true
+			}
+		}
 		if !envName.MatchString(chain.RPCURLEnv) {
 			return errors.New("chains.*.rpc_url_env must be a valid environment variable name")
 		}

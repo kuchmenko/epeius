@@ -4,7 +4,7 @@ package epeius.quote.v1;
 
 option go_package = "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1;quotev1";
 
-// QuoteService is non-signing. Streaming and execution preparation are deferred.
+// QuoteService builds and simulates transactions, but never signs or sends them.
 service QuoteService {
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
   rpc GetQuote(QuoteRequest) returns (QuoteFinal);
@@ -29,6 +29,7 @@ message ChainStatus {
   bool quoting_supported = 5;
   repeated Token tokens = 6;
   BlockContext block = 7;
+  bool execution_enabled = 8;
 }
 
 message GetStatusResponse {
@@ -56,8 +57,12 @@ message RouteLeg {
   string pool = 1;
   string token_in = 2;
   string token_out = 3;
-  // Pool fee in millionths, not basis points.
-  uint32 fee_pips = 4;
+  oneof selector {
+    // Pool fee in millionths, not basis points.
+    uint32 fee_pips = 4;
+    // Slipstream pool selector, not a fee.
+    int32 tick_spacing = 5;
+  }
 }
 
 message RouteQuote {
@@ -70,6 +75,7 @@ message RouteQuote {
   optional string effective_out_atomic = 6;
   BlockContext block = 7;
   uint32 latency_ms = 8;
+  string deployment_id = 9;
 }
 
 message ProviderError {
@@ -99,6 +105,10 @@ message QuoteEvent {
 message PrepareExecutionRequest {
   string quote_id = 1;
   string route_id = 2;
+  string sender = 3;
+  uint32 slippage_bps = 4;
+  // Recheck immutable terms. When present, all other fields must be empty.
+  string preparation_id = 5;
 }
 
 enum PreparationStatus {
@@ -114,6 +124,8 @@ message UnsignedTransaction {
   string to = 2;
   string data = 3;
   string value_atomic = 4;
+  string from = 5;
+  string gas_limit = 6;
 }
 
 message PrepareExecutionResponse {
@@ -121,4 +133,18 @@ message PrepareExecutionResponse {
   // Only a READY response may contain a swap transaction.
   UnsignedTransaction transaction = 2;
   string message = 3;
+  string preparation_id = 4;
+  string expires_at_unix = 5;
+  string amount_out_minimum_atomic = 6;
+  string amount_in_atomic = 7;
+  string token_in = 8;
+  string token_out = 9;
+  string recipient = 10;
+  string deadline_unix = 11;
+  BlockContext simulation_block = 12;
+  // Separate approval; its success never makes the old quote executable.
+  UnsignedTransaction approval_transaction = 13;
+  string approval_spender = 14;
+  string simulated_amount_out_atomic = 15;
+  RouteQuote route = 16;
 }

@@ -8,12 +8,14 @@ import (
 	"math/big"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
 	"github.com/ethereum/go-ethereum/common"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/generated/go/epeius/quote/v1/quotev1connect"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv3"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
@@ -24,23 +26,29 @@ type Reader interface {
 }
 
 type Handler struct {
-	// Business streaming and execution preparation remain unimplemented.
-	// No approvals, signing, or transactions are performed by this service.
 	quotev1connect.UnimplementedQuoteServiceHandler
-	Chains map[string]Chain
+	Chains           map[string]Chain
+	Store            *Store
+	Simulator        Simulator
+	QuoteConcurrency int
 }
 
 type Chain struct {
-	ChainID  string
-	Client   Reader
-	Snapshot rpc.Snapshot
-	Error    string
+	ChainID          string
+	Client           Reader
+	Snapshot         rpc.Snapshot
+	Error            string
+	Config           config.Chain
+	DeploymentErrors map[string]string
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)
 var address = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 
 func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.QuoteRequest]) (*connect.Response[quotev1.QuoteFinal], error) {
+	if h.QuoteConcurrency < 1 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("quote concurrency is not configured"))
+	}
 	r := req.Msg
 	invalid := func(message string) (*connect.Response[quotev1.QuoteFinal], error) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(message))
@@ -55,8 +63,8 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	if chain.Client == nil {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("chain is unavailable"))
 	}
-	if chain.ChainID != "8453" {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("quoting is supported on Base mainnet only"))
+	if len(chain.Config.Deployments) == 0 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no quoting deployments configured"))
 	}
 	for _, value := range []string{r.TokenIn, r.TokenOut} {
 		if !address.MatchString(value) {
@@ -64,8 +72,12 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		}
 	}
 	in, out := common.HexToAddress(r.TokenIn), common.HexToAddress(r.TokenOut)
-	if !((in == uniswapv3.WETH && out == uniswapv3.USDC) || (in == uniswapv3.USDC && out == uniswapv3.WETH)) {
-		return invalid("only the WETH/USDC pair is supported")
+	allowed := map[common.Address]bool{}
+	for _, token := range chain.Config.Tokens {
+		allowed[common.HexToAddress(token.Address)] = true
+	}
+	if in == out || !allowed[in] || !allowed[out] {
+		return invalid("pair must contain distinct configured tokens")
 	}
 	if len(r.AmountInAtomic) > 78 || !positiveInteger.MatchString(r.AmountInAtomic) {
 		return invalid("amount must be a positive uint256 decimal integer")
@@ -79,6 +91,7 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	}
 	searchCtx, cancel := context.WithTimeout(ctx, time.Duration(r.SearchBudgetMs)*time.Millisecond)
 	defer cancel()
+	started := time.Now()
 	snapshot, err := chain.Client.Snapshot(searchCtx)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -90,52 +103,90 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("could not read quote block"))
 	}
 	block := &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
-	// This is a response identifier only, not a stored quote or execution promise.
 	final := &quotev1.QuoteFinal{QuoteId: rand.Text(), Block: block, SearchComplete: true}
-	// These four tiers define this search, not every fee tier enabled on Base.
-	fees := [...]uint32{100, 500, 3000, 10000}
-	type result struct {
-		index     int
-		route     *quotev1.RouteQuote
-		err       *quotev1.ProviderError
-		completed bool
+	candidates := newCandidates(chain.Config, in, out)
+	available := candidates.deployments[:0]
+	for _, deployment := range candidates.deployments {
+		if message := chain.DeploymentErrors[deployment.id]; message != "" {
+			final.Errors = append(final.Errors, &quotev1.ProviderError{Provider: chain.Config.Deployments[deployment.id].Kind, Message: deployment.id + ": " + message})
+		} else {
+			available = append(available, deployment)
+		}
 	}
-	results := make(chan result, len(fees))
-	provider := uniswapv3.Provider{Client: chain.Client}
-	for index, fee := range fees {
+	candidates.deployments = available
+	type result struct {
+		index int
+		route *quotev1.RouteQuote
+		err   *quotev1.ProviderError
+	}
+	concurrency := h.QuoteConcurrency
+	results := make(chan result)
+	var workers sync.WaitGroup
+	for range concurrency {
+		index, candidate, ok := candidates.next(searchCtx)
+		if !ok {
+			break
+		}
+		workers.Add(1)
 		go func() {
-			start := time.Now()
-			id := fmt.Sprintf("uniswap-v3:%d", fee)
-			pool, output, err := provider.Quote(searchCtx, in, out, amount, fee, common.HexToHash(snapshot.BlockHash))
-			item := result{index: index, completed: searchCtx.Err() == nil}
-			if !item.completed {
-				item.err = &quotev1.ProviderError{Provider: "uniswap-v3", RouteId: &id, Message: "search budget expired"}
-			} else if err != nil {
-				item.err = &quotev1.ProviderError{Provider: "uniswap-v3", RouteId: &id, Message: err.Error()}
-			} else if output != nil {
-				item.route = &quotev1.RouteQuote{RouteId: id, Provider: "uniswap-v3", Legs: []*quotev1.RouteLeg{{Pool: pool.Hex(), TokenIn: in.Hex(), TokenOut: out.Hex(), FeePips: fee}}, AmountOutAtomic: output.String(), Block: block, LatencyMs: uint32(time.Since(start).Milliseconds())}
+			defer workers.Done()
+			for {
+				start := time.Now()
+				id := candidate.id
+				deployment := chain.Config.Deployments[candidate.deployment]
+				provider := uniswapv3.Provider{Client: chain.Client, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter)}
+				output := new(big.Int).Set(amount)
+				var legs []*quotev1.RouteLeg
+				var err error
+				for i, fee := range candidate.fees {
+					var pool common.Address
+					pool, output, err = provider.Quote(searchCtx, candidate.tokens[i], candidate.tokens[i+1], output, fee, common.HexToHash(snapshot.BlockHash))
+					if err != nil || output == nil {
+						break
+					}
+					legs = append(legs, &quotev1.RouteLeg{Pool: pool.Hex(), TokenIn: candidate.tokens[i].Hex(), TokenOut: candidate.tokens[i+1].Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: fee}})
+				}
+				if searchCtx.Err() != nil {
+					results <- result{index: index, err: &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: "search budget expired"}}
+					return
+				}
+				item := result{index: index}
+				if err != nil {
+					item.err = &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: err.Error()}
+				} else if output != nil {
+					item.route = &quotev1.RouteQuote{RouteId: id, Provider: deployment.Kind, DeploymentId: candidate.deployment, Legs: legs, AmountOutAtomic: output.String(), Block: block, LatencyMs: uint32(time.Since(start).Milliseconds())}
+				}
+				results <- item
+				index, candidate, ok = candidates.next(searchCtx)
+				if !ok {
+					return
+				}
 			}
-			results <- item
 		}()
 	}
-	ordered := make([]result, len(fees))
-	for range fees {
-		item := <-results
-		ordered[item.index] = item
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+	var ordered []result
+	for item := range results {
+		ordered = append(ordered, item)
 	}
 	if ctx.Err() != nil {
 		return nil, connect.NewError(contextCode(ctx.Err()), ctx.Err())
 	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].index < ordered[j].index })
+	final.SearchComplete = searchCtx.Err() == nil
 	for _, item := range ordered {
-		if !item.completed {
-			final.SearchComplete = false
-		}
-		if item.route != nil && item.completed {
+		if item.route != nil {
 			final.Routes = append(final.Routes, item.route)
 		}
 		if item.err != nil {
 			final.Errors = append(final.Errors, item.err)
 		}
+	}
+	if h.Store != nil {
+		h.Store.saveQuote(r, final, started)
 	}
 	return connect.NewResponse(final), nil
 }
@@ -154,11 +205,11 @@ func (h Handler) GetStatus(_ context.Context, _ *connect.Request[quotev1.GetStat
 }
 
 func Status(key string, chain Chain) *quotev1.ChainStatus {
-	status := &quotev1.ChainStatus{Key: key, ChainId: chain.ChainID, Connected: chain.Client != nil, Error: chain.Error, QuotingSupported: chain.ChainID == "8453"}
+	supported := len(chain.Config.Tokens) >= 2 && len(chain.Config.Deployments) > len(chain.DeploymentErrors)
+	status := &quotev1.ChainStatus{Key: key, ChainId: chain.ChainID, Connected: chain.Client != nil, Error: chain.Error, QuotingSupported: supported, ExecutionEnabled: supported && chain.Config.ExecutionEnabled}
 	if status.QuotingSupported {
-		status.Tokens = []*quotev1.Token{
-			{Address: uniswapv3.WETH.Hex(), Symbol: "WETH", Decimals: 18},
-			{Address: uniswapv3.USDC.Hex(), Symbol: "USDC", Decimals: 6},
+		for _, token := range chain.Config.Tokens {
+			status.Tokens = append(status.Tokens, &quotev1.Token{Address: token.Address, Symbol: token.Symbol, Decimals: token.Decimals})
 		}
 	}
 	if status.Connected {
@@ -172,4 +223,85 @@ func contextCode(err error) connect.Code {
 		return connect.CodeDeadlineExceeded
 	}
 	return connect.CodeCanceled
+}
+
+type candidate struct {
+	id, deployment string
+	tokens         []common.Address
+	fees           []uint32
+}
+
+type candidateDeployment struct {
+	id   string
+	fees []uint32
+}
+
+type candidateIterator struct {
+	mutex                                     sync.Mutex
+	deployments                               []candidateDeployment
+	intermediates                             []common.Address
+	in, out                                   common.Address
+	deployment, direct, middle, first, second int
+	index                                     int
+}
+
+func newCandidates(chain config.Chain, in, out common.Address) *candidateIterator {
+	iterator := &candidateIterator{in: in, out: out}
+	var ids []string
+	for id := range chain.Deployments {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, token := range chain.Tokens {
+		a := common.HexToAddress(token.Address)
+		if a != in && a != out {
+			iterator.intermediates = append(iterator.intermediates, a)
+		}
+	}
+	sort.Slice(iterator.intermediates, func(i, j int) bool { return iterator.intermediates[i].Hex() < iterator.intermediates[j].Hex() })
+	for _, id := range ids {
+		fees := append([]uint32(nil), chain.Deployments[id].Fees...)
+		sort.Slice(fees, func(i, j int) bool { return fees[i] < fees[j] })
+		iterator.deployments = append(iterator.deployments, candidateDeployment{id: id, fees: fees})
+	}
+	return iterator
+}
+
+func (i *candidateIterator) next(ctx context.Context) (int, candidate, bool) {
+	i.mutex.Lock()
+	defer i.mutex.Unlock()
+	if ctx.Err() != nil {
+		return 0, candidate{}, false
+	}
+	for i.deployment < len(i.deployments) {
+		deployment := i.deployments[i.deployment]
+		if i.direct < len(deployment.fees) {
+			fee := deployment.fees[i.direct]
+			i.direct++
+			return i.take(candidate{fmt.Sprintf("%s:%d", deployment.id, fee), deployment.id, []common.Address{i.in, i.out}, []uint32{fee}})
+		}
+		if i.middle < len(i.intermediates) {
+			first, second := deployment.fees[i.first], deployment.fees[i.second]
+			middle := i.intermediates[i.middle]
+			i.second++
+			if i.second == len(deployment.fees) {
+				i.second = 0
+				i.first++
+				if i.first == len(deployment.fees) {
+					i.first = 0
+					i.middle++
+				}
+			}
+			return i.take(candidate{fmt.Sprintf("%s:%d:%s:%d", deployment.id, first, middle.Hex(), second), deployment.id, []common.Address{i.in, middle, i.out}, []uint32{first, second}})
+		}
+		i.deployment++
+		i.direct, i.middle, i.first, i.second = 0, 0, 0, 0
+	}
+	return 0, candidate{}, false
+}
+
+func (i *candidateIterator) take(value candidate) (int, candidate, bool) {
+	index := i.index
+	i.index++
+	return index, value, true
 }

@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file epeius/quote/v1/quote.proto.
  */
 export const file_epeius_quote_v1_quote: GenFile = /*@__PURE__*/
-  fileDesc("ChtlcGVpdXMvcXVvdGUvdjEvcXVvdGUucHJvdG8SD2VwZWl1cy5xdW90ZS52MSISChBHZXRTdGF0dXNSZXF1ZXN0IjoKBVRva2VuEg8KB2FkZHJlc3MYASABKAkSDgoGc3ltYm9sGAIgASgJEhAKCGRlY2ltYWxzGAMgASgNIr8BCgtDaGFpblN0YXR1cxILCgNrZXkYASABKAkSEAoIY2hhaW5faWQYAiABKAkSEQoJY29ubmVjdGVkGAMgASgIEg0KBWVycm9yGAQgASgJEhkKEXF1b3Rpbmdfc3VwcG9ydGVkGAUgASgIEiYKBnRva2VucxgGIAMoCzIWLmVwZWl1cy5xdW90ZS52MS5Ub2tlbhIsCgVibG9jaxgHIAEoCzIdLmVwZWl1cy5xdW90ZS52MS5CbG9ja0NvbnRleHQiQQoRR2V0U3RhdHVzUmVzcG9uc2USLAoGY2hhaW5zGAEgAygLMhwuZXBlaXVzLnF1b3RlLnYxLkNoYWluU3RhdHVzIs4BCgxRdW90ZVJlcXVlc3QSEAoIdG9rZW5faW4YBCABKAkSEQoJdG9rZW5fb3V0GAUgASgJEhgKEGFtb3VudF9pbl9hdG9taWMYBiABKAkSGAoQc2VhcmNoX2J1ZGdldF9tcxgIIAEoDRINCgVjaGFpbhgJIAEoCRIQCghjaGFpbl9pZBgKIAEoCUoECAEQAkoECAIQA0oECAMQBEoECAcQCFILZW52aXJvbm1lbnRSBnNlbmRlclIJcmVjaXBpZW50UgxzbGlwcGFnZV9icHMiLAoMQmxvY2tDb250ZXh0Eg4KBm51bWJlchgBIAEoCRIMCgRoYXNoGAIgASgJIk8KCFJvdXRlTGVnEgwKBHBvb2wYASABKAkSEAoIdG9rZW5faW4YAiABKAkSEQoJdG9rZW5fb3V0GAMgASgJEhAKCGZlZV9waXBzGAQgASgNIrQCCgpSb3V0ZVF1b3RlEhAKCHJvdXRlX2lkGAEgASgJEhAKCHByb3ZpZGVyGAIgASgJEicKBGxlZ3MYAyADKAsyGS5lcGVpdXMucXVvdGUudjEuUm91dGVMZWcSGQoRYW1vdW50X291dF9hdG9taWMYBCABKAkSJAoXbmV0d29ya19jb3N0X291dF9hdG9taWMYBSABKAlIAIgBARIhChRlZmZlY3RpdmVfb3V0X2F0b21pYxgGIAEoCUgBiAEBEiwKBWJsb2NrGAcgASgLMh0uZXBlaXVzLnF1b3RlLnYxLkJsb2NrQ29udGV4dBISCgpsYXRlbmN5X21zGAggASgNQhoKGF9uZXR3b3JrX2Nvc3Rfb3V0X2F0b21pY0IXChVfZWZmZWN0aXZlX291dF9hdG9taWMiVgoNUHJvdmlkZXJFcnJvchIQCghwcm92aWRlchgBIAEoCRIVCghyb3V0ZV9pZBgCIAEoCUgAiAEBEg8KB21lc3NhZ2UYAyABKAlCCwoJX3JvdXRlX2lkIvABCgpRdW90ZUZpbmFsEhAKCHF1b3RlX2lkGAEgASgJEisKBnJvdXRlcxgCIAMoCzIbLmVwZWl1cy5xdW90ZS52MS5Sb3V0ZVF1b3RlEi4KBmVycm9ycxgDIAMoCzIeLmVwZWl1cy5xdW90ZS52MS5Qcm92aWRlckVycm9yEhoKDWJlc3Rfcm91dGVfaWQYBCABKAlIAIgBARIsCgVibG9jaxgFIAEoCzIdLmVwZWl1cy5xdW90ZS52MS5CbG9ja0NvbnRleHQSFwoPc2VhcmNoX2NvbXBsZXRlGAYgASgIQhAKDl9iZXN0X3JvdXRlX2lkIqIBCgpRdW90ZUV2ZW50EiwKBXF1b3RlGAEgASgLMhsuZXBlaXVzLnF1b3RlLnYxLlJvdXRlUXVvdGVIABIvCgVlcnJvchgCIAEoCzIeLmVwZWl1cy5xdW90ZS52MS5Qcm92aWRlckVycm9ySAASLAoFZmluYWwYAyABKAsyGy5lcGVpdXMucXVvdGUudjEuUXVvdGVGaW5hbEgAQgcKBWV2ZW50Ij0KF1ByZXBhcmVFeGVjdXRpb25SZXF1ZXN0EhAKCHF1b3RlX2lkGAEgASgJEhAKCHJvdXRlX2lkGAIgASgJIlcKE1Vuc2lnbmVkVHJhbnNhY3Rpb24SEAoIY2hhaW5faWQYASABKAkSCgoCdG8YAiABKAkSDAoEZGF0YRgDIAEoCRIUCgx2YWx1ZV9hdG9taWMYBCABKAkimgEKGFByZXBhcmVFeGVjdXRpb25SZXNwb25zZRIyCgZzdGF0dXMYASABKA4yIi5lcGVpdXMucXVvdGUudjEuUHJlcGFyYXRpb25TdGF0dXMSOQoLdHJhbnNhY3Rpb24YAiABKAsyJC5lcGVpdXMucXVvdGUudjEuVW5zaWduZWRUcmFuc2FjdGlvbhIPCgdtZXNzYWdlGAMgASgJKskBChFQcmVwYXJhdGlvblN0YXR1cxIiCh5QUkVQQVJBVElPTl9TVEFUVVNfVU5TUEVDSUZJRUQQABIcChhQUkVQQVJBVElPTl9TVEFUVVNfUkVBRFkQARIoCiRQUkVQQVJBVElPTl9TVEFUVVNfQVBQUk9WQUxfUkVRVUlSRUQQAhInCiNQUkVQQVJBVElPTl9TVEFUVVNfUkVRVU9URV9SRVFVSVJFRBADEh8KG1BSRVBBUkFUSU9OX1NUQVRVU19SRUpFQ1RFRBAEMuACCgxRdW90ZVNlcnZpY2USUgoJR2V0U3RhdHVzEiEuZXBlaXVzLnF1b3RlLnYxLkdldFN0YXR1c1JlcXVlc3QaIi5lcGVpdXMucXVvdGUudjEuR2V0U3RhdHVzUmVzcG9uc2USRgoIR2V0UXVvdGUSHS5lcGVpdXMucXVvdGUudjEuUXVvdGVSZXF1ZXN0GhsuZXBlaXVzLnF1b3RlLnYxLlF1b3RlRmluYWwSSwoLU3RyZWFtUXVvdGUSHS5lcGVpdXMucXVvdGUudjEuUXVvdGVSZXF1ZXN0GhsuZXBlaXVzLnF1b3RlLnYxLlF1b3RlRXZlbnQwARJnChBQcmVwYXJlRXhlY3V0aW9uEiguZXBlaXVzLnF1b3RlLnYxLlByZXBhcmVFeGVjdXRpb25SZXF1ZXN0GikuZXBlaXVzLnF1b3RlLnYxLlByZXBhcmVFeGVjdXRpb25SZXNwb25zZUJCWkBnaXRodWIuY29tL2t1Y2htZW5rby9lcGVpdXMvZ2VuZXJhdGVkL2dvL2VwZWl1cy9xdW90ZS92MTtxdW90ZXYxYgZwcm90bzM");
+  fileDesc("ChtlcGVpdXMvcXVvdGUvdjEvcXVvdGUucHJvdG8SD2VwZWl1cy5xdW90ZS52MSISChBHZXRTdGF0dXNSZXF1ZXN0IjoKBVRva2VuEg8KB2FkZHJlc3MYASABKAkSDgoGc3ltYm9sGAIgASgJEhAKCGRlY2ltYWxzGAMgASgNItoBCgtDaGFpblN0YXR1cxILCgNrZXkYASABKAkSEAoIY2hhaW5faWQYAiABKAkSEQoJY29ubmVjdGVkGAMgASgIEg0KBWVycm9yGAQgASgJEhkKEXF1b3Rpbmdfc3VwcG9ydGVkGAUgASgIEiYKBnRva2VucxgGIAMoCzIWLmVwZWl1cy5xdW90ZS52MS5Ub2tlbhIsCgVibG9jaxgHIAEoCzIdLmVwZWl1cy5xdW90ZS52MS5CbG9ja0NvbnRleHQSGQoRZXhlY3V0aW9uX2VuYWJsZWQYCCABKAgiQQoRR2V0U3RhdHVzUmVzcG9uc2USLAoGY2hhaW5zGAEgAygLMhwuZXBlaXVzLnF1b3RlLnYxLkNoYWluU3RhdHVzIs4BCgxRdW90ZVJlcXVlc3QSEAoIdG9rZW5faW4YBCABKAkSEQoJdG9rZW5fb3V0GAUgASgJEhgKEGFtb3VudF9pbl9hdG9taWMYBiABKAkSGAoQc2VhcmNoX2J1ZGdldF9tcxgIIAEoDRINCgVjaGFpbhgJIAEoCRIQCghjaGFpbl9pZBgKIAEoCUoECAEQAkoECAIQA0oECAMQBEoECAcQCFILZW52aXJvbm1lbnRSBnNlbmRlclIJcmVjaXBpZW50UgxzbGlwcGFnZV9icHMiLAoMQmxvY2tDb250ZXh0Eg4KBm51bWJlchgBIAEoCRIMCgRoYXNoGAIgASgJInUKCFJvdXRlTGVnEgwKBHBvb2wYASABKAkSEAoIdG9rZW5faW4YAiABKAkSEQoJdG9rZW5fb3V0GAMgASgJEhIKCGZlZV9waXBzGAQgASgNSAASFgoMdGlja19zcGFjaW5nGAUgASgFSABCCgoIc2VsZWN0b3IiywIKClJvdXRlUXVvdGUSEAoIcm91dGVfaWQYASABKAkSEAoIcHJvdmlkZXIYAiABKAkSJwoEbGVncxgDIAMoCzIZLmVwZWl1cy5xdW90ZS52MS5Sb3V0ZUxlZxIZChFhbW91bnRfb3V0X2F0b21pYxgEIAEoCRIkChduZXR3b3JrX2Nvc3Rfb3V0X2F0b21pYxgFIAEoCUgAiAEBEiEKFGVmZmVjdGl2ZV9vdXRfYXRvbWljGAYgASgJSAGIAQESLAoFYmxvY2sYByABKAsyHS5lcGVpdXMucXVvdGUudjEuQmxvY2tDb250ZXh0EhIKCmxhdGVuY3lfbXMYCCABKA0SFQoNZGVwbG95bWVudF9pZBgJIAEoCUIaChhfbmV0d29ya19jb3N0X291dF9hdG9taWNCFwoVX2VmZmVjdGl2ZV9vdXRfYXRvbWljIlYKDVByb3ZpZGVyRXJyb3ISEAoIcHJvdmlkZXIYASABKAkSFQoIcm91dGVfaWQYAiABKAlIAIgBARIPCgdtZXNzYWdlGAMgASgJQgsKCV9yb3V0ZV9pZCLwAQoKUXVvdGVGaW5hbBIQCghxdW90ZV9pZBgBIAEoCRIrCgZyb3V0ZXMYAiADKAsyGy5lcGVpdXMucXVvdGUudjEuUm91dGVRdW90ZRIuCgZlcnJvcnMYAyADKAsyHi5lcGVpdXMucXVvdGUudjEuUHJvdmlkZXJFcnJvchIaCg1iZXN0X3JvdXRlX2lkGAQgASgJSACIAQESLAoFYmxvY2sYBSABKAsyHS5lcGVpdXMucXVvdGUudjEuQmxvY2tDb250ZXh0EhcKD3NlYXJjaF9jb21wbGV0ZRgGIAEoCEIQCg5fYmVzdF9yb3V0ZV9pZCKiAQoKUXVvdGVFdmVudBIsCgVxdW90ZRgBIAEoCzIbLmVwZWl1cy5xdW90ZS52MS5Sb3V0ZVF1b3RlSAASLwoFZXJyb3IYAiABKAsyHi5lcGVpdXMucXVvdGUudjEuUHJvdmlkZXJFcnJvckgAEiwKBWZpbmFsGAMgASgLMhsuZXBlaXVzLnF1b3RlLnYxLlF1b3RlRmluYWxIAEIHCgVldmVudCJ7ChdQcmVwYXJlRXhlY3V0aW9uUmVxdWVzdBIQCghxdW90ZV9pZBgBIAEoCRIQCghyb3V0ZV9pZBgCIAEoCRIOCgZzZW5kZXIYAyABKAkSFAoMc2xpcHBhZ2VfYnBzGAQgASgNEhYKDnByZXBhcmF0aW9uX2lkGAUgASgJIngKE1Vuc2lnbmVkVHJhbnNhY3Rpb24SEAoIY2hhaW5faWQYASABKAkSCgoCdG8YAiABKAkSDAoEZGF0YRgDIAEoCRIUCgx2YWx1ZV9hdG9taWMYBCABKAkSDAoEZnJvbRgFIAEoCRIRCglnYXNfbGltaXQYBiABKAkivwQKGFByZXBhcmVFeGVjdXRpb25SZXNwb25zZRIyCgZzdGF0dXMYASABKA4yIi5lcGVpdXMucXVvdGUudjEuUHJlcGFyYXRpb25TdGF0dXMSOQoLdHJhbnNhY3Rpb24YAiABKAsyJC5lcGVpdXMucXVvdGUudjEuVW5zaWduZWRUcmFuc2FjdGlvbhIPCgdtZXNzYWdlGAMgASgJEhYKDnByZXBhcmF0aW9uX2lkGAQgASgJEhcKD2V4cGlyZXNfYXRfdW5peBgFIAEoCRIhChlhbW91bnRfb3V0X21pbmltdW1fYXRvbWljGAYgASgJEhgKEGFtb3VudF9pbl9hdG9taWMYByABKAkSEAoIdG9rZW5faW4YCCABKAkSEQoJdG9rZW5fb3V0GAkgASgJEhEKCXJlY2lwaWVudBgKIAEoCRIVCg1kZWFkbGluZV91bml4GAsgASgJEjcKEHNpbXVsYXRpb25fYmxvY2sYDCABKAsyHS5lcGVpdXMucXVvdGUudjEuQmxvY2tDb250ZXh0EkIKFGFwcHJvdmFsX3RyYW5zYWN0aW9uGA0gASgLMiQuZXBlaXVzLnF1b3RlLnYxLlVuc2lnbmVkVHJhbnNhY3Rpb24SGAoQYXBwcm92YWxfc3BlbmRlchgOIAEoCRIjChtzaW11bGF0ZWRfYW1vdW50X291dF9hdG9taWMYDyABKAkSKgoFcm91dGUYECABKAsyGy5lcGVpdXMucXVvdGUudjEuUm91dGVRdW90ZSrJAQoRUHJlcGFyYXRpb25TdGF0dXMSIgoeUFJFUEFSQVRJT05fU1RBVFVTX1VOU1BFQ0lGSUVEEAASHAoYUFJFUEFSQVRJT05fU1RBVFVTX1JFQURZEAESKAokUFJFUEFSQVRJT05fU1RBVFVTX0FQUFJPVkFMX1JFUVVJUkVEEAISJwojUFJFUEFSQVRJT05fU1RBVFVTX1JFUVVPVEVfUkVRVUlSRUQQAxIfChtQUkVQQVJBVElPTl9TVEFUVVNfUkVKRUNURUQQBDLgAgoMUXVvdGVTZXJ2aWNlElIKCUdldFN0YXR1cxIhLmVwZWl1cy5xdW90ZS52MS5HZXRTdGF0dXNSZXF1ZXN0GiIuZXBlaXVzLnF1b3RlLnYxLkdldFN0YXR1c1Jlc3BvbnNlEkYKCEdldFF1b3RlEh0uZXBlaXVzLnF1b3RlLnYxLlF1b3RlUmVxdWVzdBobLmVwZWl1cy5xdW90ZS52MS5RdW90ZUZpbmFsEksKC1N0cmVhbVF1b3RlEh0uZXBlaXVzLnF1b3RlLnYxLlF1b3RlUmVxdWVzdBobLmVwZWl1cy5xdW90ZS52MS5RdW90ZUV2ZW50MAESZwoQUHJlcGFyZUV4ZWN1dGlvbhIoLmVwZWl1cy5xdW90ZS52MS5QcmVwYXJlRXhlY3V0aW9uUmVxdWVzdBopLmVwZWl1cy5xdW90ZS52MS5QcmVwYXJlRXhlY3V0aW9uUmVzcG9uc2VCQlpAZ2l0aHViLmNvbS9rdWNobWVua28vZXBlaXVzL2dlbmVyYXRlZC9nby9lcGVpdXMvcXVvdGUvdjE7cXVvdGV2MWIGcHJvdG8z");
 
 /**
  * @generated from message epeius.quote.v1.GetStatusRequest
@@ -92,6 +92,11 @@ export type ChainStatus = Message<"epeius.quote.v1.ChainStatus"> & {
    * @generated from field: epeius.quote.v1.BlockContext block = 7;
    */
   block?: BlockContext | undefined;
+
+  /**
+   * @generated from field: bool execution_enabled = 8;
+   */
+  executionEnabled: boolean;
 };
 
 /**
@@ -204,11 +209,25 @@ export type RouteLeg = Message<"epeius.quote.v1.RouteLeg"> & {
   tokenOut: string;
 
   /**
-   * Pool fee in millionths, not basis points.
-   *
-   * @generated from field: uint32 fee_pips = 4;
+   * @generated from oneof epeius.quote.v1.RouteLeg.selector
    */
-  feePips: number;
+  selector: {
+    /**
+     * Pool fee in millionths, not basis points.
+     *
+     * @generated from field: uint32 fee_pips = 4;
+     */
+    value: number;
+    case: "feePips";
+  } | {
+    /**
+     * Slipstream pool selector, not a fee.
+     *
+     * @generated from field: int32 tick_spacing = 5;
+     */
+    value: number;
+    case: "tickSpacing";
+  } | { case: undefined; value?: undefined };
 };
 
 /**
@@ -263,6 +282,11 @@ export type RouteQuote = Message<"epeius.quote.v1.RouteQuote"> & {
    * @generated from field: uint32 latency_ms = 8;
    */
   latencyMs: number;
+
+  /**
+   * @generated from field: string deployment_id = 9;
+   */
+  deploymentId: string;
 };
 
 /**
@@ -391,6 +415,23 @@ export type PrepareExecutionRequest = Message<"epeius.quote.v1.PrepareExecutionR
    * @generated from field: string route_id = 2;
    */
   routeId: string;
+
+  /**
+   * @generated from field: string sender = 3;
+   */
+  sender: string;
+
+  /**
+   * @generated from field: uint32 slippage_bps = 4;
+   */
+  slippageBps: number;
+
+  /**
+   * Recheck immutable terms. When present, all other fields must be empty.
+   *
+   * @generated from field: string preparation_id = 5;
+   */
+  preparationId: string;
 };
 
 /**
@@ -423,6 +464,16 @@ export type UnsignedTransaction = Message<"epeius.quote.v1.UnsignedTransaction">
    * @generated from field: string value_atomic = 4;
    */
   valueAtomic: string;
+
+  /**
+   * @generated from field: string from = 5;
+   */
+  from: string;
+
+  /**
+   * @generated from field: string gas_limit = 6;
+   */
+  gasLimit: string;
 };
 
 /**
@@ -452,6 +503,73 @@ export type PrepareExecutionResponse = Message<"epeius.quote.v1.PrepareExecution
    * @generated from field: string message = 3;
    */
   message: string;
+
+  /**
+   * @generated from field: string preparation_id = 4;
+   */
+  preparationId: string;
+
+  /**
+   * @generated from field: string expires_at_unix = 5;
+   */
+  expiresAtUnix: string;
+
+  /**
+   * @generated from field: string amount_out_minimum_atomic = 6;
+   */
+  amountOutMinimumAtomic: string;
+
+  /**
+   * @generated from field: string amount_in_atomic = 7;
+   */
+  amountInAtomic: string;
+
+  /**
+   * @generated from field: string token_in = 8;
+   */
+  tokenIn: string;
+
+  /**
+   * @generated from field: string token_out = 9;
+   */
+  tokenOut: string;
+
+  /**
+   * @generated from field: string recipient = 10;
+   */
+  recipient: string;
+
+  /**
+   * @generated from field: string deadline_unix = 11;
+   */
+  deadlineUnix: string;
+
+  /**
+   * @generated from field: epeius.quote.v1.BlockContext simulation_block = 12;
+   */
+  simulationBlock?: BlockContext | undefined;
+
+  /**
+   * Separate approval; its success never makes the old quote executable.
+   *
+   * @generated from field: epeius.quote.v1.UnsignedTransaction approval_transaction = 13;
+   */
+  approvalTransaction?: UnsignedTransaction | undefined;
+
+  /**
+   * @generated from field: string approval_spender = 14;
+   */
+  approvalSpender: string;
+
+  /**
+   * @generated from field: string simulated_amount_out_atomic = 15;
+   */
+  simulatedAmountOutAtomic: string;
+
+  /**
+   * @generated from field: epeius.quote.v1.RouteQuote route = 16;
+   */
+  route?: RouteQuote | undefined;
 };
 
 /**
@@ -498,7 +616,7 @@ export const PreparationStatusSchema: GenEnum<PreparationStatus> = /*@__PURE__*/
   enumDesc(file_epeius_quote_v1_quote, 0);
 
 /**
- * QuoteService is non-signing. Streaming and execution preparation are deferred.
+ * QuoteService builds and simulates transactions, but never signs or sends them.
  *
  * @generated from service epeius.quote.v1.QuoteService
  */

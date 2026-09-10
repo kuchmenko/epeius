@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/ethereum/go-ethereum/common"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
-	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv3"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
@@ -29,12 +30,26 @@ func (f readerFake) Call(ctx context.Context, to common.Address, data []byte, bl
 
 const blockHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+var (
+	testFactory = common.HexToAddress("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
+	testQuoter  = common.HexToAddress("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")
+	testWETH    = common.HexToAddress("0x4200000000000000000000000000000000000006")
+	testUSDC    = common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
+)
+
+func testChainConfig() config.Chain {
+	return config.Chain{
+		Tokens:      []config.Token{{Address: testWETH.Hex(), Symbol: "WETH", Decimals: 18}, {Address: testUSDC.Hex(), Symbol: "USDC", Decimals: 6}},
+		Deployments: map[string]config.Deployment{"uniswap-v3": {Kind: "uniswap-v3", Factory: testFactory.Hex(), Quoter: testQuoter.Hex(), Fees: []uint32{100, 500, 3000, 10000}}},
+	}
+}
+
 func snapshot() rpc.Snapshot { return rpc.Snapshot{BlockNumber: "19283746", BlockHash: blockHash} }
 
 func validRequest() *quotev1.QuoteRequest {
 	return &quotev1.QuoteRequest{
 		Chain: "base", ChainId: "8453",
-		TokenIn: uniswapv3.WETH.Hex(), TokenOut: uniswapv3.USDC.Hex(),
+		TokenIn: testWETH.Hex(), TokenOut: testUSDC.Hex(),
 		AmountInAtomic: "1606938044258990275541962092341162602522202993782793822955697",
 		SearchBudgetMs: 500,
 	}
@@ -65,7 +80,7 @@ func calldataFee(data []byte) uint32 {
 }
 
 func callHandler(ctx context.Context, client Reader, request *quotev1.QuoteRequest) (*quotev1.QuoteFinal, error) {
-	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client}}}).GetQuote(ctx, connect.NewRequest(request))
+	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: testChainConfig()}}, QuoteConcurrency: 4}).GetQuote(ctx, connect.NewRequest(request))
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +99,7 @@ func TestHandlerDeterministicFeeOrderPinnedHashMissingPoolsAndErrors(t *testing.
 				t.Errorf("call block = %s", block)
 			}
 			fee := calldataFee(data)
-			if to == uniswapv3.Factory {
+			if to == testFactory {
 				time.Sleep(delays[fee])
 				switch fee {
 				case 500:
@@ -130,7 +145,7 @@ func TestHandlerPartialBudgetKeepsFinishedRouteAndStopsPending(t *testing.T) {
 		call: func(ctx context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
 			fee := calldataFee(data)
 			if fee == 100 {
-				if to == uniswapv3.Factory {
+				if to == testFactory {
 					return poolResponse(pool), nil
 				}
 				return quoteResponse(424242), nil
@@ -150,7 +165,7 @@ func TestHandlerPartialBudgetKeepsFinishedRouteAndStopsPending(t *testing.T) {
 		t.Fatalf("partial result = %+v", got)
 	}
 	if len(got.Errors) != 3 {
-		t.Fatalf("missing budget errors: %v", got.Errors)
+		t.Fatalf("started candidates missing budget errors: %v", got.Errors)
 	}
 	for _, err := range got.Errors {
 		if err.Message != "search budget expired" {
@@ -309,25 +324,250 @@ func TestHandlerEmptyResultsDistinguishMissingPoolsFromFailures(t *testing.T) {
 	}
 }
 
-func TestStatusSortedWithStartupStateAndBaseTokens(t *testing.T) {
+func TestStatusUsesOnlyExplicitChainConfig(t *testing.T) {
 	client := readerFake{}
+	alternate := testChainConfig()
+	alternate.ExecutionEnabled = true
 	handler := Handler{Chains: map[string]Chain{
 		"z-test": {ChainID: "84532", Error: "RPC unavailable"},
 		"base":   {ChainID: "8453", Client: client, Snapshot: snapshot()},
-	}}
+		"other":  {ChainID: "1", Client: client, Config: alternate},
+	}, QuoteConcurrency: 4}
 	response, err := handler.GetStatus(context.Background(), connect.NewRequest(&quotev1.GetStatusRequest{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	chains := response.Msg.Chains
-	if len(chains) != 2 || chains[0].Key != "base" || chains[1].Key != "z-test" {
+	if len(chains) != 3 || chains[0].Key != "base" || chains[1].Key != "other" || chains[2].Key != "z-test" {
 		t.Fatalf("chains not sorted: %+v", chains)
 	}
-	if !chains[0].Connected || !chains[0].QuotingSupported || len(chains[0].Tokens) != 2 || chains[0].Tokens[0].Symbol != "WETH" || chains[0].Block.Hash != blockHash {
+	if !chains[0].Connected || chains[0].QuotingSupported || chains[0].ExecutionEnabled || len(chains[0].Tokens) != 0 || chains[0].Block.Hash != blockHash {
 		t.Fatalf("wrong Base status: %+v", chains[0])
 	}
-	if chains[1].Connected || chains[1].QuotingSupported || chains[1].Error != "RPC unavailable" || chains[1].Block != nil {
-		t.Fatalf("wrong unavailable status: %+v", chains[1])
+	if !chains[1].Connected || !chains[1].QuotingSupported || !chains[1].ExecutionEnabled || len(chains[1].Tokens) != 2 {
+		t.Fatalf("wrong explicitly configured alternate status: %+v", chains[1])
+	}
+	if chains[2].Connected || chains[2].QuotingSupported || chains[2].Error != "RPC unavailable" || chains[2].Block != nil {
+		t.Fatalf("wrong unavailable status: %+v", chains[2])
+	}
+}
+
+func TestStatusRequiresTwoTokensBeforeAdvertisingQuoteSupport(t *testing.T) {
+	allTokens := testChainConfig().Tokens
+	for _, test := range []struct {
+		name      string
+		tokens    []config.Token
+		supported bool
+	}{
+		{name: "no tokens", tokens: nil, supported: false},
+		{name: "one token", tokens: allTokens[:1], supported: false},
+		{name: "two tokens", tokens: allTokens, supported: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			chainConfig := testChainConfig()
+			chainConfig.ExecutionEnabled = false
+			chainConfig.Tokens = test.tokens
+			got := Status("base", Chain{ChainID: "8453", Client: readerFake{}, Config: chainConfig})
+			if got.QuotingSupported != test.supported {
+				t.Fatalf("QuotingSupported = %t with %d tokens, want %t", got.QuotingSupported, len(test.tokens), test.supported)
+			}
+			if got.ExecutionEnabled {
+				t.Fatal("read-only deployment advertised execution support")
+			}
+		})
+	}
+}
+
+func TestStatusAdvertisedTokenAddressCanBeQuotedVerbatim(t *testing.T) {
+	client := readerFake{
+		snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
+		call: func(context.Context, common.Address, []byte, common.Hash) ([]byte, error) {
+			return make([]byte, 32), nil
+		},
+	}
+	t.Run("normalized configured address", func(t *testing.T) {
+		chainConfig := testChainConfig()
+		chain := Chain{ChainID: "8453", Client: client, Config: chainConfig}
+		status := Status("base", chain)
+		request := validRequest()
+		request.TokenIn = status.Tokens[0].Address
+		request.TokenOut = status.Tokens[1].Address
+		_, err := (Handler{Chains: map[string]Chain{"base": chain}, QuoteConcurrency: 2}).GetQuote(context.Background(), connect.NewRequest(request))
+		if err != nil {
+			t.Fatalf("GetQuote rejected Status token address %q: %v", request.TokenIn, err)
+		}
+	})
+}
+
+func TestExpiredBudgetDoesNotLaunchCartesianCandidates(t *testing.T) {
+	chainConfig := testChainConfig()
+	chainConfig.Deployments["uniswap-v3"] = config.Deployment{
+		Kind:    "uniswap-v3",
+		Factory: testFactory.Hex(),
+		Quoter:  testQuoter.Hex(),
+		Fees:    []uint32{100, 500, 3000},
+	}
+	for i := 1; i <= 3; i++ {
+		chainConfig.Tokens = append(chainConfig.Tokens, config.Token{Address: common.BigToAddress(big.NewInt(int64(i))).Hex(), Symbol: "M", Decimals: 18})
+	}
+	candidateCount := 0
+	iterator := newCandidates(chainConfig, testWETH, testUSDC)
+	for {
+		_, _, ok := iterator.next(context.Background())
+		if !ok {
+			break
+		}
+		candidateCount++
+	}
+	wantCartesianCount := 3 + 3*3*3
+	if candidateCount != wantCartesianCount {
+		t.Fatalf("candidate count = %d, want direct fees + intermediates*fee pairs = %d", candidateCount, wantCartesianCount)
+	}
+
+	started := make(chan struct{}, candidateCount)
+	release := make(chan struct{})
+	client := readerFake{
+		snapshot: func(ctx context.Context) (rpc.Snapshot, error) {
+			<-ctx.Done()
+			return snapshot(), nil
+		},
+		call: func(context.Context, common.Address, []byte, common.Hash) ([]byte, error) {
+			started <- struct{}{}
+			<-release
+			return make([]byte, 32), nil
+		},
+	}
+	request := validRequest()
+	request.SearchBudgetMs = 1
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: chainConfig}}, QuoteConcurrency: 3}).GetQuote(context.Background(), connect.NewRequest(request))
+		done <- err
+	}()
+
+	observedCalls := 0
+	for observedCalls < candidateCount {
+		select {
+		case <-started:
+			observedCalls++
+		case <-done:
+			close(release)
+			if observedCalls != 0 {
+				t.Fatalf("expired budget launched %d RPC calls, want 0", observedCalls)
+			}
+			return
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatalf("timed out after observing %d of %d candidate calls", observedCalls, candidateCount)
+		}
+	}
+	close(release)
+	<-done
+	if observedCalls != 0 {
+		t.Fatalf("expired budget launched %d concurrent candidate RPC calls from %d Cartesian candidates, want 0", observedCalls, candidateCount)
+	}
+}
+
+func TestCandidateIteratorDeterministicMultiDeploymentCartesianTraversal(t *testing.T) {
+	middleA := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	middleB := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	chainConfig := config.Chain{
+		Tokens: []config.Token{{Address: middleB.Hex()}, {Address: testUSDC.Hex()}, {Address: middleA.Hex()}, {Address: testWETH.Hex()}},
+		Deployments: map[string]config.Deployment{
+			"zeta":  {Fees: []uint32{500}},
+			"alpha": {Fees: []uint32{3000, 100}},
+		},
+	}
+	want := []candidate{
+		{id: "alpha:100", deployment: "alpha", tokens: []common.Address{testWETH, testUSDC}, fees: []uint32{100}},
+		{id: "alpha:3000", deployment: "alpha", tokens: []common.Address{testWETH, testUSDC}, fees: []uint32{3000}},
+		{id: "alpha:100:" + middleA.Hex() + ":100", deployment: "alpha", tokens: []common.Address{testWETH, middleA, testUSDC}, fees: []uint32{100, 100}},
+		{id: "alpha:100:" + middleA.Hex() + ":3000", deployment: "alpha", tokens: []common.Address{testWETH, middleA, testUSDC}, fees: []uint32{100, 3000}},
+		{id: "alpha:3000:" + middleA.Hex() + ":100", deployment: "alpha", tokens: []common.Address{testWETH, middleA, testUSDC}, fees: []uint32{3000, 100}},
+		{id: "alpha:3000:" + middleA.Hex() + ":3000", deployment: "alpha", tokens: []common.Address{testWETH, middleA, testUSDC}, fees: []uint32{3000, 3000}},
+		{id: "alpha:100:" + middleB.Hex() + ":100", deployment: "alpha", tokens: []common.Address{testWETH, middleB, testUSDC}, fees: []uint32{100, 100}},
+		{id: "alpha:100:" + middleB.Hex() + ":3000", deployment: "alpha", tokens: []common.Address{testWETH, middleB, testUSDC}, fees: []uint32{100, 3000}},
+		{id: "alpha:3000:" + middleB.Hex() + ":100", deployment: "alpha", tokens: []common.Address{testWETH, middleB, testUSDC}, fees: []uint32{3000, 100}},
+		{id: "alpha:3000:" + middleB.Hex() + ":3000", deployment: "alpha", tokens: []common.Address{testWETH, middleB, testUSDC}, fees: []uint32{3000, 3000}},
+		{id: "zeta:500", deployment: "zeta", tokens: []common.Address{testWETH, testUSDC}, fees: []uint32{500}},
+		{id: "zeta:500:" + middleA.Hex() + ":500", deployment: "zeta", tokens: []common.Address{testWETH, middleA, testUSDC}, fees: []uint32{500, 500}},
+		{id: "zeta:500:" + middleB.Hex() + ":500", deployment: "zeta", tokens: []common.Address{testWETH, middleB, testUSDC}, fees: []uint32{500, 500}},
+	}
+	iterator := newCandidates(chainConfig, testWETH, testUSDC)
+	for index, expected := range want {
+		gotIndex, got, ok := iterator.next(context.Background())
+		if !ok || gotIndex != index || got.id != expected.id || got.deployment != expected.deployment || !slices.Equal(got.tokens, expected.tokens) || !slices.Equal(got.fees, expected.fees) {
+			t.Fatalf("candidate %d = (%d, %+v, %t), want (%d, %+v, true)", index, gotIndex, got, ok, index, expected)
+		}
+	}
+	if _, got, ok := iterator.next(context.Background()); ok {
+		t.Fatalf("unexpected candidate after full traversal: %+v", got)
+	}
+}
+
+func TestQuoteLargeConcurrencyOnlyStartsAvailableWork(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		var calls atomic.Int32
+		client := readerFake{
+			snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
+			call: func(context.Context, common.Address, []byte, common.Hash) ([]byte, error) {
+				calls.Add(1)
+				return make([]byte, 32), nil
+			},
+		}
+		chain := Chain{ChainID: "8453", Client: client, Config: testChainConfig()}
+		wantCalls, wantErrors := int32(4), 0
+		if unavailable {
+			chain.DeploymentErrors = map[string]string{"uniswap-v3": "unavailable"}
+			wantCalls, wantErrors = 0, 1
+		}
+		h := Handler{Chains: map[string]Chain{"base": chain}, QuoteConcurrency: int(^uint(0) >> 1)}
+		response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if calls.Load() != wantCalls || len(response.Msg.Errors) != wantErrors || !response.Msg.SearchComplete {
+			t.Fatalf("unavailable=%t: calls=%d errors=%d complete=%t", unavailable, calls.Load(), len(response.Msg.Errors), response.Msg.SearchComplete)
+		}
+	}
+}
+
+func TestQuoteConcurrencyBoundsCandidateCalls(t *testing.T) {
+	const concurrency = 2
+	entered := make(chan struct{}, concurrency+1)
+	release := make(chan struct{})
+	client := readerFake{
+		snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
+		call: func(ctx context.Context, _ common.Address, _ []byte, _ common.Hash) ([]byte, error) {
+			entered <- struct{}{}
+			select {
+			case <-release:
+				return make([]byte, 32), nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: testChainConfig()}}, QuoteConcurrency: concurrency}).GetQuote(context.Background(), connect.NewRequest(validRequest()))
+		done <- err
+	}()
+	for range concurrency {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("configured workers did not start")
+		}
+	}
+	select {
+	case <-entered:
+		t.Fatal("candidate calls exceeded engine.quote_concurrency")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -344,10 +584,17 @@ func TestQuoteRejectsUnavailableAndUnsupportedChains(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request.ChainId = test.chainID
-			_, err := (Handler{Chains: map[string]Chain{"base": test.chain}}).GetQuote(context.Background(), connect.NewRequest(request))
+			_, err := (Handler{Chains: map[string]Chain{"base": test.chain}, QuoteConcurrency: 4}).GetQuote(context.Background(), connect.NewRequest(request))
 			if connect.CodeOf(err) != test.want {
 				t.Fatalf("code = %s, error = %v", connect.CodeOf(err), err)
 			}
 		})
+	}
+}
+
+func TestQuoteRejectsUnconfiguredConcurrency(t *testing.T) {
+	_, err := (Handler{}).GetQuote(context.Background(), connect.NewRequest(validRequest()))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition || err.Error() != "failed_precondition: quote concurrency is not configured" {
+		t.Fatalf("error = %v", err)
 	}
 }

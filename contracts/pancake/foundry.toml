@@ -1,0 +1,11 @@
+[profile.default]
+src = "."
+out = "../../.testnet/pancake-out"
+cache_path = "../../.testnet/pancake-cache"
+solc_version = "0.7.6"
+evm_version = "istanbul"
+optimizer = true
+optimizer_runs = 400
+bytecode_hash = "none"
+remappings = ["@pancakeswap/=../../.testnet/pancake/projects/"]
+allow_paths = ["../../.testnet/pancake/projects"]

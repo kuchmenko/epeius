@@ -9,12 +9,14 @@ import {
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
+import { executionCommand } from "./execution";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import {
   chainFromStatus,
   decimalToAtomic,
   parseAtomic,
   resolveToken,
+  trustChainTokens,
 } from "./tokens";
 
 const help = `Epeius — EVM quote terminal
@@ -25,9 +27,11 @@ Usage:
   bun run terminal -- status [--engine-url URL] [--json]
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
-  bun run terminal -- execute
+  bun run terminal -- prepare|execute --chain KEY --quote-id ID --route-id ID --keystore PATH --password-file PATH [--slippage-bps N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
-Default config: ./epeius.toml. Execution is not implemented.`;
+Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
+prepare previews without sending. execute displays terms and asks approval or swap confirmation.
+Approval always requires a fresh quote afterward. Execution output is JSON lines; confirmations go to stderr.`;
 
 type Globals = {
   config?: string;
@@ -145,18 +149,6 @@ export async function main(rawArgs: string[]) {
     console.log(help);
     return 0;
   }
-  for (const removed of ["sender", "recipient", "slippage-bps", "environment"])
-    if (
-      rawArgs.some(
-        (arg) => arg === `--${removed}` || arg.startsWith(`--${removed}=`),
-      )
-    ) {
-      diagnostic(
-        new Error(`--${removed} was removed; delete it from this command.`),
-        rawArgs.includes("--json"),
-      );
-      return 1;
-    }
   let json = rawArgs.includes("--json");
   let quoting = false;
   const abort = new AbortController();
@@ -167,16 +159,64 @@ export async function main(rawArgs: string[]) {
     const parsed = globals(rawArgs);
     json = parsed.json;
     const [command, ...args] = parsed.args;
-    if (command === "execute") {
-      diagnostic(
-        new Error(
-          "Execution is not implemented. No transaction was signed or sent.",
-        ),
-        json,
-      );
-      return 1;
-    }
+    for (const removed of [
+      "sender",
+      "recipient",
+      "environment",
+      ...(command === "quote" ? ["slippage-bps"] : []),
+    ])
+      if (
+        rawArgs.some(
+          (arg) => arg === `--${removed}` || arg.startsWith(`--${removed}=`),
+        )
+      )
+        throw new Error(
+          `--${removed} was removed; delete it from this command.`,
+        );
     const config = await readConfig(parsed.config);
+    if (command === "prepare" || command === "execute") {
+      const values = options(args, [
+        "chain",
+        "quote-id",
+        "route-id",
+        "keystore",
+        "password-file",
+        "slippage-bps",
+        "confirm-approval",
+        "confirm-swap",
+      ]);
+      if (
+        !values.keystore ||
+        !values["password-file"] ||
+        !values["quote-id"] ||
+        !values["route-id"]
+      )
+        throw new Error(
+          "Provide --keystore, --password-file, --quote-id and --route-id.",
+        );
+      const client = quoteClient(
+        parsed.engineUrl
+          ? validateEngineUrl(parsed.engineUrl)
+          : config.engineUrl,
+      );
+      const status = await client.getStatus({}, { signal: abort.signal });
+      const chain = chainFromStatus(
+        status.chains,
+        values.chain ?? config.defaultChain,
+      );
+      trustChainTokens(chain, config.chains[chain.key]);
+      if (!chain.executionEnabled || !chain.connected)
+        throw new Error("Engine must enable execution on the connected chain.");
+      return await executionCommand(
+        command,
+        values,
+        config.path,
+        chain.key,
+        chain.chainId,
+        client,
+        abort.signal,
+      );
+    }
     if (command === "chains" && args.length === 0)
       return await goCommand(
         ["chains", "--config", config.path],
@@ -224,10 +264,11 @@ export async function main(rawArgs: string[]) {
       );
       return status.chains.every((chain) => chain.connected) ? 0 : 1;
     }
-    const chain = chainFromStatus(
+    let chain = chainFromStatus(
       status.chains,
       values.chain ?? config.defaultChain,
     );
+    chain = trustChainTokens(chain, config.chains[chain.key]);
     if (command === "tokens") {
       console.log(
         json ? toJsonString(ChainStatusSchema, chain) : formatTokens(chain),

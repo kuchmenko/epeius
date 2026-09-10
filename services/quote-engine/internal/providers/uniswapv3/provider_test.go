@@ -20,6 +20,17 @@ func (f callFake) Call(ctx context.Context, to common.Address, data []byte, bloc
 
 func selector(signature string) []byte { return crypto.Keccak256([]byte(signature))[:4] }
 
+var (
+	testFactory = common.HexToAddress("0x1111111111111111111111111111111111111111")
+	testQuoter  = common.HexToAddress("0x2222222222222222222222222222222222222222")
+	testTokenA  = common.HexToAddress("0x3333333333333333333333333333333333333333")
+	testTokenB  = common.HexToAddress("0x4444444444444444444444444444444444444444")
+)
+
+func testProvider(client Caller) Provider {
+	return Provider{Client: client, FactoryAddress: testFactory, QuoterAddress: testQuoter}
+}
+
 func word(value *big.Int) []byte {
 	b := make([]byte, 32)
 	value.FillBytes(b)
@@ -43,8 +54,8 @@ func TestQuoteCalldataDirectionsAmountBeforeFeeAndPinnedBlock(t *testing.T) {
 		fee     uint32
 		output  int64
 	}{
-		{"WETH to USDC", WETH, USDC, 500, 71234567},
-		{"USDC to WETH", USDC, WETH, 3000, 9988776655},
+		{"token A to token B", testTokenA, testTokenB, 500, 71234567},
+		{"token B to token A", testTokenB, testTokenA, 3000, 9988776655},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
@@ -55,7 +66,7 @@ func TestQuoteCalldataDirectionsAmountBeforeFeeAndPinnedBlock(t *testing.T) {
 				}
 				switch calls {
 				case 1:
-					if to != Factory || !bytes.Equal(data[:4], selector("getPool(address,address,uint24)")) {
+					if to != testFactory || !bytes.Equal(data[:4], selector("getPool(address,address,uint24)")) {
 						t.Fatalf("factory call to=%s data=%x", to, data)
 					}
 					if len(data) != 100 || common.BytesToAddress(data[16:36]) != test.in || common.BytesToAddress(data[48:68]) != test.out || new(big.Int).SetBytes(data[68:100]).Uint64() != uint64(test.fee) {
@@ -63,7 +74,7 @@ func TestQuoteCalldataDirectionsAmountBeforeFeeAndPinnedBlock(t *testing.T) {
 					}
 					return addressWord(pool), nil
 				case 2:
-					if to != Quoter || !bytes.Equal(data[:4], selector("quoteExactInputSingle((address,address,uint256,uint24,uint160))")) {
+					if to != testQuoter || !bytes.Equal(data[:4], selector("quoteExactInputSingle((address,address,uint256,uint24,uint160))")) {
 						t.Fatalf("quoter call to=%s data=%x", to, data)
 					}
 					if len(data) != 164 {
@@ -79,7 +90,7 @@ func TestQuoteCalldataDirectionsAmountBeforeFeeAndPinnedBlock(t *testing.T) {
 					return nil, nil
 				}
 			})
-			gotPool, gotOutput, err := (Provider{Client: fake}).Quote(context.Background(), test.in, test.out, amount, test.fee, block)
+			gotPool, gotOutput, err := testProvider(fake).Quote(context.Background(), test.in, test.out, amount, test.fee, block)
 			if err != nil || gotPool != pool || gotOutput.Cmp(big.NewInt(test.output)) != 0 || calls != 2 {
 				t.Fatalf("Quote = (%s, %v, %v), calls=%d", gotPool, gotOutput, err, calls)
 			}
@@ -120,7 +131,7 @@ func TestQuoteResponsesAndFailures(t *testing.T) {
 				}
 				return test.quote, test.quoteErr
 			})
-			gotPool, gotAmount, err := (Provider{Client: fake}).Quote(context.Background(), WETH, USDC, big.NewInt(123), 100, common.Hash{})
+			gotPool, gotAmount, err := testProvider(fake).Quote(context.Background(), testTokenA, testTokenB, big.NewInt(123), 100, common.Hash{})
 			if gotPool != test.wantPool || calls != test.wantCalls {
 				t.Fatalf("pool=%s calls=%d", gotPool, calls)
 			}
@@ -142,10 +153,10 @@ func TestQuoteRejectsDirectionalPriceLimit(t *testing.T) {
 		price   string
 		reject  bool
 	}{
-		{"lower limit", WETH, USDC, "4295128740", true},
-		{"above lower limit", WETH, USDC, "4295128741", false},
-		{"upper limit", USDC, WETH, "1461446703485210103287273052203988822378723970341", true},
-		{"below upper limit", USDC, WETH, "1461446703485210103287273052203988822378723970340", false},
+		{"lower limit", testTokenA, testTokenB, "4295128740", true},
+		{"above lower limit", testTokenA, testTokenB, "4295128741", false},
+		{"upper limit", testTokenB, testTokenA, "1461446703485210103287273052203988822378723970341", true},
+		{"below upper limit", testTokenB, testTokenA, "1461446703485210103287273052203988822378723970340", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			price, ok := new(big.Int).SetString(tc.price, 10)
@@ -153,12 +164,12 @@ func TestQuoteRejectsDirectionalPriceLimit(t *testing.T) {
 				t.Fatal("invalid test price")
 			}
 			fake := callFake(func(_ context.Context, to common.Address, _ []byte, _ common.Hash) ([]byte, error) {
-				if to == Factory {
+				if to == testFactory {
 					return addressWord(pool), nil
 				}
 				return bytes.Join([][]byte{word(big.NewInt(71234567)), word(price), word(big.NewInt(7)), word(big.NewInt(456789))}, nil), nil
 			})
-			gotPool, output, err := (Provider{Client: fake}).Quote(context.Background(), tc.in, tc.out, big.NewInt(123456789), 10000, common.Hash{})
+			gotPool, output, err := testProvider(fake).Quote(context.Background(), tc.in, tc.out, big.NewInt(123456789), 10000, common.Hash{})
 			if gotPool != pool {
 				t.Fatal("lost pool identity")
 			}

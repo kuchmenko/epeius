@@ -26,6 +26,7 @@ engine_url = "http://127.0.0.1:8080"
 search_budget_ms = 1000
 [engine]
 listen_addr = "127.0.0.1:0"
+quote_concurrency = 4
 [chains.z-test]
 chain_id = 84532
 rpc_url_env = "TEST_RPC"

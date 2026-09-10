@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/url"
 
@@ -19,6 +20,7 @@ type Snapshot struct {
 	ChainID     string `json:"chainId"`
 	BlockNumber string `json:"blockNumber"`
 	BlockHash   string `json:"blockHash"`
+	Timestamp   uint64 `json:"timestamp"`
 }
 
 type Client struct {
@@ -62,7 +64,19 @@ func (c *Client) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil || header == nil || header.Number == nil {
 		return Snapshot{}, readError(ctx, "latest block")
 	}
-	return Snapshot{c.key, c.chainID, header.Number.String(), header.Hash().Hex()}, nil
+	return Snapshot{c.key, c.chainID, header.Number.String(), header.Hash().Hex(), header.Time}, nil
+}
+
+func (c *Client) Canonical(ctx context.Context, snapshot Snapshot) error {
+	n, ok := new(big.Int).SetString(snapshot.BlockNumber, 10)
+	if !ok {
+		return errors.New("invalid block number")
+	}
+	header, err := c.HeaderByNumber(ctx, n)
+	if err != nil || header == nil || header.Hash().Hex() != snapshot.BlockHash {
+		return errors.New("source block is not canonical")
+	}
+	return nil
 }
 
 func (c *Client) Call(ctx context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
@@ -72,6 +86,15 @@ func (c *Client) Call(ctx context.Context, to common.Address, data []byte, hash 
 		map[string]any{"to": to, "data": hexutil.Bytes(data)}, gethrpc.BlockNumberOrHashWithHash(hash, true))
 	if err != nil {
 		return nil, readError(ctx, "contract call at the pinned block")
+	}
+	return result, nil
+}
+
+func (c *Client) Code(ctx context.Context, to common.Address, hash common.Hash) ([]byte, error) {
+	var result hexutil.Bytes
+	err := c.Client.Client().CallContext(ctx, &result, "eth_getCode", to, gethrpc.BlockNumberOrHashWithHash(hash, true))
+	if err != nil {
+		return nil, readError(ctx, "contract code at the pinned block")
 	}
 	return result, nil
 }

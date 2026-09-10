@@ -157,7 +157,7 @@ func serve(ctx context.Context, settings config.Config, getenv func(string) stri
 	}
 	defer listener.Close()
 	mux := http.NewServeMux()
-	path, handler := quotev1connect.NewQuoteServiceHandler(quote.Handler{Chains: chains})
+	path, handler := quotev1connect.NewQuoteServiceHandler(quote.Handler{Chains: chains, Store: quote.NewStore(), Simulator: quote.NewTenderly(getenv), QuoteConcurrency: settings.Engine.QuoteConcurrency})
 	mux.Handle(path, handler)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	served := make(chan error, 1)
@@ -195,19 +195,20 @@ func openChains(ctx context.Context, configured map[string]config.Chain, getenv 
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			chain := quote.Chain{ChainID: strconv.FormatInt(configuredChain.ChainID, 10)}
+			chain := quote.Chain{ChainID: strconv.FormatInt(configuredChain.ChainID, 10), Config: configuredChain}
 			endpoint := getenv(configuredChain.RPCURLEnv)
 			if endpoint == "" {
 				chain.Error = "RPC URL environment variable is not set"
 			} else {
 				checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				client, snapshot, err := rpc.Open(checkCtx, key, configuredChain.ChainID, endpoint)
-				cancel()
 				if err != nil {
 					chain.Error = err.Error()
 				} else {
 					chain.Client, chain.Snapshot = client, snapshot
+					chain = quote.VerifyDeployments(checkCtx, chain)
 				}
+				cancel()
 			}
 			mutex.Lock()
 			result[key] = chain

@@ -1,5 +1,4 @@
-// Package uniswapv3 quotes direct Base mainnet pools only. Aerodrome,
-// intermediate-token routes, and split routing are outside this implementation.
+// Package uniswapv3 quotes configured Uniswap and Pancake V3 deployments.
 package uniswapv3
 
 import (
@@ -11,18 +10,15 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-var (
-	Factory = common.HexToAddress("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
-	Quoter  = common.HexToAddress("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")
-	WETH    = common.HexToAddress("0x4200000000000000000000000000000000000006")
-	USDC    = common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
-)
-
 type Caller interface {
 	Call(context.Context, common.Address, []byte, common.Hash) ([]byte, error)
 }
 
-type Provider struct{ Client Caller }
+type Provider struct {
+	Client         Caller
+	FactoryAddress common.Address
+	QuoterAddress  common.Address
+}
 
 type singleInput struct {
 	TokenIn           common.Address
@@ -38,7 +34,7 @@ func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big
 	if err != nil {
 		return common.Address{}, nil, err
 	}
-	result, err := p.Client.Call(ctx, Factory, data, block)
+	result, err := p.Client.Call(ctx, p.FactoryAddress, data, block)
 	if err != nil {
 		return common.Address{}, nil, errors.New("pool discovery failed at the pinned block")
 	}
@@ -54,7 +50,7 @@ func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big
 	if err != nil {
 		return pool, nil, err
 	}
-	result, err = p.Client.Call(ctx, Quoter, data, block)
+	result, err = p.Client.Call(ctx, p.QuoterAddress, data, block)
 	if err != nil {
 		return pool, nil, errors.New("quote failed at the pinned block")
 	}

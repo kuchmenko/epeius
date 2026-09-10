@@ -1,6 +1,17 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
-  "files": { "includes": ["**", "!!generated", "!!dist", "!!.tools"] },
+  "files": {
+    "includes": [
+      "**",
+      "!!generated",
+      "!!dist",
+      "!!.tools",
+      "!!.testnet",
+      "!!contracts/out",
+      "!!contracts/cache",
+      "!!contracts/broadcast"
+    ]
+  },
   "formatter": { "indentStyle": "space" },
   "linter": { "enabled": true, "rules": { "preset": "recommended" } }
 }

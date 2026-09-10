@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/generated/go/epeius/quote/v1/quotev1connect"
-	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv3"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
@@ -44,33 +43,33 @@ func TestBunConnectTransport(t *testing.T) {
 	reader := readerFake{
 		snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
 		call: func(_ context.Context, to common.Address, _ []byte, _ common.Hash) ([]byte, error) {
-			if to == uniswapv3.Factory {
+			if to == testFactory {
 				return poolResponse(common.HexToAddress("0x1234")), nil
 			}
 			return quoteResponse(987654321), nil
 		},
 	}
 	mux := http.NewServeMux()
-	path, actual := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader}}})
+	path, actual := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4})
 	mux.Handle(path, actual)
 	reader.call = func(ctx context.Context, _ common.Address, _ []byte, _ common.Hash) ([]byte, error) {
 		<-ctx.Done()
 		unaryStopped <- struct{}{}
 		return nil, ctx.Err()
 	}
-	_, slow := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader}}})
+	_, slow := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4})
 	mux.Handle("/slow/", http.StripPrefix("/slow", slow))
 	reader.call = func(ctx context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
 		if calldataFee(data) != 100 {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}
-		if to == uniswapv3.Factory {
+		if to == testFactory {
 			return poolResponse(common.HexToAddress("0x1234")), nil
 		}
 		return quoteResponse(987654321), nil
 	}
-	_, partial := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader}}})
+	_, partial := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4})
 	mux.Handle("/partial/", http.StripPrefix("/partial", partial))
 	_, fixture := quotev1connect.NewQuoteServiceHandler(streamFixture{stopped: stopped})
 	mux.Handle("/fixture/", http.StripPrefix("/fixture", fixture))

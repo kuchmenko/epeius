@@ -13,6 +13,7 @@
     "check": "bun scripts/tasks.ts check",
     "check:generated": "bun scripts/tasks.ts check:generated",
     "smoke": "bun scripts/smoke.ts",
+    "e2e": "bun scripts/e2e.ts",
     "format": "biome check --write ."
   },
   "dependencies": {

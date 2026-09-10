@@ -33,7 +33,11 @@ const input = {
 const quote = await client.getQuote(input);
 assert.equal(quote.searchComplete, true);
 assert.deepEqual(
-  quote.routes.map((route) => route.legs[0].feePips),
+  quote.routes.map((route) =>
+    route.legs[0].selector.case === "feePips"
+      ? route.legs[0].selector.value
+      : undefined,
+  ),
   [100, 500, 3000, 10000],
 );
 assert.equal(quote.routes[0].amountOutAtomic, "987654321");
@@ -42,7 +46,7 @@ const directory = await mkdtemp(join(tmpdir(), "epeius-integration-"));
 const config = join(directory, "epeius.toml");
 await Bun.write(
   config,
-  `[terminal]\ndefault_chain='base'\nengine_url='${url}/partial'\nsearch_budget_ms=5500\n`,
+  `[terminal]\ndefault_chain='base'\nengine_url='${url}/partial'\nsearch_budget_ms=5500\n[[chains.base.tokens]]\naddress='${WETH}'\nsymbol='WETH'\ndecimals=18\n[[chains.base.tokens]]\naddress='${USDC}'\nsymbol='USDC'\ndecimals=6\n`,
 );
 try {
   const terminal = Bun.spawn(
@@ -97,7 +101,7 @@ await assert.rejects(
 );
 await assert.rejects(
   client.prepareExecution({ quoteId: "q", routeId: "r" }),
-  hasCode(Code.Unimplemented),
+  hasCode(Code.InvalidArgument),
 );
 
 const fixture = quoteClient(`${url}/fixture`);

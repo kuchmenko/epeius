@@ -41,10 +41,16 @@ test("quote output includes chain, block, exact amounts, tiers, and partial warn
         latencyMs: 4,
         legs: [
           {
-            feePips: 500,
+            selector: { case: "feePips", value: 500 },
             pool: "pool",
             tokenIn: input.address,
             tokenOut: output.address,
+          },
+          {
+            selector: { case: "tickSpacing", value: 200 },
+            pool: "pool2",
+            tokenIn: output.address,
+            tokenOut: input.address,
           },
         ],
       },
@@ -56,6 +62,7 @@ test("quote output includes chain, block, exact amounts, tiers, and partial warn
   expect(text).toContain("1 WETH (1000000000000000000 atomic)");
   expect(text).toContain("1.234567 USDC (1234567 atomic)");
   expect(text).toContain("fee 500 pips");
+  expect(text).toContain("Leg 2: pool pool2; tick spacing 200");
   expect(text).toContain("Search was partial");
   expect(text).not.toMatch(/best|economic/i);
 });
