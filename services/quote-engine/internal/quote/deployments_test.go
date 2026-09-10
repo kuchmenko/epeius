@@ -137,7 +137,7 @@ func TestConfiguredMultiHopCrossProductsAndProviderIsolation(t *testing.T) {
 	chain.DeploymentErrors = map[string]string{"pancake": "deployment verification failed"}
 	handler.Chains["test"] = chain
 	response, err = handler.GetQuote(context.Background(), connect.NewRequest(request))
-	if err != nil || len(response.Msg.Routes) != 6 || len(response.Msg.Errors) != 6 || response.Msg.Errors[0].Message != "deployment verification failed" {
+	if err != nil || len(response.Msg.Routes) != 6 || len(response.Msg.Errors) != 1 || response.Msg.Errors[0].Message != "pancake: deployment verification failed" || response.Msg.Errors[0].RouteId != nil {
 		t.Fatalf("isolation: %+v %v", response, err)
 	}
 }

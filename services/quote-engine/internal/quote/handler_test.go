@@ -505,6 +505,33 @@ func TestCandidateIteratorDeterministicMultiDeploymentCartesianTraversal(t *test
 	}
 }
 
+func TestQuoteLargeConcurrencyOnlyStartsAvailableWork(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		var calls atomic.Int32
+		client := readerFake{
+			snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
+			call: func(context.Context, common.Address, []byte, common.Hash) ([]byte, error) {
+				calls.Add(1)
+				return make([]byte, 32), nil
+			},
+		}
+		chain := Chain{ChainID: "8453", Client: client, Config: testChainConfig()}
+		wantCalls, wantErrors := int32(4), 0
+		if unavailable {
+			chain.DeploymentErrors = map[string]string{"uniswap-v3": "unavailable"}
+			wantCalls, wantErrors = 0, 1
+		}
+		h := Handler{Chains: map[string]Chain{"base": chain}, QuoteConcurrency: int(^uint(0) >> 1)}
+		response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if calls.Load() != wantCalls || len(response.Msg.Errors) != wantErrors || !response.Msg.SearchComplete {
+			t.Fatalf("unavailable=%t: calls=%d errors=%d complete=%t", unavailable, calls.Load(), len(response.Msg.Errors), response.Msg.SearchComplete)
+		}
+	}
+}
+
 func TestQuoteConcurrencyBoundsCandidateCalls(t *testing.T) {
 	const concurrency = 2
 	entered := make(chan struct{}, concurrency+1)

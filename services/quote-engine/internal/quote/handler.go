@@ -105,30 +105,35 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	block := &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
 	final := &quotev1.QuoteFinal{QuoteId: rand.Text(), Block: block, SearchComplete: true}
 	candidates := newCandidates(chain.Config, in, out)
+	available := candidates.deployments[:0]
+	for _, deployment := range candidates.deployments {
+		if message := chain.DeploymentErrors[deployment.id]; message != "" {
+			final.Errors = append(final.Errors, &quotev1.ProviderError{Provider: chain.Config.Deployments[deployment.id].Kind, Message: deployment.id + ": " + message})
+		} else {
+			available = append(available, deployment)
+		}
+	}
+	candidates.deployments = available
 	type result struct {
 		index int
 		route *quotev1.RouteQuote
 		err   *quotev1.ProviderError
 	}
 	concurrency := h.QuoteConcurrency
-	results := make(chan result, concurrency)
+	results := make(chan result)
 	var workers sync.WaitGroup
-	workers.Add(concurrency)
 	for range concurrency {
+		index, candidate, ok := candidates.next(searchCtx)
+		if !ok {
+			break
+		}
+		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for {
-				index, candidate, ok := candidates.next(searchCtx)
-				if !ok {
-					return
-				}
 				start := time.Now()
 				id := candidate.id
 				deployment := chain.Config.Deployments[candidate.deployment]
-				if message := chain.DeploymentErrors[candidate.deployment]; message != "" {
-					results <- result{index: index, err: &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: message}}
-					continue
-				}
 				provider := uniswapv3.Provider{Client: chain.Client, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter)}
 				output := new(big.Int).Set(amount)
 				var legs []*quotev1.RouteLeg
@@ -152,6 +157,10 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 					item.route = &quotev1.RouteQuote{RouteId: id, Provider: deployment.Kind, DeploymentId: candidate.deployment, Legs: legs, AmountOutAtomic: output.String(), Block: block, LatencyMs: uint32(time.Since(start).Milliseconds())}
 				}
 				results <- item
+				index, candidate, ok = candidates.next(searchCtx)
+				if !ok {
+					return
+				}
 			}
 		}()
 	}
