@@ -6,7 +6,7 @@ One Go engine serves all chains configured in `epeius.toml`. The Bun terminal ca
 
 ## Quick start
 
-Requires **Bun 1.3.7** and **Go 1.26.4**. Run from the repository root:
+Requires **Bun 1.3.9** and **Go 1.26.4**. Run from the repository root:
 
 ```bash
 bun install --frozen-lockfile
