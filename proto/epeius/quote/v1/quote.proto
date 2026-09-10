@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package epeius.quote.v1;
+
+option go_package = "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1;quotev1";
+
+// QuoteService is non-signing. All methods are unimplemented in foundation.
+service QuoteService {
+  rpc GetQuote(QuoteRequest) returns (QuoteFinal);
+  rpc StreamQuote(QuoteRequest) returns (stream QuoteEvent);
+  rpc PrepareExecution(PrepareExecutionRequest) returns (PrepareExecutionResponse);
+}
+
+enum Environment {
+  ENVIRONMENT_UNSPECIFIED = 0;
+  ENVIRONMENT_BASE_MAINNET = 1;
+  ENVIRONMENT_BASE_SEPOLIA = 2;
+}
+
+message QuoteRequest {
+  Environment environment = 1;
+  string sender = 2;
+  string recipient = 3;
+  string token_in = 4;
+  string token_out = 5;
+  // Positive base-10 integer in the input token's smallest unit.
+  string amount_in_atomic = 6;
+  uint32 slippage_bps = 7;
+  uint32 search_budget_ms = 8;
+}
+
+message BlockContext {
+  string number = 1;
+  string hash = 2;
+}
+
+message RouteLeg {
+  string pool = 1;
+  string token_in = 2;
+  string token_out = 3;
+}
+
+message RouteQuote {
+  string route_id = 1;
+  string provider = 2;
+  repeated RouteLeg legs = 3;
+  string amount_out_atomic = 4;
+  // Absent means unknown; never interpret absence as zero cost.
+  optional string network_cost_out_atomic = 5;
+  optional string effective_out_atomic = 6;
+  BlockContext block = 7;
+  uint32 latency_ms = 8;
+}
+
+message ProviderError {
+  string provider = 1;
+  optional string route_id = 2;
+  string message = 3;
+}
+
+message QuoteFinal {
+  string quote_id = 1;
+  repeated RouteQuote routes = 2;
+  repeated ProviderError errors = 3;
+  optional string best_route_id = 4;
+  BlockContext block = 5;
+}
+
+message QuoteEvent {
+  oneof event {
+    RouteQuote quote = 1;
+    ProviderError error = 2;
+    QuoteFinal final = 3;
+  }
+}
+
+message PrepareExecutionRequest {
+  string quote_id = 1;
+  string route_id = 2;
+}
+
+enum PreparationStatus {
+  PREPARATION_STATUS_UNSPECIFIED = 0;
+  PREPARATION_STATUS_READY = 1;
+  PREPARATION_STATUS_APPROVAL_REQUIRED = 2;
+  PREPARATION_STATUS_REQUOTE_REQUIRED = 3;
+  PREPARATION_STATUS_REJECTED = 4;
+}
+
+message UnsignedTransaction {
+  string chain_id = 1;
+  string to = 2;
+  string data = 3;
+  string value_atomic = 4;
+}
+
+message PrepareExecutionResponse {
+  PreparationStatus status = 1;
+  // Only a READY response may contain a swap transaction.
+  UnsignedTransaction transaction = 2;
+  string message = 3;
+}

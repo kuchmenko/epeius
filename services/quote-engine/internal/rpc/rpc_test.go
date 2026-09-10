@@ -1,0 +1,157 @@
+package rpc
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/core/types"
+)
+
+func TestVerifyNetworksAndSnapshot(t *testing.T) {
+	for _, tc := range []struct{ environment, chain, want string }{
+		{"base-mainnet", "0x2105", "8453"}, {"base-sepolia", "0x14a34", "84532"},
+	} {
+		t.Run(tc.environment, func(t *testing.T) {
+			header := &types.Header{Number: big.NewInt(1234567), Difficulty: big.NewInt(0), GasLimit: 30000000, Time: 1700000013}
+			methods := []string{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					ID     json.RawMessage   `json:"id"`
+					Method string            `json:"method"`
+					Params []json.RawMessage `json:"params"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
+				}
+				methods = append(methods, request.Method)
+				var result any = tc.chain
+				if request.Method == "eth_getBlockByNumber" {
+					if string(request.Params[0]) != `"latest"` || string(request.Params[1]) != "false" {
+						t.Error("unexpected block arguments")
+					}
+					result = header
+				} else if request.Method != "eth_chainId" {
+					t.Errorf("unexpected RPC: %s", request.Method)
+				}
+				json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
+			}))
+			defer server.Close()
+			got, err := Verify(context.Background(), tc.environment, server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Environment != tc.environment || got.ChainID != tc.want || got.BlockNumber != "1234567" || got.BlockHash != header.Hash().Hex() {
+				t.Fatalf("wrong snapshot: %+v", got)
+			}
+			if strings.Join(methods, ",") != "eth_chainId,eth_getBlockByNumber" {
+				t.Fatal(methods)
+			}
+		})
+	}
+}
+
+func TestRejectInvalidEnvironmentAndEndpoint(t *testing.T) {
+	for _, tc := range []struct{ name, environment, endpoint string }{
+		{"missing environment", "", "https://example.com"},
+		{"unsupported", "ethereum-sepolia", "https://example.com"},
+		{"removed fork", "base-fork", "http://127.0.0.1:8545"},
+		{"missing URL", "base-mainnet", ""},
+		{"wrong scheme", "base-sepolia", "file:///secret"},
+		{"bad URL", "base-mainnet", "https://user:secret@%zz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Verify(context.Background(), tc.environment, tc.endpoint)
+			if err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("unsafe error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWrongChainAndProviderErrorsAreSafe(t *testing.T) {
+	for _, result := range []string{`"0x1"`, `"0x14a34"`, `"0x10000000000002105"`, `null`} {
+		t.Run(result, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req map[string]json.RawMessage
+				json.NewDecoder(r.Body).Decode(&req)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(req["id"]) + `,"result":` + result + `}`))
+			}))
+			defer server.Close()
+			_, err := Verify(context.Background(), "base-mainnet", server.URL+"/secret")
+			if err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("wrong-chain check: %v", err)
+			}
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "provider echoed secret", 401) }))
+	_, err := Verify(context.Background(), "base-mainnet", server.URL+"/secret")
+	server.Close()
+	if err == nil || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("provider error leaked: %v", err)
+	}
+	_, err = Verify(context.Background(), "base-mainnet", server.URL+"/secret")
+	if err == nil || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("connection error leaked: %v", err)
+	}
+}
+
+func TestRPCCancellationAndDeadline(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cancellation", true: "deadline"}[deadline], func(t *testing.T) {
+			entered := make(chan struct{})
+			stopped := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body any
+				json.NewDecoder(r.Body).Decode(&body)
+				close(entered)
+				<-r.Context().Done()
+				close(stopped)
+			}))
+			defer server.Close()
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if deadline {
+				ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+			} else {
+				ctx, cancel = context.WithCancel(context.Background())
+			}
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := Verify(ctx, "base-mainnet", server.URL); done <- err }()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("RPC never started")
+			}
+			if !deadline {
+				cancel()
+			}
+			expected := context.Canceled
+			if deadline {
+				expected = context.DeadlineExceeded
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, expected) {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("RPC did not stop")
+			}
+			select {
+			case <-stopped:
+			case <-time.After(time.Second):
+				t.Fatal("HTTP work did not stop")
+			}
+		})
+	}
+}

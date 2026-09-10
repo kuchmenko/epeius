@@ -1,0 +1,11 @@
+version: v2
+plugins:
+  - local: .tools/bin/protoc-gen-go
+    out: generated/go
+    opt: paths=source_relative
+  - local: .tools/bin/protoc-gen-connect-go
+    out: generated/go
+    opt: paths=source_relative
+  - local: node_modules/.bin/protoc-gen-es
+    out: generated/ts
+    opt: target=ts

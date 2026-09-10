@@ -1,0 +1,10 @@
+{
+  "name": "@epeius/terminal",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bufbuild/protobuf": "2.14.1",
+    "@connectrpc/connect": "2.2.0",
+    "@connectrpc/connect-node": "2.2.0"
+  }
+}
