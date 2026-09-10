@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/generated/go/epeius/quote/v1/quotev1connect"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv3"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
@@ -24,17 +25,19 @@ type Reader interface {
 }
 
 type Handler struct {
-	// Business streaming and execution preparation remain unimplemented.
-	// No approvals, signing, or transactions are performed by this service.
 	quotev1connect.UnimplementedQuoteServiceHandler
-	Chains map[string]Chain
+	Chains    map[string]Chain
+	Store     *Store
+	Simulator Simulator
 }
 
 type Chain struct {
-	ChainID  string
-	Client   Reader
-	Snapshot rpc.Snapshot
-	Error    string
+	ChainID          string
+	Client           Reader
+	Snapshot         rpc.Snapshot
+	Error            string
+	Config           config.Chain
+	DeploymentErrors map[string]string
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)
@@ -55,8 +58,9 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	if chain.Client == nil {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("chain is unavailable"))
 	}
-	if chain.ChainID != "8453" {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("quoting is supported on Base mainnet only"))
+	chain = configured(chain)
+	if len(chain.Config.Deployments) == 0 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no quoting deployments configured"))
 	}
 	for _, value := range []string{r.TokenIn, r.TokenOut} {
 		if !address.MatchString(value) {
@@ -64,8 +68,12 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		}
 	}
 	in, out := common.HexToAddress(r.TokenIn), common.HexToAddress(r.TokenOut)
-	if !((in == uniswapv3.WETH && out == uniswapv3.USDC) || (in == uniswapv3.USDC && out == uniswapv3.WETH)) {
-		return invalid("only the WETH/USDC pair is supported")
+	allowed := map[common.Address]bool{}
+	for _, token := range chain.Config.Tokens {
+		allowed[common.HexToAddress(token.Address)] = true
+	}
+	if in == out || !allowed[in] || !allowed[out] {
+		return invalid("pair must contain distinct configured tokens")
 	}
 	if len(r.AmountInAtomic) > 78 || !positiveInteger.MatchString(r.AmountInAtomic) {
 		return invalid("amount must be a positive uint256 decimal integer")
@@ -79,6 +87,7 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	}
 	searchCtx, cancel := context.WithTimeout(ctx, time.Duration(r.SearchBudgetMs)*time.Millisecond)
 	defer cancel()
+	started := time.Now()
 	snapshot, err := chain.Client.Snapshot(searchCtx)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -90,36 +99,49 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("could not read quote block"))
 	}
 	block := &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
-	// This is a response identifier only, not a stored quote or execution promise.
 	final := &quotev1.QuoteFinal{QuoteId: rand.Text(), Block: block, SearchComplete: true}
-	// These four tiers define this search, not every fee tier enabled on Base.
-	fees := [...]uint32{100, 500, 3000, 10000}
+	candidates := candidates(chain.Config, in, out)
 	type result struct {
 		index     int
 		route     *quotev1.RouteQuote
 		err       *quotev1.ProviderError
 		completed bool
 	}
-	results := make(chan result, len(fees))
-	provider := uniswapv3.Provider{Client: chain.Client}
-	for index, fee := range fees {
+	results := make(chan result, len(candidates))
+	for index, candidate := range candidates {
 		go func() {
 			start := time.Now()
-			id := fmt.Sprintf("uniswap-v3:%d", fee)
-			pool, output, err := provider.Quote(searchCtx, in, out, amount, fee, common.HexToHash(snapshot.BlockHash))
+			id := candidate.id
+			deployment := chain.Config.Deployments[candidate.deployment]
+			if message := chain.DeploymentErrors[candidate.deployment]; message != "" {
+				results <- result{index: index, completed: true, err: &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: message}}
+				return
+			}
+			provider := uniswapv3.Provider{Client: chain.Client, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter)}
+			output := new(big.Int).Set(amount)
+			var legs []*quotev1.RouteLeg
+			var err error
+			for i, fee := range candidate.fees {
+				var pool common.Address
+				pool, output, err = provider.Quote(searchCtx, candidate.tokens[i], candidate.tokens[i+1], output, fee, common.HexToHash(snapshot.BlockHash))
+				if err != nil || output == nil {
+					break
+				}
+				legs = append(legs, &quotev1.RouteLeg{Pool: pool.Hex(), TokenIn: candidate.tokens[i].Hex(), TokenOut: candidate.tokens[i+1].Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: fee}})
+			}
 			item := result{index: index, completed: searchCtx.Err() == nil}
 			if !item.completed {
-				item.err = &quotev1.ProviderError{Provider: "uniswap-v3", RouteId: &id, Message: "search budget expired"}
+				item.err = &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: "search budget expired"}
 			} else if err != nil {
-				item.err = &quotev1.ProviderError{Provider: "uniswap-v3", RouteId: &id, Message: err.Error()}
+				item.err = &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: err.Error()}
 			} else if output != nil {
-				item.route = &quotev1.RouteQuote{RouteId: id, Provider: "uniswap-v3", Legs: []*quotev1.RouteLeg{{Pool: pool.Hex(), TokenIn: in.Hex(), TokenOut: out.Hex(), FeePips: fee}}, AmountOutAtomic: output.String(), Block: block, LatencyMs: uint32(time.Since(start).Milliseconds())}
+				item.route = &quotev1.RouteQuote{RouteId: id, Provider: deployment.Kind, DeploymentId: candidate.deployment, Legs: legs, AmountOutAtomic: output.String(), Block: block, LatencyMs: uint32(time.Since(start).Milliseconds())}
 			}
 			results <- item
 		}()
 	}
-	ordered := make([]result, len(fees))
-	for range fees {
+	ordered := make([]result, len(candidates))
+	for range candidates {
 		item := <-results
 		ordered[item.index] = item
 	}
@@ -136,6 +158,9 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		if item.err != nil {
 			final.Errors = append(final.Errors, item.err)
 		}
+	}
+	if h.Store != nil {
+		h.Store.saveQuote(r, final, started)
 	}
 	return connect.NewResponse(final), nil
 }
@@ -154,11 +179,12 @@ func (h Handler) GetStatus(_ context.Context, _ *connect.Request[quotev1.GetStat
 }
 
 func Status(key string, chain Chain) *quotev1.ChainStatus {
-	status := &quotev1.ChainStatus{Key: key, ChainId: chain.ChainID, Connected: chain.Client != nil, Error: chain.Error, QuotingSupported: chain.ChainID == "8453"}
+	chain = configured(chain)
+	supported := len(chain.Config.Deployments) > len(chain.DeploymentErrors)
+	status := &quotev1.ChainStatus{Key: key, ChainId: chain.ChainID, Connected: chain.Client != nil, Error: chain.Error, QuotingSupported: supported, ExecutionEnabled: supported && chain.Config.ExecutionEnabled && chain.ChainID == "84532"}
 	if status.QuotingSupported {
-		status.Tokens = []*quotev1.Token{
-			{Address: uniswapv3.WETH.Hex(), Symbol: "WETH", Decimals: 18},
-			{Address: uniswapv3.USDC.Hex(), Symbol: "USDC", Decimals: 6},
+		for _, token := range chain.Config.Tokens {
+			status.Tokens = append(status.Tokens, &quotev1.Token{Address: token.Address, Symbol: token.Symbol, Decimals: token.Decimals})
 		}
 	}
 	if status.Connected {
@@ -172,4 +198,51 @@ func contextCode(err error) connect.Code {
 		return connect.CodeDeadlineExceeded
 	}
 	return connect.CodeCanceled
+}
+
+// Legacy Base configuration remains read-only. Explicit configuration wins.
+func configured(chain Chain) Chain {
+	if chain.ChainID == "8453" && len(chain.Config.Tokens) == 0 && len(chain.Config.Deployments) == 0 {
+		chain.Config.Tokens = []config.Token{{Address: uniswapv3.WETH.Hex(), Symbol: "WETH", Decimals: 18}, {Address: uniswapv3.USDC.Hex(), Symbol: "USDC", Decimals: 6}}
+		chain.Config.Deployments = map[string]config.Deployment{"uniswap-v3": {Kind: "uniswap-v3", Factory: uniswapv3.Factory.Hex(), Quoter: uniswapv3.Quoter.Hex(), Fees: []uint32{100, 500, 3000, 10000}}}
+	}
+	return chain
+}
+
+type candidate struct {
+	id, deployment string
+	tokens         []common.Address
+	fees           []uint32
+}
+
+func candidates(chain config.Chain, in, out common.Address) []candidate {
+	var result []candidate
+	var ids []string
+	for id := range chain.Deployments {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var intermediates []common.Address
+	for _, token := range chain.Tokens {
+		a := common.HexToAddress(token.Address)
+		if a != in && a != out {
+			intermediates = append(intermediates, a)
+		}
+	}
+	sort.Slice(intermediates, func(i, j int) bool { return intermediates[i].Hex() < intermediates[j].Hex() })
+	for _, id := range ids {
+		fees := append([]uint32(nil), chain.Deployments[id].Fees...)
+		sort.Slice(fees, func(i, j int) bool { return fees[i] < fees[j] })
+		for _, fee := range fees {
+			result = append(result, candidate{fmt.Sprintf("%s:%d", id, fee), id, []common.Address{in, out}, []uint32{fee}})
+		}
+		for _, middle := range intermediates {
+			for _, first := range fees {
+				for _, second := range fees {
+					result = append(result, candidate{fmt.Sprintf("%s:%d:%s:%d", id, first, middle.Hex(), second), id, []common.Address{in, middle, out}, []uint32{first, second}})
+				}
+			}
+		}
+	}
+	return result
 }

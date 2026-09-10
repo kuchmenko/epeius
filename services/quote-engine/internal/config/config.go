@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"errors"
+	"github.com/ethereum/go-ethereum/common"
 	"net"
 	"net/url"
 	"os"
@@ -30,8 +31,25 @@ type Engine struct {
 }
 
 type Chain struct {
-	ChainID   int64  `toml:"chain_id"`
-	RPCURLEnv string `toml:"rpc_url_env"`
+	ChainID          int64                 `toml:"chain_id"`
+	RPCURLEnv        string                `toml:"rpc_url_env"`
+	ExecutionEnabled bool                  `toml:"execution_enabled"`
+	Tokens           []Token               `toml:"tokens"`
+	Deployments      map[string]Deployment `toml:"deployments"`
+}
+
+type Token struct {
+	Address  string `toml:"address"`
+	Symbol   string `toml:"symbol"`
+	Decimals uint32 `toml:"decimals"`
+}
+
+type Deployment struct {
+	Kind    string   `toml:"kind"`
+	Factory string   `toml:"factory"`
+	Quoter  string   `toml:"quoter"`
+	Router  string   `toml:"router"`
+	Fees    []uint32 `toml:"fees"`
 }
 
 var chainKey = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -81,6 +99,37 @@ func (c Config) validate() error {
 			return errors.New("chain IDs must be unique")
 		}
 		ids[chain.ChainID] = true
+		if chain.ExecutionEnabled && chain.ChainID != 84532 {
+			return errors.New("execution is allowed only on Base Sepolia")
+		}
+		if len(chain.Tokens) > 5 || (chain.ExecutionEnabled && (len(chain.Tokens) < 2 || len(chain.Deployments) == 0)) {
+			return errors.New("execution needs tokens and deployments; at most five tokens are supported")
+		}
+		seen := map[common.Address]bool{}
+		for _, token := range chain.Tokens {
+			a := common.HexToAddress(token.Address)
+			if !common.IsHexAddress(token.Address) || a == (common.Address{}) || seen[a] || token.Symbol == "" || token.Decimals > 255 {
+				return errors.New("invalid or duplicate configured token")
+			}
+			seen[a] = true
+		}
+		for id, deployment := range chain.Deployments {
+			if !chainKey.MatchString(id) || (deployment.Kind != "uniswap-v3" && deployment.Kind != "pancake-v3") || len(deployment.Fees) == 0 || len(deployment.Fees) > 8 {
+				return errors.New("invalid deployment kind, identifier, or fees")
+			}
+			for _, a := range []string{deployment.Factory, deployment.Quoter, deployment.Router} {
+				if !common.IsHexAddress(a) || common.HexToAddress(a) == (common.Address{}) {
+					return errors.New("deployment addresses must be nonzero EVM addresses")
+				}
+			}
+			fees := map[uint32]bool{}
+			for _, fee := range deployment.Fees {
+				if fee == 0 || fee >= 1000000 || fees[fee] {
+					return errors.New("invalid or duplicate pool fee")
+				}
+				fees[fee] = true
+			}
+		}
 		if !envName.MatchString(chain.RPCURLEnv) {
 			return errors.New("chains.*.rpc_url_env must be a valid environment variable name")
 		}

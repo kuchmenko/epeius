@@ -105,7 +105,7 @@ if (import.meta.main) {
       abort.signal.addEventListener("abort", stop, { once: true });
       try {
         console.log(
-          `Epeius — read-only\nEngine: ${engine.ready.url}\n${formatStatus(engine.ready.chains)}\nConnectivity was checked at startup.\nPress Ctrl+C to stop.`,
+          `Epeius — non-signing engine\nEngine: ${engine.ready.url}\n${formatStatus(engine.ready.chains)}\nConnectivity was checked at startup. Only the terminal signs and sends transactions.\nPress Ctrl+C to stop.`,
         );
         await engine.child.exited;
         if (!abort.signal.aborted)

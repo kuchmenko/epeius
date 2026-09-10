@@ -182,6 +182,7 @@ type ChainStatus struct {
 	QuotingSupported bool          `protobuf:"varint,5,opt,name=quoting_supported,json=quotingSupported,proto3" json:"quoting_supported,omitempty"`
 	Tokens           []*Token      `protobuf:"bytes,6,rep,name=tokens,proto3" json:"tokens,omitempty"`
 	Block            *BlockContext `protobuf:"bytes,7,opt,name=block,proto3" json:"block,omitempty"`
+	ExecutionEnabled bool          `protobuf:"varint,8,opt,name=execution_enabled,json=executionEnabled,proto3" json:"execution_enabled,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -263,6 +264,13 @@ func (x *ChainStatus) GetBlock() *BlockContext {
 		return x.Block
 	}
 	return nil
+}
+
+func (x *ChainStatus) GetExecutionEnabled() bool {
+	if x != nil {
+		return x.ExecutionEnabled
+	}
+	return false
 }
 
 type GetStatusResponse struct {
@@ -451,8 +459,11 @@ type RouteLeg struct {
 	Pool     string                 `protobuf:"bytes,1,opt,name=pool,proto3" json:"pool,omitempty"`
 	TokenIn  string                 `protobuf:"bytes,2,opt,name=token_in,json=tokenIn,proto3" json:"token_in,omitempty"`
 	TokenOut string                 `protobuf:"bytes,3,opt,name=token_out,json=tokenOut,proto3" json:"token_out,omitempty"`
-	// Pool fee in millionths, not basis points.
-	FeePips       uint32 `protobuf:"varint,4,opt,name=fee_pips,json=feePips,proto3" json:"fee_pips,omitempty"`
+	// Types that are valid to be assigned to Selector:
+	//
+	//	*RouteLeg_FeePips
+	//	*RouteLeg_TickSpacing
+	Selector      isRouteLeg_Selector `protobuf_oneof:"selector"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -508,12 +519,48 @@ func (x *RouteLeg) GetTokenOut() string {
 	return ""
 }
 
+func (x *RouteLeg) GetSelector() isRouteLeg_Selector {
+	if x != nil {
+		return x.Selector
+	}
+	return nil
+}
+
 func (x *RouteLeg) GetFeePips() uint32 {
 	if x != nil {
-		return x.FeePips
+		if x, ok := x.Selector.(*RouteLeg_FeePips); ok {
+			return x.FeePips
+		}
 	}
 	return 0
 }
+
+func (x *RouteLeg) GetTickSpacing() int32 {
+	if x != nil {
+		if x, ok := x.Selector.(*RouteLeg_TickSpacing); ok {
+			return x.TickSpacing
+		}
+	}
+	return 0
+}
+
+type isRouteLeg_Selector interface {
+	isRouteLeg_Selector()
+}
+
+type RouteLeg_FeePips struct {
+	// Pool fee in millionths, not basis points.
+	FeePips uint32 `protobuf:"varint,4,opt,name=fee_pips,json=feePips,proto3,oneof"`
+}
+
+type RouteLeg_TickSpacing struct {
+	// Slipstream pool selector, not a fee.
+	TickSpacing int32 `protobuf:"varint,5,opt,name=tick_spacing,json=tickSpacing,proto3,oneof"`
+}
+
+func (*RouteLeg_FeePips) isRouteLeg_Selector() {}
+
+func (*RouteLeg_TickSpacing) isRouteLeg_Selector() {}
 
 type RouteQuote struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -526,6 +573,7 @@ type RouteQuote struct {
 	EffectiveOutAtomic   *string       `protobuf:"bytes,6,opt,name=effective_out_atomic,json=effectiveOutAtomic,proto3,oneof" json:"effective_out_atomic,omitempty"`
 	Block                *BlockContext `protobuf:"bytes,7,opt,name=block,proto3" json:"block,omitempty"`
 	LatencyMs            uint32        `protobuf:"varint,8,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
+	DeploymentId         string        `protobuf:"bytes,9,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -614,6 +662,13 @@ func (x *RouteQuote) GetLatencyMs() uint32 {
 		return x.LatencyMs
 	}
 	return 0
+}
+
+func (x *RouteQuote) GetDeploymentId() string {
+	if x != nil {
+		return x.DeploymentId
+	}
+	return ""
 }
 
 type ProviderError struct {
@@ -860,9 +915,13 @@ func (*QuoteEvent_Error) isQuoteEvent_Event() {}
 func (*QuoteEvent_Final) isQuoteEvent_Event() {}
 
 type PrepareExecutionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	QuoteId       string                 `protobuf:"bytes,1,opt,name=quote_id,json=quoteId,proto3" json:"quote_id,omitempty"`
-	RouteId       string                 `protobuf:"bytes,2,opt,name=route_id,json=routeId,proto3" json:"route_id,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	QuoteId     string                 `protobuf:"bytes,1,opt,name=quote_id,json=quoteId,proto3" json:"quote_id,omitempty"`
+	RouteId     string                 `protobuf:"bytes,2,opt,name=route_id,json=routeId,proto3" json:"route_id,omitempty"`
+	Sender      string                 `protobuf:"bytes,3,opt,name=sender,proto3" json:"sender,omitempty"`
+	SlippageBps uint32                 `protobuf:"varint,4,opt,name=slippage_bps,json=slippageBps,proto3" json:"slippage_bps,omitempty"`
+	// Recheck immutable terms. When present, all other fields must be empty.
+	PreparationId string `protobuf:"bytes,5,opt,name=preparation_id,json=preparationId,proto3" json:"preparation_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -911,12 +970,35 @@ func (x *PrepareExecutionRequest) GetRouteId() string {
 	return ""
 }
 
+func (x *PrepareExecutionRequest) GetSender() string {
+	if x != nil {
+		return x.Sender
+	}
+	return ""
+}
+
+func (x *PrepareExecutionRequest) GetSlippageBps() uint32 {
+	if x != nil {
+		return x.SlippageBps
+	}
+	return 0
+}
+
+func (x *PrepareExecutionRequest) GetPreparationId() string {
+	if x != nil {
+		return x.PreparationId
+	}
+	return ""
+}
+
 type UnsignedTransaction struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ChainId       string                 `protobuf:"bytes,1,opt,name=chain_id,json=chainId,proto3" json:"chain_id,omitempty"`
 	To            string                 `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
 	Data          string                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
 	ValueAtomic   string                 `protobuf:"bytes,4,opt,name=value_atomic,json=valueAtomic,proto3" json:"value_atomic,omitempty"`
+	From          string                 `protobuf:"bytes,5,opt,name=from,proto3" json:"from,omitempty"`
+	GasLimit      string                 `protobuf:"bytes,6,opt,name=gas_limit,json=gasLimit,proto3" json:"gas_limit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -979,14 +1061,42 @@ func (x *UnsignedTransaction) GetValueAtomic() string {
 	return ""
 }
 
+func (x *UnsignedTransaction) GetFrom() string {
+	if x != nil {
+		return x.From
+	}
+	return ""
+}
+
+func (x *UnsignedTransaction) GetGasLimit() string {
+	if x != nil {
+		return x.GasLimit
+	}
+	return ""
+}
+
 type PrepareExecutionResponse struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Status PreparationStatus      `protobuf:"varint,1,opt,name=status,proto3,enum=epeius.quote.v1.PreparationStatus" json:"status,omitempty"`
 	// Only a READY response may contain a swap transaction.
-	Transaction   *UnsignedTransaction `protobuf:"bytes,2,opt,name=transaction,proto3" json:"transaction,omitempty"`
-	Message       string               `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Transaction            *UnsignedTransaction `protobuf:"bytes,2,opt,name=transaction,proto3" json:"transaction,omitempty"`
+	Message                string               `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	PreparationId          string               `protobuf:"bytes,4,opt,name=preparation_id,json=preparationId,proto3" json:"preparation_id,omitempty"`
+	ExpiresAtUnix          string               `protobuf:"bytes,5,opt,name=expires_at_unix,json=expiresAtUnix,proto3" json:"expires_at_unix,omitempty"`
+	AmountOutMinimumAtomic string               `protobuf:"bytes,6,opt,name=amount_out_minimum_atomic,json=amountOutMinimumAtomic,proto3" json:"amount_out_minimum_atomic,omitempty"`
+	AmountInAtomic         string               `protobuf:"bytes,7,opt,name=amount_in_atomic,json=amountInAtomic,proto3" json:"amount_in_atomic,omitempty"`
+	TokenIn                string               `protobuf:"bytes,8,opt,name=token_in,json=tokenIn,proto3" json:"token_in,omitempty"`
+	TokenOut               string               `protobuf:"bytes,9,opt,name=token_out,json=tokenOut,proto3" json:"token_out,omitempty"`
+	Recipient              string               `protobuf:"bytes,10,opt,name=recipient,proto3" json:"recipient,omitempty"`
+	DeadlineUnix           string               `protobuf:"bytes,11,opt,name=deadline_unix,json=deadlineUnix,proto3" json:"deadline_unix,omitempty"`
+	SimulationBlock        *BlockContext        `protobuf:"bytes,12,opt,name=simulation_block,json=simulationBlock,proto3" json:"simulation_block,omitempty"`
+	// Separate approval; its success never makes the old quote executable.
+	ApprovalTransaction      *UnsignedTransaction `protobuf:"bytes,13,opt,name=approval_transaction,json=approvalTransaction,proto3" json:"approval_transaction,omitempty"`
+	ApprovalSpender          string               `protobuf:"bytes,14,opt,name=approval_spender,json=approvalSpender,proto3" json:"approval_spender,omitempty"`
+	SimulatedAmountOutAtomic string               `protobuf:"bytes,15,opt,name=simulated_amount_out_atomic,json=simulatedAmountOutAtomic,proto3" json:"simulated_amount_out_atomic,omitempty"`
+	Route                    *RouteQuote          `protobuf:"bytes,16,opt,name=route,proto3" json:"route,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *PrepareExecutionResponse) Reset() {
@@ -1040,6 +1150,97 @@ func (x *PrepareExecutionResponse) GetMessage() string {
 	return ""
 }
 
+func (x *PrepareExecutionResponse) GetPreparationId() string {
+	if x != nil {
+		return x.PreparationId
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetExpiresAtUnix() string {
+	if x != nil {
+		return x.ExpiresAtUnix
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetAmountOutMinimumAtomic() string {
+	if x != nil {
+		return x.AmountOutMinimumAtomic
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetAmountInAtomic() string {
+	if x != nil {
+		return x.AmountInAtomic
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetTokenIn() string {
+	if x != nil {
+		return x.TokenIn
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetTokenOut() string {
+	if x != nil {
+		return x.TokenOut
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetRecipient() string {
+	if x != nil {
+		return x.Recipient
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetDeadlineUnix() string {
+	if x != nil {
+		return x.DeadlineUnix
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetSimulationBlock() *BlockContext {
+	if x != nil {
+		return x.SimulationBlock
+	}
+	return nil
+}
+
+func (x *PrepareExecutionResponse) GetApprovalTransaction() *UnsignedTransaction {
+	if x != nil {
+		return x.ApprovalTransaction
+	}
+	return nil
+}
+
+func (x *PrepareExecutionResponse) GetApprovalSpender() string {
+	if x != nil {
+		return x.ApprovalSpender
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetSimulatedAmountOutAtomic() string {
+	if x != nil {
+		return x.SimulatedAmountOutAtomic
+	}
+	return ""
+}
+
+func (x *PrepareExecutionResponse) GetRoute() *RouteQuote {
+	if x != nil {
+		return x.Route
+	}
+	return nil
+}
+
 var File_epeius_quote_v1_quote_proto protoreflect.FileDescriptor
 
 const file_epeius_quote_v1_quote_proto_rawDesc = "" +
@@ -1049,7 +1250,7 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\x05Token\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
 	"\x06symbol\x18\x02 \x01(\tR\x06symbol\x12\x1a\n" +
-	"\bdecimals\x18\x03 \x01(\rR\bdecimals\"\x80\x02\n" +
+	"\bdecimals\x18\x03 \x01(\rR\bdecimals\"\xad\x02\n" +
 	"\vChainStatus\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x19\n" +
 	"\bchain_id\x18\x02 \x01(\tR\achainId\x12\x1c\n" +
@@ -1057,7 +1258,8 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x12+\n" +
 	"\x11quoting_supported\x18\x05 \x01(\bR\x10quotingSupported\x12.\n" +
 	"\x06tokens\x18\x06 \x03(\v2\x16.epeius.quote.v1.TokenR\x06tokens\x123\n" +
-	"\x05block\x18\a \x01(\v2\x1d.epeius.quote.v1.BlockContextR\x05block\"I\n" +
+	"\x05block\x18\a \x01(\v2\x1d.epeius.quote.v1.BlockContextR\x05block\x12+\n" +
+	"\x11execution_enabled\x18\b \x01(\bR\x10executionEnabled\"I\n" +
 	"\x11GetStatusResponse\x124\n" +
 	"\x06chains\x18\x01 \x03(\v2\x1c.epeius.quote.v1.ChainStatusR\x06chains\"\x91\x02\n" +
 	"\fQuoteRequest\x12\x19\n" +
@@ -1070,12 +1272,15 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	" \x01(\tR\achainIdJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x03\x10\x04J\x04\b\a\x10\bR\venvironmentR\x06senderR\trecipientR\fslippage_bps\":\n" +
 	"\fBlockContext\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\tR\x06number\x12\x12\n" +
-	"\x04hash\x18\x02 \x01(\tR\x04hash\"q\n" +
+	"\x04hash\x18\x02 \x01(\tR\x04hash\"\xa4\x01\n" +
 	"\bRouteLeg\x12\x12\n" +
 	"\x04pool\x18\x01 \x01(\tR\x04pool\x12\x19\n" +
 	"\btoken_in\x18\x02 \x01(\tR\atokenIn\x12\x1b\n" +
-	"\ttoken_out\x18\x03 \x01(\tR\btokenOut\x12\x19\n" +
-	"\bfee_pips\x18\x04 \x01(\rR\afeePips\"\x9a\x03\n" +
+	"\ttoken_out\x18\x03 \x01(\tR\btokenOut\x12\x1b\n" +
+	"\bfee_pips\x18\x04 \x01(\rH\x00R\afeePips\x12#\n" +
+	"\ftick_spacing\x18\x05 \x01(\x05H\x00R\vtickSpacingB\n" +
+	"\n" +
+	"\bselector\"\xbf\x03\n" +
 	"\n" +
 	"RouteQuote\x12\x19\n" +
 	"\broute_id\x18\x01 \x01(\tR\arouteId\x12\x1a\n" +
@@ -1086,7 +1291,8 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\x14effective_out_atomic\x18\x06 \x01(\tH\x01R\x12effectiveOutAtomic\x88\x01\x01\x123\n" +
 	"\x05block\x18\a \x01(\v2\x1d.epeius.quote.v1.BlockContextR\x05block\x12\x1d\n" +
 	"\n" +
-	"latency_ms\x18\b \x01(\rR\tlatencyMsB\x1a\n" +
+	"latency_ms\x18\b \x01(\rR\tlatencyMs\x12#\n" +
+	"\rdeployment_id\x18\t \x01(\tR\fdeploymentIdB\x1a\n" +
 	"\x18_network_cost_out_atomicB\x17\n" +
 	"\x15_effective_out_atomic\"r\n" +
 	"\rProviderError\x12\x1a\n" +
@@ -1108,19 +1314,38 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\x05quote\x18\x01 \x01(\v2\x1b.epeius.quote.v1.RouteQuoteH\x00R\x05quote\x126\n" +
 	"\x05error\x18\x02 \x01(\v2\x1e.epeius.quote.v1.ProviderErrorH\x00R\x05error\x123\n" +
 	"\x05final\x18\x03 \x01(\v2\x1b.epeius.quote.v1.QuoteFinalH\x00R\x05finalB\a\n" +
-	"\x05event\"O\n" +
+	"\x05event\"\xb1\x01\n" +
 	"\x17PrepareExecutionRequest\x12\x19\n" +
 	"\bquote_id\x18\x01 \x01(\tR\aquoteId\x12\x19\n" +
-	"\broute_id\x18\x02 \x01(\tR\arouteId\"w\n" +
+	"\broute_id\x18\x02 \x01(\tR\arouteId\x12\x16\n" +
+	"\x06sender\x18\x03 \x01(\tR\x06sender\x12!\n" +
+	"\fslippage_bps\x18\x04 \x01(\rR\vslippageBps\x12%\n" +
+	"\x0epreparation_id\x18\x05 \x01(\tR\rpreparationId\"\xa8\x01\n" +
 	"\x13UnsignedTransaction\x12\x19\n" +
 	"\bchain_id\x18\x01 \x01(\tR\achainId\x12\x0e\n" +
 	"\x02to\x18\x02 \x01(\tR\x02to\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\tR\x04data\x12!\n" +
-	"\fvalue_atomic\x18\x04 \x01(\tR\vvalueAtomic\"\xb8\x01\n" +
+	"\fvalue_atomic\x18\x04 \x01(\tR\vvalueAtomic\x12\x12\n" +
+	"\x04from\x18\x05 \x01(\tR\x04from\x12\x1b\n" +
+	"\tgas_limit\x18\x06 \x01(\tR\bgasLimit\"\xa7\x06\n" +
 	"\x18PrepareExecutionResponse\x12:\n" +
 	"\x06status\x18\x01 \x01(\x0e2\".epeius.quote.v1.PreparationStatusR\x06status\x12F\n" +
 	"\vtransaction\x18\x02 \x01(\v2$.epeius.quote.v1.UnsignedTransactionR\vtransaction\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage*\xc9\x01\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x12%\n" +
+	"\x0epreparation_id\x18\x04 \x01(\tR\rpreparationId\x12&\n" +
+	"\x0fexpires_at_unix\x18\x05 \x01(\tR\rexpiresAtUnix\x129\n" +
+	"\x19amount_out_minimum_atomic\x18\x06 \x01(\tR\x16amountOutMinimumAtomic\x12(\n" +
+	"\x10amount_in_atomic\x18\a \x01(\tR\x0eamountInAtomic\x12\x19\n" +
+	"\btoken_in\x18\b \x01(\tR\atokenIn\x12\x1b\n" +
+	"\ttoken_out\x18\t \x01(\tR\btokenOut\x12\x1c\n" +
+	"\trecipient\x18\n" +
+	" \x01(\tR\trecipient\x12#\n" +
+	"\rdeadline_unix\x18\v \x01(\tR\fdeadlineUnix\x12H\n" +
+	"\x10simulation_block\x18\f \x01(\v2\x1d.epeius.quote.v1.BlockContextR\x0fsimulationBlock\x12W\n" +
+	"\x14approval_transaction\x18\r \x01(\v2$.epeius.quote.v1.UnsignedTransactionR\x13approvalTransaction\x12)\n" +
+	"\x10approval_spender\x18\x0e \x01(\tR\x0fapprovalSpender\x12=\n" +
+	"\x1bsimulated_amount_out_atomic\x18\x0f \x01(\tR\x18simulatedAmountOutAtomic\x121\n" +
+	"\x05route\x18\x10 \x01(\v2\x1b.epeius.quote.v1.RouteQuoteR\x05route*\xc9\x01\n" +
 	"\x11PreparationStatus\x12\"\n" +
 	"\x1ePREPARATION_STATUS_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18PREPARATION_STATUS_READY\x10\x01\x12(\n" +
@@ -1178,25 +1403,32 @@ var file_epeius_quote_v1_quote_proto_depIdxs = []int32{
 	10, // 10: epeius.quote.v1.QuoteEvent.final:type_name -> epeius.quote.v1.QuoteFinal
 	0,  // 11: epeius.quote.v1.PrepareExecutionResponse.status:type_name -> epeius.quote.v1.PreparationStatus
 	13, // 12: epeius.quote.v1.PrepareExecutionResponse.transaction:type_name -> epeius.quote.v1.UnsignedTransaction
-	1,  // 13: epeius.quote.v1.QuoteService.GetStatus:input_type -> epeius.quote.v1.GetStatusRequest
-	5,  // 14: epeius.quote.v1.QuoteService.GetQuote:input_type -> epeius.quote.v1.QuoteRequest
-	5,  // 15: epeius.quote.v1.QuoteService.StreamQuote:input_type -> epeius.quote.v1.QuoteRequest
-	12, // 16: epeius.quote.v1.QuoteService.PrepareExecution:input_type -> epeius.quote.v1.PrepareExecutionRequest
-	4,  // 17: epeius.quote.v1.QuoteService.GetStatus:output_type -> epeius.quote.v1.GetStatusResponse
-	10, // 18: epeius.quote.v1.QuoteService.GetQuote:output_type -> epeius.quote.v1.QuoteFinal
-	11, // 19: epeius.quote.v1.QuoteService.StreamQuote:output_type -> epeius.quote.v1.QuoteEvent
-	14, // 20: epeius.quote.v1.QuoteService.PrepareExecution:output_type -> epeius.quote.v1.PrepareExecutionResponse
-	17, // [17:21] is the sub-list for method output_type
-	13, // [13:17] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	6,  // 13: epeius.quote.v1.PrepareExecutionResponse.simulation_block:type_name -> epeius.quote.v1.BlockContext
+	13, // 14: epeius.quote.v1.PrepareExecutionResponse.approval_transaction:type_name -> epeius.quote.v1.UnsignedTransaction
+	8,  // 15: epeius.quote.v1.PrepareExecutionResponse.route:type_name -> epeius.quote.v1.RouteQuote
+	1,  // 16: epeius.quote.v1.QuoteService.GetStatus:input_type -> epeius.quote.v1.GetStatusRequest
+	5,  // 17: epeius.quote.v1.QuoteService.GetQuote:input_type -> epeius.quote.v1.QuoteRequest
+	5,  // 18: epeius.quote.v1.QuoteService.StreamQuote:input_type -> epeius.quote.v1.QuoteRequest
+	12, // 19: epeius.quote.v1.QuoteService.PrepareExecution:input_type -> epeius.quote.v1.PrepareExecutionRequest
+	4,  // 20: epeius.quote.v1.QuoteService.GetStatus:output_type -> epeius.quote.v1.GetStatusResponse
+	10, // 21: epeius.quote.v1.QuoteService.GetQuote:output_type -> epeius.quote.v1.QuoteFinal
+	11, // 22: epeius.quote.v1.QuoteService.StreamQuote:output_type -> epeius.quote.v1.QuoteEvent
+	14, // 23: epeius.quote.v1.QuoteService.PrepareExecution:output_type -> epeius.quote.v1.PrepareExecutionResponse
+	20, // [20:24] is the sub-list for method output_type
+	16, // [16:20] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_epeius_quote_v1_quote_proto_init() }
 func file_epeius_quote_v1_quote_proto_init() {
 	if File_epeius_quote_v1_quote_proto != nil {
 		return
+	}
+	file_epeius_quote_v1_quote_proto_msgTypes[6].OneofWrappers = []any{
+		(*RouteLeg_FeePips)(nil),
+		(*RouteLeg_TickSpacing)(nil),
 	}
 	file_epeius_quote_v1_quote_proto_msgTypes[7].OneofWrappers = []any{}
 	file_epeius_quote_v1_quote_proto_msgTypes[8].OneofWrappers = []any{}

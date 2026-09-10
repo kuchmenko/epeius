@@ -27,3 +27,22 @@ jobs:
       - run: bun run check:generated
       - name: Check dependency files stayed unchanged
         run: git diff --exit-code -- bun.lock generated/go/go.mod generated/go/go.sum services/quote-engine/go.mod services/quote-engine/go.sum
+
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: scripts/testnet/package-lock.json
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.0
+      - run: npm ci --prefix scripts/testnet --ignore-scripts
+      - run: node scripts/testnet/prepare.mjs
+      - run: npm test --prefix scripts/testnet
+      - run: forge test --root contracts
+      - name: Check harness dependency files stayed unchanged
+        run: git diff --exit-code -- scripts/testnet/package-lock.json

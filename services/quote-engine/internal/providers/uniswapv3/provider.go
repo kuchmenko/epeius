@@ -1,5 +1,4 @@
-// Package uniswapv3 quotes direct Base mainnet pools only. Aerodrome,
-// intermediate-token routes, and split routing are outside this implementation.
+// Package uniswapv3 quotes configured Uniswap and Pancake V3 deployments.
 package uniswapv3
 
 import (
@@ -22,7 +21,11 @@ type Caller interface {
 	Call(context.Context, common.Address, []byte, common.Hash) ([]byte, error)
 }
 
-type Provider struct{ Client Caller }
+type Provider struct {
+	Client         Caller
+	FactoryAddress common.Address
+	QuoterAddress  common.Address
+}
 
 type singleInput struct {
 	TokenIn           common.Address
@@ -34,11 +37,18 @@ type singleInput struct {
 
 // Quote returns a zero pool and nil amount when no pool exists for this fee.
 func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big.Int, fee uint32, block common.Hash) (common.Address, *big.Int, error) {
+	factory, quoter := p.FactoryAddress, p.QuoterAddress
+	if factory == (common.Address{}) {
+		factory = Factory
+	}
+	if quoter == (common.Address{}) {
+		quoter = Quoter
+	}
 	data, err := factoryABI.Pack("getPool", in, out, new(big.Int).SetUint64(uint64(fee)))
 	if err != nil {
 		return common.Address{}, nil, err
 	}
-	result, err := p.Client.Call(ctx, Factory, data, block)
+	result, err := p.Client.Call(ctx, factory, data, block)
 	if err != nil {
 		return common.Address{}, nil, errors.New("pool discovery failed at the pinned block")
 	}
@@ -54,7 +64,7 @@ func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big
 	if err != nil {
 		return pool, nil, err
 	}
-	result, err = p.Client.Call(ctx, Quoter, data, block)
+	result, err = p.Client.Call(ctx, quoter, data, block)
 	if err != nil {
 		return pool, nil, errors.New("quote failed at the pinned block")
 	}

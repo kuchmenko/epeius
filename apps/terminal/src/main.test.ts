@@ -91,9 +91,9 @@ test("engine URL errors do not echo secrets", () => {
 
 test("help needs no config and removed flags give migration errors", async () => {
   for (const [args, code, text] of [
-    [["--help"], 0, "not implemented"],
+    [["--help"], 0, "prepare previews without sending"],
     [["quote", "--sender", "x"], 1, "--sender was removed"],
-    [["execute"], 1, "not implemented"],
+    [["execute"], 1, "Provide --keystore"],
   ] as const) {
     const child = Bun.spawn(["bun", "apps/terminal/src/main.ts", ...args], {
       cwd: join(import.meta.dir, "../../.."),

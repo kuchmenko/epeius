@@ -2,7 +2,9 @@
 
 Epeius is a proof of concept trading terminal and quote engine for EVM, currently targeting Base.
 
-One Go engine serves all chains configured in `epeius.toml`. The Bun terminal calls it over ConnectRPC. Quotes currently support direct Uniswap V3 WETH/USDC routes on Base mainnet, in both directions. Base Sepolia supports connectivity checks only. No wallet keys, signing, or transaction sending are supported.
+One Go engine serves all chains configured in `epeius.toml`. The Bun terminal calls it over ConnectRPC. Configured Uniswap V3 and Pancake V3 deployments support one-hop and two-hop exact-input quotes. Base mainnet remains read-only. Base Sepolia can explicitly enable execution through Tenderly simulation and a local terminal signer.
+
+Read the [execution contract and known limitations](docs/execution.md) before sending transactions. A successful simulation or receipt does not guarantee full input consumption; the first milestone checks actual amounts without a custom executor.
 
 ## Quick start
 
@@ -76,7 +78,7 @@ The engine checks all configured RPCs in parallel at startup. Each check has a 1
 
 Remote RPC URLs require HTTPS; HTTP is allowed only for loopback IPs and `localhost`. The engine binds only to a loopback IP. Credentials and RPC URL values are not included in status output.
 
-Adding a TOML chain enables connectivity checks without changing a chain enum. It does **not** add quote support: providers, deployed contracts, and supported pairs must also exist. Contract configuration is deferred.
+Adding a TOML chain enables connectivity checks without changing a chain enum. It does **not** add quote support: configure supported tokens and deployments for that chain. Each deployment has `kind` (`uniswap-v3` or `pancake-v3`), `factory`, `quoter`, `router`, and `fees`. Tokens have `address`, `symbol`, and `decimals`. The checked-in config includes the read-only Base deployment; the testnet harness creates a separate runtime config for its own pools.
 
 ## Commands
 
@@ -88,6 +90,8 @@ Adding a TOML chain enables connectivity checks without changing a chain enum. I
 | `bun run terminal -- status` | Show all chains known to the engine | Yes |
 | `bun run terminal -- tokens --chain base` | List supported token addresses, symbols, and decimals | Yes |
 | `bun run terminal -- quote ...` | Request an informational exact-input quote | Yes |
+| `bun run terminal -- prepare ...` | Prepare and simulate, without signing or sending | Yes |
+| `bun run terminal -- execute ...` | Confirm and send one approval or swap, then check its receipt | Yes |
 | `bun run terminal --help` | Show CLI usage without configuration | No |
 
 `chains` and `chain check` use the Go configuration loader; they build the executable if it is missing. `--config PATH` works on terminal commands. `--engine-url URL` overrides the endpoint for `status`, `tokens`, and `quote`. `--chain` selects a chain, otherwise the terminal uses `terminal.default_chain`. Every quote sends the selected key and chain ID explicitly; the engine rejects mismatches.
@@ -119,13 +123,92 @@ Provide exactly one of `--amount` or `--amount-atomic`. Decimal conversion uses 
 - **Engine unavailable:** run `bun run engine`; verify `terminal.engine_url` and the listen port. The terminal never silently starts a server for a quote.
 - **RPC variable missing:** run `chains` to find its variable name, set it in `.env`, then restart the engine.
 - **Wrong chain ID:** use an RPC for the chain configured in TOML. Changing a key's name does not change network identity.
-- **Unsupported quoting:** a connected network is not necessarily quote-supported. Use Base WETH/USDC for this milestone.
+- **Unsupported quoting:** a connected network is not necessarily quote-supported. Configure tokens and deployments, or use the seeded testnet harness configuration.
 - **RPC failure or partial search:** inspect the route errors; check provider availability and rate limits. The engine never substitutes another endpoint.
 - **Old engine/client:** restart using the updated checkout. This protocol update requires matching engine and terminal versions.
 
 `bun run engine` replaces `bun run dev`. The old `EPEIUS_ENVIRONMENT`, `EPEIUS_RPC_URL`, `EPEIUS_LISTEN_ADDR`, and `EPEIUS_ENGINE_URL` settings are no longer used. Move endpoint settings to TOML and RPC credentials to the per-chain variables.
 
-`--environment` is replaced by `--chain`. `--sender`, `--recipient`, and `--slippage-bps` were removed from informational quotes because they did not affect QuoterV2 output. They are not silently ignored. Quotes do not promise an executable minimum output. `execute`, `StreamQuote`, and `PrepareExecution` remain unimplemented.
+`--environment` is replaced by `--chain`. `--sender`, `--recipient`, and `--slippage-bps` are not accepted on informational quotes because they do not affect QuoterV2 output. Execution derives the sender from the local keystore and uses it as recipient. `prepare` and `execute` accept `--slippage-bps`. `StreamQuote` remains unimplemented.
+
+## Preparing and executing on Base Sepolia
+
+Requires Foundry `cast` in addition to Bun and Go. Keep encrypted keystores and their password files outside Git. Do not place private keys in command arguments, engine configuration, or Tenderly requests.
+
+Set `TENDERLY_ACCESS_KEY`, `TENDERLY_ACCOUNT_SLUG`, and `TENDERLY_PROJECT_SLUG` in the ignored local environment file. Quotes do not require Tenderly. Execution requires a chain with `chain_id = 84532` and `execution_enabled = true`, configured deployments, funded tokens, and sufficient Base Sepolia ETH for gas. No network writes happen merely from starting the engine.
+
+Using a running engine and a quote's returned IDs:
+
+```bash
+bun run terminal -- prepare --chain base-sepolia --config .testnet/runtime.toml \
+  --quote-id QUOTE_ID --route-id ROUTE_ID --slippage-bps 50 \
+  --keystore /local/path/terminal --password-file /local/path/password
+
+bun run terminal -- execute --chain base-sepolia --config .testnet/runtime.toml \
+  --quote-id QUOTE_ID --route-id ROUTE_ID --slippage-bps 50 \
+  --keystore /local/path/terminal --password-file /local/path/password
+```
+
+`prepare` never sends. `execute` displays the preparation and asks for action-specific confirmation, then rechecks immutable terms before sending. For deliberate noninteractive tests, use **one** of `--confirm-approval yes` or `--confirm-swap yes`. The wrong action is not automatically confirmed.
+
+If approval is required, execution sends only that approval. After confirmation, obtain a fresh quote and select its route before executing the swap. Preparation IDs expire and do not survive an engine restart. The initial application lifetime is 30 seconds; the on-chain swap deadline is 120 seconds from the preparation's chain snapshot. Rechecking does not extend either deadline.
+
+Execution prints JSONL events with the submitted transaction hash and a separate verification result. For standard ERC20 tokens, it checks exact-transaction Transfer net deltas for the wallet's input and output and any intermediate router balance. A pending or unknown result is not permission to resend automatically. Inspect the recorded hash and wallet transactions first.
+
+The live E2E runner uses the seeded A/B/C pools and tests each venue in both directions with one and two hops:
+
+```bash
+# List scenarios only; no RPC calls, signer access, or sends.
+bun scripts/e2e.ts --config .testnet/runtime.toml
+
+# Explicitly send testnet approvals and swaps through the real terminal.
+bun scripts/e2e.ts --config .testnet/runtime.toml --broadcast \
+  --keystore /local/path/terminal --password-file /local/path/password
+```
+
+The runner records hashes and results in an ignored `.testnet/e2e-*.jsonl` file. It stops at the first failed or inconclusive result. Public testnet trades change pool state; reruns are new trades, not a reset.
+
+## Creating the testnet pools
+
+Harness setup also requires Node.js 22+, npm, Git, and Foundry 1.5.0 (`forge` and `cast`). Its pinned dependencies are separate from the terminal workspace:
+
+```bash
+npm ci --prefix scripts/testnet --ignore-scripts
+node scripts/testnet/prepare.mjs
+npm test --prefix scripts/testnet
+forge test --root contracts
+```
+
+Preparation downloads pinned Pancake source, verifies that compiled pool creation bytecode matches the released artifact, and builds the harness contracts. These commands do not deploy or spend test ETH. Foundry tests run locally, including actual Pancake pool minting and partial-input consumption.
+
+Use a separate encrypted harness wallet. Replace the addresses and local paths below. `HARNESS_ADDRESS` must match the harness keystore; include it among seed recipients because it pays the token amounts for liquidity. `TERMINAL_ADDRESS` receives test tokens for swaps.
+
+```bash
+# Read-only deployment estimates; no signing or broadcasting.
+node scripts/testnet/harness.mjs deploy --env /local/path/.env \
+  --sender HARNESS_ADDRESS
+
+# Deploy A/B/C, liquidity helper, and authentic Pancake contracts.
+node scripts/testnet/harness.mjs deploy --env /local/path/.env \
+  --sender HARNESS_ADDRESS --broadcast \
+  --keystore /local/path/harness --password-file /local/path/password
+
+# Create and seed pools on the official Uniswap and local Pancake factories.
+node scripts/testnet/harness.mjs seed --env /local/path/.env \
+  --sender HARNESS_ADDRESS --recipient HARNESS_ADDRESS \
+  --recipient TERMINAL_ADDRESS --broadcast \
+  --keystore /local/path/harness --password-file /local/path/password
+
+node scripts/testnet/harness.mjs check --env /local/path/.env
+node scripts/testnet/harness.mjs config --env /local/path/.env
+bun --env-file=/local/path/.env scripts/engine.ts --config .testnet/runtime.toml
+```
+
+Omit `--broadcast` from `seed` to inspect its plan first. Gas estimates exclude steps that depend on missing contracts and exclude L1 data fees. The harness rejects any network other than Base Sepolia and checks deployed factory/router links.
+
+The seed gives each explicit recipient 1,000,000 whole A/B/C. A has 18 decimals, B has 6, and C has 8. Each venue gets A/B, B/C, and A/C pools at two fees: broad 500-pip pools for normal swaps and narrow 3000-pip Uniswap / 2500-pip Pancake pools for exhaustion tests. Initial prices are one whole token for one whole token, not equal atomic amounts. The test liquidity helper deliberately has no withdrawal flow; use only disposable test tokens.
+
+Keep `.testnet/manifest.json`: it records signed transactions before submission, receipts, deployed addresses, and pool settings. Rerunning deployment or seeding resumes those recorded steps; it does not reset state or mint the same recipient allocation again. An unconfirmed transaction must be inspected before changing the manifest. Never delete the manifest to recover from a timeout. The generated runtime config contains addresses and environment-variable names, not RPC credentials.
 
 ## Verification and layout
 
@@ -152,6 +235,6 @@ generated/ts/                    Generated TypeScript bindings
 scripts/                         Launch, tests, and smoke check
 ```
 
-The search covers fee tiers 100, 500, 3000, and 10000 pips at one canonical block hash. Results follow fee order, not economic rank. `searchComplete` means all candidate attempts finished within the budget; individual failures remain in `errors`. RPCs must support EIP-1898 block-hash calls; there is no fallback to latest state. Gas pricing, economic scoring, additional venues, intermediate or split routes, execution, forks, caches, databases, and indexing remain outside this milestone.
+The search uses each deployment's configured fees at one canonical block hash. Results follow deterministic deployment/path order, not economic rank. `searchComplete` means all candidate attempts finished within the budget; individual failures remain in `errors`. RPCs must support EIP-1898 block-hash calls; there is no fallback to latest state. Gas pricing, economic scoring, Slipstream execution, split routes, custom executors, forks, databases, and indexing remain outside this milestone.
 
 Generated files are checked in. Edit the proto and run `bun run generate`, not the generated code. Removed request field numbers are reserved and are not reused.

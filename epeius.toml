@@ -9,7 +9,27 @@ listen_addr = "127.0.0.1:8080"
 [chains.base]
 chain_id = 8453
 rpc_url_env = "BASE_RPC_URL"
+execution_enabled = false
+
+[[chains.base.tokens]]
+address = "0x4200000000000000000000000000000000000006"
+symbol = "WETH"
+decimals = 18
+
+[[chains.base.tokens]]
+address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+symbol = "USDC"
+decimals = 6
+
+[chains.base.deployments.uniswap-v3]
+kind = "uniswap-v3"
+factory = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+quoter = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
+router = "0x2626664c2603336E57B271c5C0b26F421741e481"
+fees = [100, 500, 3000, 10000]
 
 [chains.base-sepolia]
 chain_id = 84532
 rpc_url_env = "BASE_SEPOLIA_RPC_URL"
+execution_enabled = false
+# The harness writes a separate runtime config with its deployed tokens and routers.

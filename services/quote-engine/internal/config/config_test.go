@@ -73,3 +73,40 @@ func TestParseErrorDoesNotEchoSecret(t *testing.T) {
 		t.Fatalf("unsafe error: %v", err)
 	}
 }
+
+func TestExplicitExecutionConfig(t *testing.T) {
+	text := validConfig + `execution_enabled = true
+[[chains.test-net.tokens]]
+address = "0x1111111111111111111111111111111111111111"
+symbol = "A"
+decimals = 18
+[[chains.test-net.tokens]]
+address = "0x2222222222222222222222222222222222222222"
+symbol = "B"
+decimals = 6
+[chains.test-net.deployments.pancake]
+kind = "pancake-v3"
+factory = "0x3333333333333333333333333333333333333333"
+quoter = "0x4444444444444444444444444444444444444444"
+router = "0x5555555555555555555555555555555555555555"
+fees = [500, 2500]
+`
+	got, err := loadText(t, text)
+	if err != nil || !got.Chains["test-net"].ExecutionEnabled || len(got.Chains["test-net"].Tokens) != 2 || got.Chains["test-net"].Deployments["pancake"].Fees[1] != 2500 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	for _, test := range []struct{ old, new string }{
+		{"chain_id = 84532", "chain_id = 1"},
+		{"decimals = 6", "decimals = 256"},
+		{"fees = [500, 2500]", "fees = [500, 500]"},
+		{"fees = [500, 2500]", "fees = [1000000]"},
+		{"pancake-v3", "slipstream"},
+		{"0x5555555555555555555555555555555555555555", "0x0000000000000000000000000000000000000000"},
+		{"0x2222222222222222222222222222222222222222", "0x1111111111111111111111111111111111111111"},
+		{"fees = [500, 2500]", "fees = [500, 2500]\nnpm = \"private-value\""},
+	} {
+		if _, err := loadText(t, strings.Replace(text, test.old, test.new, 1)); err == nil {
+			t.Fatalf("accepted %s", test.new)
+		}
+	}
+}
