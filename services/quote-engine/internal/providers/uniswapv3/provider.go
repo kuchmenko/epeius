@@ -3,6 +3,7 @@
 package uniswapv3
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -64,6 +65,15 @@ func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big
 	output := values[0].(*big.Int)
 	if output.Sign() <= 0 {
 		return pool, nil, errors.New("quote returned zero output")
+	}
+	// QuoterV2 replaces a zero limit with TickMath.MAX_SQRT_RATIO - 1
+	// or MIN_SQRT_RATIO + 1. Reaching it can leave input unconsumed.
+	limit := "1461446703485210103287273052203988822378723970341"
+	if bytes.Compare(in[:], out[:]) < 0 {
+		limit = "4295128740"
+	}
+	if values[1].(*big.Int).String() == limit {
+		return pool, nil, errors.New("quote reached the price limit; full input consumption is not guaranteed")
 	}
 	// Quoter gasEstimate is not a network cost estimate. No gas pricing,
 	// economic scoring, or best-route recommendation is produced here.

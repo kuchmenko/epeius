@@ -133,3 +133,42 @@ func TestQuoteResponsesAndFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestQuoteRejectsDirectionalPriceLimit(t *testing.T) {
+	pool := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	for _, tc := range []struct {
+		name    string
+		in, out common.Address
+		price   string
+		reject  bool
+	}{
+		{"lower limit", WETH, USDC, "4295128740", true},
+		{"above lower limit", WETH, USDC, "4295128741", false},
+		{"upper limit", USDC, WETH, "1461446703485210103287273052203988822378723970341", true},
+		{"below upper limit", USDC, WETH, "1461446703485210103287273052203988822378723970340", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			price, ok := new(big.Int).SetString(tc.price, 10)
+			if !ok {
+				t.Fatal("invalid test price")
+			}
+			fake := callFake(func(_ context.Context, to common.Address, _ []byte, _ common.Hash) ([]byte, error) {
+				if to == Factory {
+					return addressWord(pool), nil
+				}
+				return bytes.Join([][]byte{word(big.NewInt(71234567)), word(price), word(big.NewInt(7)), word(big.NewInt(456789))}, nil), nil
+			})
+			gotPool, output, err := (Provider{Client: fake}).Quote(context.Background(), tc.in, tc.out, big.NewInt(123456789), 10000, common.Hash{})
+			if gotPool != pool {
+				t.Fatal("lost pool identity")
+			}
+			if tc.reject {
+				if err == nil || err.Error() != "quote reached the price limit; full input consumption is not guaranteed" || output != nil {
+					t.Fatalf("price-limit quote accepted: output=%v error=%v", output, err)
+				}
+			} else if err != nil || output == nil || output.String() != "71234567" {
+				t.Fatalf("near-limit quote changed: output=%v error=%v", output, err)
+			}
+		})
+	}
+}
