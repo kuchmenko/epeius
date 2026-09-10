@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -39,6 +40,9 @@ func Open(ctx context.Context, environment, endpoint string) (*Client, Snapshot,
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, Snapshot{}, errors.New("set EPEIUS_RPC_URL to an HTTP or HTTPS RPC endpoint")
+	}
+	if parsed.Scheme == "http" && parsed.Hostname() != "localhost" && !net.ParseIP(parsed.Hostname()).IsLoopback() {
+		return nil, Snapshot{}, errors.New("EPEIUS_RPC_URL must use HTTPS except for loopback endpoints")
 	}
 	client, err := ethclient.DialContext(ctx, endpoint)
 	if err != nil {

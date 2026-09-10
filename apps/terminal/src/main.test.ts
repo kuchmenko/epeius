@@ -47,9 +47,14 @@ test("invalid units, bounds, addresses, and environments are rejected", () => {
   expect(
     quoteInput(changed("--slippage-bps", "10000"), "base-mainnet").slippageBps,
   ).toBe(10000);
+  expect(
+    quoteInput(changed("--search-budget-ms", "2147478647"), "base-mainnet")
+      .searchBudgetMs,
+  ).toBe(2147478647);
   for (const [flag, value] of [
     ["--slippage-bps", "10001"],
     ["--search-budget-ms", "0"],
+    ["--search-budget-ms", "2147478648"],
     ["--search-budget-ms", "4294967296"],
     ["--sender", "0x123"],
   ]) {

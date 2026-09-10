@@ -128,6 +128,44 @@ func TestVerifyNetworksAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestEndpointTransportPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		endpoint string
+		allowed  bool
+	}{
+		{"https://example.com/secret", true},
+		{"http://127.0.0.1:8545/secret", true},
+		{"http://127.0.0.2:8545/secret", true},
+		{"http://[::1]:8545/secret", true},
+		{"http://localhost:8545/secret", true},
+		{"http://example.com/secret", false},
+		{"http://192.168.1.2/secret", false},
+		{"http://[2001:db8::1]/secret", false},
+		{"http://localhost.example.com/secret", false},
+		{"http://127.0.0.1.example.com/secret", false},
+	} {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			// Cancellation prevents network access after successful URL validation.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			client, _, err := Open(ctx, "base-mainnet", tc.endpoint)
+			if client != nil {
+				client.Close()
+				t.Fatal("unexpected live client")
+			}
+			if err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("unsafe error: %v", err)
+			}
+			if tc.allowed != errors.Is(err, context.Canceled) {
+				t.Fatalf("allowed=%t: %v", tc.allowed, err)
+			}
+			if !tc.allowed && !strings.Contains(err.Error(), "HTTPS") {
+				t.Fatalf("expected transport rejection: %v", err)
+			}
+		})
+	}
+}
+
 func TestRejectInvalidEnvironmentAndEndpoint(t *testing.T) {
 	for _, tc := range []struct{ name, environment, endpoint string }{
 		{"missing environment", "", "https://example.com"},

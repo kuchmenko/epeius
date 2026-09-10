@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { Code, ConnectError } from "@connectrpc/connect";
 import { Environment } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import { smokeQuoteArgs } from "../../../scripts/smoke";
 import { quoteClient } from "./client";
 import { USDC, WETH } from "./format";
 
@@ -30,6 +31,29 @@ assert.deepEqual(
 assert.equal(quote.routes[0].amountOutAtomic, "987654321");
 assert.equal(quote.routes[0].networkCostOutAtomic, undefined);
 assert.equal(quote.bestRouteId, undefined);
+const args = [...smokeQuoteArgs, "--json"];
+args[args.indexOf("--search-budget-ms") + 1] = "5500";
+const terminal = Bun.spawn(["bun", "apps/terminal/src/main.ts", ...args], {
+  env: {
+    ...process.env,
+    EPEIUS_ENVIRONMENT: "base-mainnet",
+    EPEIUS_ENGINE_URL: `${url}/partial`,
+  },
+  stdout: "pipe",
+  stderr: "pipe",
+});
+const [stdout, stderr, exitCode] = await Promise.all([
+  new Response(terminal.stdout).text(),
+  new Response(terminal.stderr).text(),
+  terminal.exited,
+]);
+assert.equal(exitCode, 0, stderr);
+const partial = JSON.parse(stdout);
+assert.equal(partial.searchComplete ?? false, false);
+assert.equal(partial.routes.length, 1);
+assert.equal(partial.routes[0].amountOutAtomic, "987654321");
+assert.equal(partial.errors.length, 3);
+assert.match(stderr, /Search was partial/);
 const slow = quoteClient(`${url}/slow`);
 const unaryCancel = new AbortController();
 const timer = setTimeout(() => unaryCancel.abort(), 150);

@@ -60,6 +60,18 @@ func TestBunConnectTransport(t *testing.T) {
 	}
 	_, slow := quotev1connect.NewQuoteServiceHandler(Handler{Client: reader, Environment: quotev1.Environment_ENVIRONMENT_BASE_MAINNET})
 	mux.Handle("/slow/", http.StripPrefix("/slow", slow))
+	reader.call = func(ctx context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
+		if calldataFee(data) != 100 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		if to == uniswapv3.Factory {
+			return poolResponse(common.HexToAddress("0x1234")), nil
+		}
+		return quoteResponse(987654321), nil
+	}
+	_, partial := quotev1connect.NewQuoteServiceHandler(Handler{Client: reader, Environment: quotev1.Environment_ENVIRONMENT_BASE_MAINNET})
+	mux.Handle("/partial/", http.StripPrefix("/partial", partial))
 	_, fixture := quotev1connect.NewQuoteServiceHandler(streamFixture{stopped: stopped})
 	mux.Handle("/fixture/", http.StripPrefix("/fixture", fixture))
 	server := httptest.NewServer(mux)

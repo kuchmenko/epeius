@@ -25,7 +25,7 @@ Quote options (all trade fields are explicit):
   --out             Output token address
   --amount-atomic   Positive integer in the input token's smallest unit
   --slippage-bps    Integer from 0 to 10000
-  --search-budget-ms Positive integer, at most 4294967295
+  --search-budget-ms Positive integer, at most 2147478647
   --json            Print protobuf JSON
 
 Use token addresses and atomic units; token-symbol lookup is not implemented.`;
@@ -106,7 +106,8 @@ export function quoteInput(args: string[], fallbackEnvironment?: string) {
     tokenOut: address("out"),
     amountInAtomic,
     slippageBps: integer("slippage-bps", 0, 10000),
-    searchBudgetMs: integer("search-budget-ms", 1, 4294967295),
+    // Leave response time within Bun's signed 32-bit timer limit.
+    searchBudgetMs: integer("search-budget-ms", 1, 2147483647 - 5000),
     json: values.json === true,
   };
 }
@@ -140,7 +141,10 @@ export async function main(args: string[]) {
     const client = quoteClient(
       process.env.EPEIUS_ENGINE_URL ?? "http://127.0.0.1:8080",
     );
-    const quote = await client.getQuote(input, { signal: abort.signal });
+    const quote = await client.getQuote(input, {
+      signal: abort.signal,
+      timeoutMs: input.searchBudgetMs + 5000,
+    });
     console.log(
       json ? toJsonString(QuoteFinalSchema, quote) : formatQuote(quote, input),
     );

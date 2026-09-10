@@ -39,6 +39,8 @@ EPEIUS_RPC_URL=https://mainnet.base.org
 
 Both are **read-only**. Wrong-chain RPCs fail startup. Public endpoints are rate-limited; use your provider URL if needed. Keep credentials in `.env`, which Git ignores. No test ETH is required.
 
+Remote RPC endpoints must use HTTPS. HTTP is allowed only for loopback IPs and `localhost`.
+
 `mainnet.base.org` can rate-limit a four-tier search. `https://base-rpc.publicnode.com` is another public Base mainnet endpoint; select it explicitly through `EPEIUS_RPC_URL`. There is no automatic retry or provider fallback.
 
 Optional settings: `EPEIUS_LISTEN_ADDR` defaults to `127.0.0.1:8080`; `EPEIUS_ENGINE_URL` defaults to `http://127.0.0.1:8080`. Change both when selecting a different port. The engine only binds loopback IPs.
@@ -58,7 +60,7 @@ bun run smoke                     # Read-only live check using the selected netw
 
 `quote` accepts explicit token addresses and an atomic input amount. It exits 0 when at least one route is returned, otherwise 1. Human output includes exact decimal and atomic amounts, block data, fee tiers, pools, and provider errors. Add `--json` for protobuf JSON. `execute` exits 1 without signing or sending.
 
-The terminal retains a 5-second transport deadline. Use a smaller search budget to receive partial results before that deadline; client cancellation or deadline expiry fails the request rather than returning partial data.
+The terminal's quote deadline is the search budget plus 5 seconds, allowing the engine to return partial results after the search budget expires. CLI budgets are limited to 2,147,478,647 ms to keep that deadline within Bun's timer range. Client cancellation or transport deadline expiry still fails the request rather than returning partial data.
 
 With engine running against Base mainnet, quote 1 WETH to native USDC:
 
