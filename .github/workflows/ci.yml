@@ -32,17 +32,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: scripts/testnet/package-lock.json
+          bun-version: 1.3.9
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.5.0
-      - run: npm ci --prefix scripts/testnet --ignore-scripts
-      - run: node scripts/testnet/prepare.mjs
-      - run: npm test --prefix scripts/testnet
+      - run: bun install --cwd scripts/testnet --frozen-lockfile --ignore-scripts
+      - run: bun scripts/testnet/prepare.mjs
+      - run: bun test scripts/testnet
       - run: forge test --root contracts
       - name: Check harness dependency files stayed unchanged
-        run: git diff --exit-code -- scripts/testnet/package-lock.json
+        run: git diff --exit-code -- scripts/testnet/bun.lock

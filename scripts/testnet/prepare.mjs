@@ -2,7 +2,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import solc from "solc";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const local = resolve(root, ".testnet");
@@ -29,50 +28,17 @@ if (
 ) {
   throw new Error("Pinned Pancake checkout differs or has local changes");
 }
-const input = {
-  language: "Solidity",
-  sources: {
-    "PancakeBootstrap.sol": {
-      content: readFileSync(
-        resolve(root, "contracts/pancake/PancakeBootstrap.sol"),
-        "utf8",
-      ),
-    },
-  },
-  settings: {
-    optimizer: { enabled: true, runs: 400 },
-    evmVersion: "istanbul",
-    metadata: { bytecodeHash: "none" },
-    outputSelection: {
-      "*": { "*": ["abi", "evm.bytecode", "evm.deployedBytecode"] },
-    },
-  },
-};
-const output = JSON.parse(
-  solc.compile(JSON.stringify(input), {
-    import: (path) => {
-      const match = /^@pancakeswap\/(v3-core|v3-lm-pool)\/(.*)$/.exec(path);
-      if (!match || match[2].includes(".."))
-        return { error: `Unsupported import ${path}` };
-      return {
-        contents: readFileSync(
-          resolve(repo, "projects", match[1], match[2]),
-          "utf8",
-        ),
-      };
-    },
-  }),
+execFileSync("forge", ["build", "--root", resolve(root, "contracts/pancake")], {
+  stdio: "inherit",
+});
+const pool = JSON.parse(
+  readFileSync(
+    resolve(local, "pancake-out/PancakeV3Pool.sol/PancakeV3Pool.json"),
+  ),
 );
-for (const error of output.errors ?? [])
-  if (error.severity === "error") throw new Error(error.formattedMessage);
-const pool =
-  output.contracts["@pancakeswap/v3-core/contracts/PancakeV3Pool.sol"]
-    .PancakeV3Pool;
-const actual = execFileSync(
-  "cast",
-  ["keccak", `0x${pool.evm.bytecode.object}`],
-  { encoding: "utf8" },
-).trim();
+const actual = execFileSync("cast", ["keccak", pool.bytecode.object], {
+  encoding: "utf8",
+}).trim();
 if (actual !== hash) throw new Error(`Compiled pool hash mismatch: ${actual}`);
 const npmPool = JSON.parse(
   readFileSync(
@@ -82,15 +48,19 @@ const npmPool = JSON.parse(
     ),
   ),
 );
-if (`0x${pool.evm.bytecode.object}` !== npmPool.bytecode)
+if (pool.bytecode.object !== npmPool.bytecode)
   throw new Error("Compiled pool differs from pinned released artifact");
-const bootstrap = output.contracts["PancakeBootstrap.sol"].PancakeBootstrap;
+const bootstrap = JSON.parse(
+  readFileSync(
+    resolve(local, "pancake-out/PancakeBootstrap.sol/PancakeBootstrap.json"),
+  ),
+);
 writeFileSync(
   resolve(local, "PancakeBootstrap.json"),
   JSON.stringify(
     {
       abi: bootstrap.abi,
-      bytecode: { object: `0x${bootstrap.evm.bytecode.object}` },
+      bytecode: { object: bootstrap.bytecode.object },
     },
     null,
     2,

@@ -66,7 +66,6 @@ export function options(args) {
   if (!["deploy", "seed", "check", "config"].includes(result.command))
     throw new Error("Expected deploy, seed, check, or config");
   const names = {
-    "--env": "env",
     "--manifest": "manifest",
     "--sender": "sender",
     "--keystore": "keystore",
@@ -172,7 +171,6 @@ export function fixture(
 }
 
 export async function run(o) {
-  if (o.env) process.loadEnvFile(o.env);
   const url = process.env.BASE_SEPOLIA_RPC_URL;
   if (!url || !/^https?:\/\//.test(url))
     throw new Error("BASE_SEPOLIA_RPC_URL must be an HTTP(S) URL");

@@ -1,9 +1,9 @@
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import test from "node:test";
 import {
   address,
   canonicalReceipt,
@@ -15,6 +15,52 @@ import {
 } from "./harness.mjs";
 
 const sender = "0x0000000000000000000000000000000000000001";
+test("Bun env files reach the CLI while exported RPC values take precedence", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-env-"));
+  const paths = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      paths.push(new URL(request.url).pathname);
+      assert.equal((await request.json()).method, "eth_chainId");
+      return Response.json({ result: "0x2105" });
+    },
+  });
+  try {
+    const envFile = resolve(dir, "test.env");
+    writeFileSync(envFile, `BASE_SEPOLIA_RPC_URL=${server.url}from-file\n`);
+    for (const exported of [false, true]) {
+      const env = { ...process.env };
+      delete env.BASE_SEPOLIA_RPC_URL;
+      if (exported) env.BASE_SEPOLIA_RPC_URL = `${server.url}from-export`;
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          `--env-file=${envFile}`,
+          new URL("harness.mjs", import.meta.url).pathname,
+          "check",
+        ],
+        { cwd: dir, env, stdout: "pipe", stderr: "pipe" },
+      );
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      assert.equal(code, 1);
+      assert.match(stderr, /Chain guard/);
+      assert.equal(stdout, "");
+      assert.ok(!stderr.includes(String(server.url)));
+    }
+    assert.deepEqual(paths, ["/from-file", "/from-export"]);
+    assert.throws(() => options(["check", "--env", envFile]), /Unknown option/);
+  } finally {
+    server.stop(true);
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test("preconfirmed receipts wait for a matching canonical block and refresh old zero hashes", async () => {
   const zeroHash = `0x${"0".repeat(64)}`;
   const blockHash = `0x${"a".repeat(64)}`;
@@ -156,7 +202,6 @@ const prepared =
     ),
   ) &&
   spawnSync("cast", ["--version"], { stdio: "ignore" }).status === 0;
-// Bun 1.3.9's node:test adapter ignores the skip option; the skip method works.
 (prepared ? test : test.skip)(
   "full dry deploy estimates every transaction without signing, broadcasting or writing manifest",
   async () => {
