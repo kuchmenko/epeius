@@ -34,7 +34,12 @@ export function castWallet(
     }
   };
   return {
-    account: () => cast(["wallet", "address", ...wallet]),
+    account: async () => {
+      const account = await cast(["wallet", "address", ...wallet]);
+      if (!/^0x[0-9a-fA-F]{40}$/.test(account))
+        throw new Error("Cast returned an invalid wallet account.");
+      return account;
+    },
     send: (tx: UnsignedTransaction) =>
       cast([
         "send",

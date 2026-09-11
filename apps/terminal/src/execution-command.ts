@@ -16,6 +16,39 @@ import { castWallet } from "./wallet-cast";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
+export async function connectExecution(
+  values: Record<string, string | undefined>,
+  configPath: string,
+  chain: string,
+  remoteChainId: string,
+  signal: AbortSignal,
+  allocations = false,
+) {
+  if (!values.keystore || !values["password-file"])
+    throw new Error("Provide --keystore and --password-file.");
+  const { expectedChainId, rpcUrlEnv, trusted } = await readExecutionConfig(
+    configPath,
+    chain,
+    allocations,
+  );
+  if (remoteChainId !== expectedChainId)
+    throw new Error(
+      `Engine chain ID must match configured chain ID ${expectedChainId}.`,
+    );
+  const rpcUrl = process.env[rpcUrlEnv];
+  if (!rpcUrl)
+    throw new Error("Configured RPC environment variable is missing.");
+  const rpc = readChain(rpcUrl, signal);
+  const wallet = castWallet(
+    values.keystore,
+    values["password-file"],
+    rpcUrl,
+    signal,
+  );
+  const signer = await wallet.account();
+  return { expectedChainId, trusted, rpc, wallet, signer };
+}
+
 export function parseAllocations(value: string) {
   let parsed: unknown;
   try {
@@ -56,6 +89,7 @@ export async function executionCommand(
   signal: AbortSignal,
   tokens: Token[],
   trade?: {
+    signer: string;
     route: RouteQuote;
     amountInAtomic: string;
     tokenIn: string;
@@ -83,26 +117,19 @@ export async function executionCommand(
       throw new Error(`--${name} requires the literal value yes.`);
   if (values["confirm-approval"] && values["confirm-swap"])
     throw new Error("Confirm only one action: approval or swap.");
-  const { expectedChainId, rpcUrlEnv, trusted } = await readExecutionConfig(
-    configPath,
-    chain,
-    allocations.length > 0,
-  );
-  if (remoteChainId !== expectedChainId)
-    throw new Error(
-      `Engine chain ID must match configured chain ID ${expectedChainId}.`,
+  const { expectedChainId, trusted, rpc, wallet, signer } =
+    await connectExecution(
+      values,
+      configPath,
+      chain,
+      remoteChainId,
+      signal,
+      allocations.length > 0,
     );
-  const rpcUrl = process.env[rpcUrlEnv];
-  if (!rpcUrl)
-    throw new Error("Configured RPC environment variable is missing.");
-  const rpc = readChain(rpcUrl, signal);
-  const wallet = castWallet(
-    values.keystore,
-    values["password-file"],
-    rpcUrl,
-    signal,
-  );
-  const signer = await wallet.account();
+  if (trade && !same(signer, trade.signer))
+    throw new Error(
+      "Wallet account changed after quote. Nothing sent; start a new trade.",
+    );
   return executePrepared(
     {
       signer,

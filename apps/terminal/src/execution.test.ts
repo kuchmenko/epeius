@@ -778,14 +778,16 @@ test("actual CLI gates cast sends, preserves terms, and keeps RPC secrets out of
   const directory = await mkdtemp(join(tmpdir(), "epeius-execute-"));
   const callsPath = join(directory, "calls.jsonl");
   const castPath = join(directory, "cast");
+  const accountPath = join(directory, "account.txt");
+  await Bun.write(accountPath, sender);
   // Stub cast only; the real CLI, Connect client, and HTTP RPC paths run.
   await Bun.write(
     castPath,
     `#!${process.execPath}
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args, rpc: process.env.ETH_RPC_URL, privateKey: process.env.ETH_PRIVATE_KEY}) + '\\n');
-console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
+console.log(args[0] === 'wallet' ? readFileSync(${JSON.stringify(accountPath)}, 'utf8') : '${hash}');
 `,
   );
   await chmod(castPath, 0o700);
@@ -798,6 +800,9 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   let tradeApproval = false;
   let alterTradeAmount = false;
   let rejection: PrepareExecutionResponse | undefined;
+  let changeAccountOnQuote = false;
+  let walletCallsBeforeRun = 0;
+  let informationalQuote = false;
   const blockHash = `0x${"b".repeat(64)}`;
   const blockRequests: unknown[] = [];
   const requests: unknown[] = [];
@@ -835,6 +840,15 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
           { headers: { "content-type": "application/proto" } },
         );
       if (path.endsWith("/GetQuote")) {
+        if (!informationalQuote) {
+          const walletCalls = (await Bun.file(callsPath).text())
+            .split("\n")
+            .filter((line) => line.includes('"wallet"')).length;
+          expect(walletCalls).toBeGreaterThan(walletCallsBeforeRun);
+          expect(trace).toContain("eth_chainId");
+          trace.push("account-and-chain-established-before-quote");
+        }
+        if (changeAccountOnQuote) await Bun.write(accountPath, router);
         const requestBody = fromBinary(
           QuoteRequestSchema,
           new Uint8Array(await request.arrayBuffer()),
@@ -850,6 +864,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         p.preparationId = `trade-p${quoteCount}`;
         if (tradeApproval && quoteCount === 1) {
           p.status = PreparationStatus.APPROVAL_REQUIRED;
+          p.simulatedAmountOutAtomic = "";
           p.approvalSpender = router;
           assert(p.transaction);
           p.approvalTransaction = {
@@ -937,21 +952,33 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     confirmation?: "approval" | "swap",
   ) => {
     trace.length = 0;
+    walletCallsBeforeRun = (await Bun.file(callsPath).exists())
+      ? (await Bun.file(callsPath).text())
+          .split("\n")
+          .filter((line) => line.includes('"wallet"')).length
+      : 0;
+    informationalQuote = args[0] === "quote";
     const command = [
       process.execPath,
       "apps/terminal/src/main.ts",
       ...args,
       "--config",
       config,
-      ...(args[0] === "trade"
+      ...(args[0] === "trade" || args[0] === "quote"
         ? ["--in", "IN", "--out", "OUT", "--amount-atomic", "101"]
-        : args.includes("--allocations")
-          ? ["--quote-id", "q1"]
-          : ["--quote-id", "q1", "--route-id", "r1"]),
-      "--keystore",
-      "/fixture/keystore",
-      "--password-file",
-      "/fixture/password",
+        : args[0] === "status" || args[0] === "tokens"
+          ? []
+          : args.includes("--allocations")
+            ? ["--quote-id", "q1"]
+            : ["--quote-id", "q1", "--route-id", "r1"]),
+      ...(["quote", "tokens", "status"].includes(args[0])
+        ? []
+        : [
+            "--keystore",
+            "/fixture/keystore",
+            "--password-file",
+            "/fixture/password",
+          ]),
     ];
     const stdoutPath = join(directory, "tty.stdout.jsonl");
     const child = Bun.spawn(
@@ -1345,6 +1372,35 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect(interactive.out).toContain('"outcome":"passed"');
     expect(interactive.out).not.toContain("Type swap");
     await capture("interactive-swap", interactive);
+    const priorQuotes = quoteCount;
+    const priorCalls = (await calls()).length;
+    await Bun.write(accountPath, "invalid account");
+    const invalidAccount = await run(["trade", "--confirm-swap", "yes"]);
+    expect(invalidAccount.err).toContain("invalid wallet account");
+    expect(quoteCount).toBe(priorQuotes);
+    expect((await calls()).length).toBe(priorCalls + 1);
+    await Bun.write(accountPath, sender);
+    changeAccountOnQuote = true;
+    const changedAccount = await run(["trade", "--confirm-swap", "yes"]);
+    expect(changedAccount.err).toContain("Wallet account changed after quote");
+    expect(trace).not.toContain("PrepareExecution");
+    expect(
+      (await calls()).filter((call) => call.args[0] === "send"),
+    ).toHaveLength(7);
+    changeAccountOnQuote = false;
+    enabled = false;
+    await Bun.write(
+      config,
+      (await Bun.file(config).text()).replace(
+        "execution_enabled=true",
+        "execution_enabled=false",
+      ),
+    );
+    await Bun.write(accountPath, "invalid account");
+    const beforeInfo = (await calls()).length;
+    for (const command of ["status", "tokens", "quote"])
+      expect((await run([command])).code).toBe(0);
+    expect((await calls()).length).toBe(beforeInfo);
   } finally {
     await server.stop(true);
     await rm(directory, { recursive: true });

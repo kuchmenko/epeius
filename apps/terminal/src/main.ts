@@ -10,7 +10,7 @@ import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
 import type { ExecutionResult } from "./execution";
-import { executionCommand } from "./execution-command";
+import { connectExecution, executionCommand } from "./execution-command";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import {
   chainFromStatus,
@@ -357,6 +357,23 @@ export async function main(rawArgs: string[]) {
         throw new Error("Provide --keystore and --password-file.");
       if (!chain.executionEnabled)
         throw new Error("Engine must enable execution on the connected chain.");
+      // Establish executable account/network before asking for the first trade quote.
+      // Execution still rereads config and discovers the account at its original read point.
+      const context = await connectExecution(
+        values,
+        config.path,
+        chain.key,
+        chain.chainId,
+        abort.signal,
+      );
+      const rpcChainId = await context.rpc.chainId();
+      if (
+        !/^0x[0-9a-f]+$/.test(rpcChainId) ||
+        BigInt(rpcChainId).toString() !== context.expectedChainId
+      )
+        throw new Error(
+          `RPC network must match configured chain ID ${context.expectedChainId}.`,
+        );
       return executionExitCode(
         await runTrade(
           {
@@ -377,6 +394,7 @@ export async function main(rawArgs: string[]) {
                 abort.signal,
                 chain.tokens,
                 {
+                  signer: context.signer,
                   route,
                   amountInAtomic,
                   tokenIn: tokenIn.address,
