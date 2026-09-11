@@ -144,6 +144,37 @@ function fixture() {
   return { io, p, sent, requests, reports, confirmations };
 }
 
+test("submitted JSONL keys and order precede receipt observation", async () => {
+  const f = fixture();
+  f.io.reportPreparation = true;
+  f.io.receipt = async () => {
+    expect(f.reports).toHaveLength(2);
+    expect(Object.keys(f.reports[0] as object)).toEqual([
+      "preparation",
+      "sent",
+    ]);
+    expect(Object.keys(f.reports[1] as object)).toEqual([
+      "transactionHash",
+      "submission",
+      "kind",
+      "verification",
+    ]);
+    expect(f.reports[1]).toEqual({
+      transactionHash: hash,
+      submission: "submitted",
+      kind: "swap",
+      verification: { outcome: "pending" },
+    });
+    return receipt();
+  };
+  await executePrepared(f.io);
+  expect(Object.keys(f.reports[2] as object)).toEqual([
+    "transactionHash",
+    "verification",
+  ]);
+  expect(f.sent).toHaveLength(1);
+});
+
 test("preview and canceled confirmation never send or recheck", async () => {
   for (const preview of [true, false]) {
     const f = fixture();
