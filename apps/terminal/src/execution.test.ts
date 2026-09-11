@@ -178,7 +178,9 @@ test("preview and canceled confirmation never send or recheck", async () => {
   for (const preview of [true, false]) {
     const f = fixture();
     f.io.confirm = async () => false;
-    expect(await executePrepared(f.io, preview)).toBe(preview ? 0 : 1);
+    expect(await executePrepared(f.io, preview)).toEqual({
+      kind: preview ? "preview" : "canceled",
+    });
     expect(f.sent).toHaveLength(0);
     expect(f.requests).toEqual([undefined]);
   }
@@ -186,7 +188,10 @@ test("preview and canceled confirmation never send or recheck", async () => {
 
 test("swap rechecks by preparation ID and reports hash separately from verification", async () => {
   const f = fixture();
-  expect(await executePrepared(f.io)).toBe(0);
+  expect(await executePrepared(f.io)).toEqual({
+    kind: "swap-verified",
+    transactionHash: hash,
+  });
   expect(f.requests).toEqual([undefined, "p1"]);
   expect(f.confirmations).toEqual(["swap"]);
   expect(f.sent).toHaveLength(1);
@@ -326,10 +331,6 @@ test("expired, rejected, and requote preparations fail closed", async () => {
 
 test("approval confirms separately, sends only exact approval and requires fresh quote", async () => {
   const f = fixture();
-  let approved = 0;
-  f.io.onApprovalVerified = () => {
-    approved++;
-  };
   f.io.reportPreparation = true;
   f.p.status = PreparationStatus.APPROVAL_REQUIRED;
   f.p.approvalSpender = router;
@@ -357,8 +358,10 @@ test("approval confirms separately, sends only exact approval and requires fresh
   f.io.swapOnly = false;
   f.requests.length = 0;
   f.reports.length = 0;
-  expect(await executePrepared(f.io)).toBe(0);
-  expect(approved).toBe(1);
+  expect(await executePrepared(f.io)).toEqual({
+    kind: "approval-confirmed",
+    transactionHash: hash,
+  });
   expect(f.reports[0]).toMatchObject({
     preparation: {
       preparationId: "p1",
@@ -373,8 +376,10 @@ test("approval confirms separately, sends only exact approval and requires fresh
     nextAction: expect.stringContaining("Rerun quote"),
   });
   f.io.receipt = async () => ({ ...receipt(), status: "0x0" });
-  expect(await executePrepared(f.io)).toBe(1);
-  expect(approved).toBe(1);
+  expect(await executePrepared(f.io)).toEqual({
+    kind: "failed",
+    transactionHash: hash,
+  });
   f.p.approvalTransaction.data = `0x095ea7b3${router.slice(2).padStart(64, "0")}${"f".repeat(64)}`;
   expect(() =>
     validatePreparation(f.p, sender, expectedChainId, 50, trusted),
@@ -512,7 +517,10 @@ test("recheck cannot refresh saved route quote basis", async () => {
     if (id) p.simulatedAmountOutAtomic = "1000000";
     return p;
   };
-  expect(await executePrepared(f.io)).toBe(0);
+  expect(await executePrepared(f.io)).toEqual({
+    kind: "swap-verified",
+    transactionHash: hash,
+  });
   expect(f.sent).toHaveLength(1);
 
   const changed = fixture();
@@ -669,7 +677,7 @@ test("send or receipt timeout reports unknown or pending and never retries", asy
         calls++;
         throw new Error("timeout");
       };
-    expect(await executePrepared(f.io)).toBe(1);
+    expect(await executePrepared(f.io)).toMatchObject({ kind: "unknown" });
     expect(calls).toBe(1);
     expect(f.reports.at(-1)).toMatchObject({
       submission: stage === "send" ? "unknown" : "pending_or_unknown",

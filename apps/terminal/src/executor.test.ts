@@ -275,7 +275,7 @@ test("executor recheck cannot change allocation terms and unknown send never ret
       await expect(run).rejects.toThrow();
       expect(sent).toBe(0);
     } else {
-      expect(await run).toBe(1);
+      expect(await run).toEqual({ kind: "unknown", transactionHash: null });
       expect(sent).toBe(1);
     }
   }

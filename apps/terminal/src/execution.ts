@@ -1,4 +1,4 @@
-import { toJsonString } from "@bufbuild/protobuf";
+import { type JsonValue, toJsonString } from "@bufbuild/protobuf";
 import {
   PreparationStatus,
   type PrepareExecutionResponse,
@@ -15,6 +15,44 @@ import {
 const hashPattern = /^0x[0-9a-fA-F]{64}$/;
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
+export type ExecutionResult =
+  | { kind: "preview" | "canceled" }
+  | {
+      kind: "approval-confirmed" | "swap-verified" | "failed";
+      transactionHash: string;
+    }
+  | { kind: "unknown"; transactionHash: string | null };
+
+// Existing JSONL payloads; the internal result discriminator is not serialized.
+export type ExecutionEvent =
+  | { preparation: JsonValue; sent: false }
+  | { sent: false; outcome: "canceled" }
+  | {
+      transactionHash: string;
+      submission: "submitted";
+      kind: "approval" | "swap";
+      verification: { outcome: "pending" };
+    }
+  | {
+      transactionHash: string;
+      verification:
+        | ReturnType<typeof verifyReceipt>
+        | { outcome: "receipt_success" | "failed" };
+      nextAction?: string;
+    }
+  | {
+      transactionHash: null;
+      submission: "unknown";
+      verification: { outcome: "unavailable" };
+      message: string;
+    }
+  | {
+      transactionHash: string;
+      submission: "pending_or_unknown";
+      verification: { outcome: "unavailable" };
+      message: string;
+    };
+
 export type ExecutionIO = {
   signer: string;
   expectedChainId: string;
@@ -28,13 +66,15 @@ export type ExecutionIO = {
   ) => Promise<boolean>;
   send: (tx: UnsignedTransaction) => Promise<string>;
   receipt: (hash: string) => Promise<Receipt>;
-  report: (result: unknown) => void;
+  report: (event: ExecutionEvent) => void;
   reportPreparation?: boolean;
   swapOnly?: boolean;
-  onApprovalVerified?: () => void;
 };
 
-export async function executePrepared(io: ExecutionIO, preview = false) {
+export async function executePrepared(
+  io: ExecutionIO,
+  preview = false,
+): Promise<ExecutionResult> {
   const rpcMatchesExpectedChain = async () => {
     const chainId = await io.chainId();
     return (
@@ -66,11 +106,11 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
       "Approval is still required. Start a new trade; nothing retried.",
     );
   if (preview) {
-    return 0;
+    return { kind: "preview" };
   }
   if (!(await io.confirm(kind, prepared))) {
     io.report({ sent: false, outcome: "canceled" });
-    return 1;
+    return { kind: "canceled" };
   }
   const checked = await io.prepare(prepared.preparationId);
   validatePreparation(
@@ -117,7 +157,7 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
       message:
         "Send attempt may have reached the network. Inspect wallet transactions; do not automatically resend.",
     });
-    return 1;
+    return { kind: "unknown", transactionHash: null };
   }
   io.report({
     transactionHash: hash,
@@ -133,8 +173,8 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
         : {
             outcome:
               same(receipt.transactionHash, hash) && receipt.status === "0x1"
-                ? "receipt_success"
-                : "failed",
+                ? ("receipt_success" as const)
+                : ("failed" as const),
           };
     io.report({
       transactionHash: hash,
@@ -146,12 +186,17 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
           }
         : {}),
     });
-    if (kind === "approval" && verification.outcome === "receipt_success")
-      io.onApprovalVerified?.();
-    return verification.outcome === "passed" ||
-      verification.outcome === "receipt_success"
-      ? 0
-      : 1;
+    return {
+      kind:
+        verification.outcome === "receipt_success"
+          ? "approval-confirmed"
+          : verification.outcome === "passed"
+            ? "swap-verified"
+            : verification.outcome === "unavailable"
+              ? "unknown"
+              : "failed",
+      transactionHash: hash,
+    };
   } catch {
     io.report({
       transactionHash: hash,
@@ -159,6 +204,6 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
       verification: { outcome: "unavailable" },
       message: "Receipt unavailable. Do not resend automatically.",
     });
-    return 1;
+    return { kind: "unknown", transactionHash: hash };
   }
 }

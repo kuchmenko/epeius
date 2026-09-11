@@ -62,7 +62,6 @@ export async function executionCommand(
     tokenIn: string;
     tokenOut: string;
     afterApproval: boolean;
-    onApprovalVerified: () => void;
   },
 ) {
   if (
@@ -192,7 +191,6 @@ export async function executionCommand(
       signer,
       reportPreparation: !!trade,
       swapOnly: trade?.afterApproval,
-      onApprovalVerified: trade?.onApprovalVerified,
       expectedChainId,
       slippageBps: Number(slippage),
       trusted,
