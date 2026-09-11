@@ -18,6 +18,7 @@ import {
   resolveToken,
   trustChainTokens,
 } from "./tokens";
+import { runTrade } from "./trade";
 
 const help = `Epeius — EVM quote terminal
 
@@ -27,10 +28,13 @@ Usage:
   bun run terminal -- status [--engine-url URL] [--json]
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
+  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH [--route-id ID] [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
   bun run terminal -- prepare|execute --chain KEY --quote-id ID --route-id ID --keystore PATH --password-file PATH [--slippage-bps N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
 prepare previews without sending. execute displays terms and asks approval or swap confirmation.
+trade quotes, selects the engine recommendation or --route-id, and executes. Selection uses raw output, not gas-adjusted output or a global best.
+After approval, trade refreshes once, reselects the engine recommendation (or keeps --route-id), and requires a fresh interactive swap confirmation.
 Approval always requires a fresh quote afterward. Execution output is JSON lines; confirmations go to stderr.`;
 
 type Globals = {
@@ -234,7 +238,12 @@ export async function main(rawArgs: string[]) {
         json,
         abort.signal,
       );
-    if (command !== "status" && command !== "tokens" && command !== "quote")
+    if (
+      command !== "status" &&
+      command !== "tokens" &&
+      command !== "quote" &&
+      command !== "trade"
+    )
       throw new Error("Unknown command. Run bun run terminal --help.");
     const values = options(
       args,
@@ -249,6 +258,16 @@ export async function main(rawArgs: string[]) {
               "amount",
               "amount-atomic",
               "search-budget-ms",
+              ...(command === "trade"
+                ? [
+                    "route-id",
+                    "keystore",
+                    "password-file",
+                    "slippage-bps",
+                    "confirm-approval",
+                    "confirm-swap",
+                  ]
+                : []),
             ],
     );
     const engineUrl = parsed.engineUrl
@@ -308,17 +327,59 @@ export async function main(rawArgs: string[]) {
     )
       throw new Error(`--search-budget-ms must be from 1 to ${MAX_BUDGET}.`);
     quoting = true;
-    const quote = await client.getQuote(
-      {
-        chain: chain.key,
-        chainId: chain.chainId,
-        tokenIn: tokenIn.address,
-        tokenOut: tokenOut.address,
-        amountInAtomic,
-        searchBudgetMs,
-      },
-      { signal: abort.signal, timeoutMs: searchBudgetMs + 5000 },
-    );
+    const getQuote = () =>
+      client.getQuote(
+        {
+          chain: chain.key,
+          chainId: chain.chainId,
+          tokenIn: tokenIn.address,
+          tokenOut: tokenOut.address,
+          amountInAtomic,
+          searchBudgetMs,
+        },
+        { signal: abort.signal, timeoutMs: searchBudgetMs + 5000 },
+      );
+    if (command === "trade") {
+      if (!values.keystore || !values["password-file"])
+        throw new Error("Provide --keystore and --password-file.");
+      if (!chain.executionEnabled)
+        throw new Error("Engine must enable execution on the connected chain.");
+      return await runTrade(
+        {
+          quote: getQuote,
+          report: (result) => console.log(JSON.stringify(result)),
+          execute: async (quote, route, afterApproval) => {
+            let approvalVerified = false;
+            const code = await executionCommand(
+              "trade",
+              {
+                ...values,
+                "quote-id": quote.quoteId,
+                "route-id": route.routeId,
+              },
+              config.path,
+              chain.key,
+              chain.chainId,
+              client,
+              abort.signal,
+              {
+                route,
+                amountInAtomic,
+                tokenIn: tokenIn.address,
+                tokenOut: tokenOut.address,
+                afterApproval,
+                onApprovalVerified: () => {
+                  approvalVerified = true;
+                },
+              },
+            );
+            return { code, approvalVerified };
+          },
+        },
+        values["route-id"],
+      );
+    }
+    const quote = await getQuote();
     console.log(
       json
         ? toJsonString(QuoteFinalSchema, quote)

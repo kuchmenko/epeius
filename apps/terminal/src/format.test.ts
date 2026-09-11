@@ -31,6 +31,7 @@ test("quote output includes chain, block, exact amounts, tiers, and partial warn
   });
   const quote = create(QuoteFinalSchema, {
     quoteId: "q",
+    bestRouteId: "500",
     searchComplete: false,
     block: { number: "123", hash: "0xabc" },
     routes: [
@@ -64,5 +65,12 @@ test("quote output includes chain, block, exact amounts, tiers, and partial warn
   expect(text).toContain("fee 500 pips");
   expect(text).toContain("Leg 2: pool pool2; tick spacing 200");
   expect(text).toContain("Search was partial");
-  expect(text).not.toMatch(/best|economic/i);
+  expect(text).toContain("Engine recommendation: 500");
+  expect(text).toContain(
+    "highest raw output among returned routes; not gas-adjusted or a global best",
+  );
+  quote.bestRouteId = undefined;
+  expect(formatQuote(quote, chain, input, output, "1")).not.toContain(
+    "Engine recommendation",
+  );
 });

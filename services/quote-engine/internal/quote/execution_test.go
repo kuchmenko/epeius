@@ -179,6 +179,19 @@ func TestPreparationRecheckPreservesEveryTransactionTerm(t *testing.T) {
 	}
 }
 
+func TestManualNonwinnerPreparationKeepsSelectedRouteAndMinimum(t *testing.T) {
+	h, request, _, _, _ := executionFixture(t)
+	winner := proto.Clone(testRoute()).(*quotev1.RouteQuote)
+	winner.RouteId, winner.AmountOutAtomic = "uni:winner", "20006"
+	selected := testRoute()
+	h.Store.saveQuote(&quotev1.QuoteRequest{Chain: "test", ChainId: "11155111", TokenIn: tokenA, TokenOut: tokenC, AmountInAtomic: "123456789"}, &quotev1.QuoteFinal{QuoteId: "manual", Routes: []*quotev1.RouteQuote{winner, selected}, BestRouteId: &winner.RouteId, Block: &quotev1.BlockContext{Number: "112230", Hash: blockHash}}, time.Now())
+	request.QuoteId = "manual"
+	got := prepare(t, h, request)
+	if got.Status != quotev1.PreparationStatus_PREPARATION_STATUS_READY || !proto.Equal(got.Route, selected) || got.AmountOutMinimumAtomic != "9927" {
+		t.Fatalf("recommendation replaced manual route: %+v", got)
+	}
+}
+
 func TestExecutionStillRequiresExplicitEnablementAndMatchingNetwork(t *testing.T) {
 	for _, mismatch := range []bool{false, true} {
 		h, r, _, _, count := executionFixture(t)

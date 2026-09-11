@@ -132,8 +132,8 @@ func TestHandlerDeterministicFeeOrderPinnedHashMissingPoolsAndErrors(t *testing.
 	if len(got.Errors) != 1 || got.Errors[0].GetRouteId() != "uniswap-v3:500" || got.Errors[0].Message != "pool discovery failed at the pinned block" {
 		t.Fatalf("errors = %+v", got.Errors)
 	}
-	if got.BestRouteId != nil || got.Routes[0].NetworkCostOutAtomic != nil || got.Routes[0].EffectiveOutAtomic != nil {
-		t.Fatal("cost, effective output, or best route unexpectedly populated")
+	if got.GetBestRouteId() != "uniswap-v3:10000" || got.Routes[0].NetworkCostOutAtomic != nil || got.Routes[0].EffectiveOutAtomic != nil {
+		t.Fatal("wrong recommendation or cost fields unexpectedly populated")
 	}
 }
 
@@ -163,6 +163,9 @@ func TestHandlerPartialBudgetKeepsFinishedRouteAndStopsPending(t *testing.T) {
 	}
 	if got.SearchComplete || len(got.Routes) != 1 || got.Routes[0].RouteId != "uniswap-v3:100" || got.Routes[0].AmountOutAtomic != "424242" {
 		t.Fatalf("partial result = %+v", got)
+	}
+	if got.GetBestRouteId() != "uniswap-v3:100" {
+		t.Fatal("partial search lost its best returned route")
 	}
 	if len(got.Errors) != 3 {
 		t.Fatalf("started candidates missing budget errors: %v", got.Errors)
@@ -311,7 +314,7 @@ func TestHandlerEmptyResultsDistinguishMissingPoolsFromFailures(t *testing.T) {
 		request.TokenIn, request.TokenOut = request.TokenOut, request.TokenIn
 		request.AmountInAtomic = "1"
 		got, err := callHandler(context.Background(), client, request)
-		if err != nil || len(got.Routes) != 0 || !got.SearchComplete {
+		if err != nil || len(got.Routes) != 0 || !got.SearchComplete || got.BestRouteId != nil {
 			t.Fatalf("%+v %v", got, err)
 		}
 		wantErrors := 0
@@ -596,5 +599,109 @@ func TestQuoteRejectsUnconfiguredConcurrency(t *testing.T) {
 	_, err := (Handler{}).GetQuote(context.Background(), connect.NewRequest(validRequest()))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition || err.Error() != "failed_precondition: quote concurrency is not configured" {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestBestRouteUsesExactIntegersAndCandidateOrderForTies(t *testing.T) {
+	for _, test := range []struct{ first, second, want string }{
+		{"9", "10", "uniswap-v3:500"},
+		{"9007199254740992", "9007199254740993", "uniswap-v3:500"},
+		{"1606938044258990275541962092341162602522202993782792835301377", "1606938044258990275541962092341162602522202993782792835301376", "uniswap-v3:100"},
+		{"17", "17", "uniswap-v3:100"},
+	} {
+		t.Run(test.first+"/"+test.second, func(t *testing.T) {
+			secondFinished := make(chan struct{})
+			client := readerFake{
+				snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
+				call: func(ctx context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
+					if to == testFactory {
+						return poolResponse(testFactory), nil
+					}
+					value := test.second
+					if calldataFee(data) == 100 {
+						select {
+						case <-secondFinished:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+						time.Sleep(10 * time.Millisecond)
+						value = test.first
+					} else {
+						close(secondFinished)
+					}
+					amount, _ := new(big.Int).SetString(value, 10)
+					response := quoteResponse(1)
+					amount.FillBytes(response[:32])
+					return response, nil
+				},
+			}
+			cfg := testChainConfig()
+			d := cfg.Deployments["uniswap-v3"]
+			d.Fees = []uint32{500, 100}
+			cfg.Deployments["uniswap-v3"] = d
+			h := Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 2}
+			response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := response.Msg
+			if got.GetBestRouteId() != test.want || !got.SearchComplete || len(got.Errors) != 0 || len(got.Routes) != 2 || got.Routes[0].RouteId != "uniswap-v3:100" || got.Routes[0].AmountOutAtomic != test.first || got.Routes[1].AmountOutAtomic != test.second {
+				t.Fatalf("unexpected selection/order: %+v", got)
+			}
+			for _, route := range got.Routes {
+				if route.NetworkCostOutAtomic != nil || route.EffectiveOutAtomic != nil {
+					t.Fatal("cost fields populated")
+				}
+			}
+		})
+	}
+}
+
+func TestBestRouteCanBeDirectOrTwoHopOnEitherVenue(t *testing.T) {
+	for _, venue := range []string{"uniswap-v3", "pancake-v3"} {
+		for _, twoHop := range []bool{false, true} {
+			t.Run(venue+map[bool]string{false: "/direct", true: "/two-hop"}[twoHop], func(t *testing.T) {
+				cfg := testChainConfig()
+				middle := common.HexToAddress(tokenB)
+				cfg.Tokens = append(cfg.Tokens, config.Token{Address: middle.Hex()})
+				cakeQuoter := common.HexToAddress(tokenC)
+				uni := cfg.Deployments["uniswap-v3"]
+				uni.Fees = []uint32{500}
+				cfg.Deployments["uniswap-v3"] = uni
+				cake := uni
+				cake.Kind, cake.Quoter = "pancake-v3", cakeQuoter.Hex()
+				cfg.Deployments["pancake-v3"] = cake
+				client := readerFake{
+					snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
+					call: func(_ context.Context, to common.Address, data []byte, block common.Hash) ([]byte, error) {
+						if block != common.HexToHash(blockHash) {
+							t.Error("unpinned quote")
+						}
+						if to == testFactory {
+							return poolResponse(testFactory), nil
+						}
+						in, out := common.BytesToAddress(data[4:36]), common.BytesToAddress(data[36:68])
+						winningVenue := (to == cakeQuoter) == (venue == "pancake-v3")
+						winningLeg := out == testUSDC && ((in == middle) == twoHop)
+						if winningVenue && winningLeg {
+							return quoteResponse(101), nil
+						}
+						return quoteResponse(7), nil
+					},
+				}
+				h := Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 4}
+				response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := venue + ":500"
+				if twoHop {
+					want += ":" + middle.Hex() + ":500"
+				}
+				if response.Msg.GetBestRouteId() != want || len(response.Msg.Routes) != 4 || len(response.Msg.Errors) != 0 || !response.Msg.SearchComplete {
+					t.Fatalf("%+v", response.Msg)
+				}
+			})
+		}
 	}
 }

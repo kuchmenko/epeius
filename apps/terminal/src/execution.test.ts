@@ -10,6 +10,8 @@ import {
   PreparationStatus,
   PrepareExecutionRequestSchema,
   PrepareExecutionResponseSchema,
+  QuoteFinalSchema,
+  QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import {
   type ExecutionIO,
@@ -292,6 +294,11 @@ test("expired, rejected, and requote preparations fail closed", async () => {
 
 test("approval confirms separately, sends only exact approval and requires fresh quote", async () => {
   const f = fixture();
+  let approved = 0;
+  f.io.onApprovalVerified = () => {
+    approved++;
+  };
+  f.io.reportPreparation = true;
   f.p.status = PreparationStatus.APPROVAL_REQUIRED;
   f.p.approvalSpender = router;
   assert(f.p.transaction);
@@ -301,13 +308,41 @@ test("approval confirms separately, sends only exact approval and requires fresh
     data: `0x095ea7b3${router.slice(2).padStart(64, "0")}${(101).toString(16).padStart(64, "0")}`,
   };
   f.p.transaction = undefined;
+  f.io.swapOnly = true;
+  await expect(executePrepared(f.io)).rejects.toThrow(
+    "Approval is still required",
+  );
+  expect(f.sent).toHaveLength(0);
+  expect(f.confirmations).toHaveLength(0);
+  expect(f.reports).toHaveLength(1);
+  expect(f.reports[0]).toMatchObject({
+    preparation: {
+      preparationId: "p1",
+      status: "PREPARATION_STATUS_APPROVAL_REQUIRED",
+    },
+    sent: false,
+  });
+  f.io.swapOnly = false;
+  f.requests.length = 0;
+  f.reports.length = 0;
   expect(await executePrepared(f.io)).toBe(0);
+  expect(approved).toBe(1);
+  expect(f.reports[0]).toMatchObject({
+    preparation: {
+      preparationId: "p1",
+      status: "PREPARATION_STATUS_APPROVAL_REQUIRED",
+    },
+    sent: false,
+  });
   expect(f.confirmations).toEqual(["approval"]);
   expect(f.sent).toEqual([f.p.approvalTransaction]);
   expect(f.requests).toEqual([undefined, "p1"]);
   expect(f.reports.at(-1)).toMatchObject({
     nextAction: expect.stringContaining("Rerun quote"),
   });
+  f.io.receipt = async () => ({ ...receipt(), status: "0x0" });
+  expect(await executePrepared(f.io)).toBe(1);
+  expect(approved).toBe(1);
   f.p.approvalTransaction.data = `0x095ea7b3${router.slice(2).padStart(64, "0")}${"f".repeat(64)}`;
   expect(() =>
     validatePreparation(f.p, sender, expectedChainId, 50, trusted),
@@ -679,6 +714,9 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   let remoteChainId = expectedChainId;
   let receiptReads = 0;
   let canonicalMismatch = false;
+  let quoteCount = 0;
+  let tradeApproval = false;
+  let alterTradeAmount = false;
   const blockHash = `0x${"b".repeat(64)}`;
   const blockRequests: unknown[] = [];
   const requests: unknown[] = [];
@@ -698,6 +736,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
                   key: "testnet",
                   chainId: remoteChainId,
                   connected: true,
+                  quotingSupported: true,
                   executionEnabled: enabled,
                   tokens: [
                     { address: input, symbol: "IN", decimals: 18 },
@@ -710,6 +749,44 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
           ),
           { headers: { "content-type": "application/proto" } },
         );
+      if (path.endsWith("/GetQuote")) {
+        const requestBody = fromBinary(
+          QuoteRequestSchema,
+          new Uint8Array(await request.arrayBuffer()),
+        );
+        expect(requestBody).toMatchObject({
+          tokenIn: input,
+          tokenOut: output,
+          amountInAtomic: "101",
+        });
+        quoteCount++;
+        p = prepared();
+        assert(p.route);
+        p.preparationId = `trade-p${quoteCount}`;
+        if (tradeApproval && quoteCount === 1) {
+          p.status = PreparationStatus.APPROVAL_REQUIRED;
+          p.approvalSpender = router;
+          assert(p.transaction);
+          p.approvalTransaction = {
+            ...p.transaction,
+            to: input,
+            data: `0x095ea7b3${router.slice(2).padStart(64, "0")}${(101).toString(16).padStart(64, "0")}`,
+          };
+          p.transaction = undefined;
+        }
+        return new Response(
+          toBinary(
+            QuoteFinalSchema,
+            create(QuoteFinalSchema, {
+              quoteId: `trade-q${quoteCount}`,
+              bestRouteId: "r1",
+              searchComplete: true,
+              routes: [p.route],
+            }),
+          ),
+          { headers: { "content-type": "application/proto" } },
+        );
+      }
       if (path.endsWith("/PrepareExecution")) {
         preparationTimeouts.push(request.headers.get("connect-timeout-ms"));
         requests.push(
@@ -719,6 +796,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
           ),
         );
         if (requests.length === 1) await Bun.sleep(5200);
+        if (alterTradeAmount) p.amountInAtomic = "102";
         return new Response(toBinary(PrepareExecutionResponseSchema, p), {
           headers: { "content-type": "application/proto" },
         });
@@ -772,10 +850,9 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         ...args,
         "--config",
         config,
-        "--quote-id",
-        "q1",
-        "--route-id",
-        "r1",
+        ...(args[0] === "trade"
+          ? ["--in", "IN", "--out", "OUT", "--amount-atomic", "101"]
+          : ["--quote-id", "q1", "--route-id", "r1"]),
         "--keystore",
         "/fixture/keystore",
         "--password-file",
@@ -932,6 +1009,61 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect(
       (await calls()).filter((call) => call.args[0] === "send"),
     ).toHaveLength(2);
+    canonicalMismatch = false;
+    const trade = await run(["trade", "--confirm-swap", "yes"]);
+    expect(trade.code).toBe(0);
+    const events = trade.out
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events[0]).toMatchObject({
+      quote: { quoteId: "trade-q1", bestRouteId: "r1" },
+    });
+    expect(events[1]).toMatchObject({
+      selection: { routeId: "r1", source: "engine", afterApproval: false },
+    });
+    expect(events[2]).toMatchObject({
+      preparation: { preparationId: "trade-p1", route: { routeId: "r1" } },
+      sent: false,
+    });
+    expect(events.at(-1).verification.outcome).toBe("passed");
+    quoteCount = 0;
+    tradeApproval = true;
+    const approved = await run(["trade", "--confirm-approval", "yes"]);
+    expect(approved.code).toBe(1);
+    expect(quoteCount).toBe(2);
+    const approvalEvents = approved.out
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      approvalEvents
+        .filter((e) => e.submission === "submitted")
+        .map((e) => e.kind),
+    ).toEqual(["approval"]);
+    expect(
+      approvalEvents
+        .filter((e) => e.preparation)
+        .map((e) => e.preparation.preparationId),
+    ).toEqual(["trade-p1", "trade-p2"]);
+    expect(approvalEvents.at(-1)).toEqual({ sent: false, outcome: "canceled" });
+    expect(requests.at(-1)).toMatchObject({
+      quoteId: "trade-q2",
+      routeId: "r1",
+      preparationId: "",
+    });
+    expect(
+      (await calls()).filter((call) => call.args[0] === "send"),
+    ).toHaveLength(4);
+    alterTradeAmount = true;
+    tradeApproval = false;
+    const altered = await run(["trade", "--confirm-swap", "yes"]);
+    expect(altered.err).toContain(
+      "Preparation does not match the selected quote",
+    );
+    expect(
+      (await calls()).filter((call) => call.args[0] === "send"),
+    ).toHaveLength(4);
   } finally {
     await server.stop(true);
     await rm(directory, { recursive: true });
