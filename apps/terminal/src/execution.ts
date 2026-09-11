@@ -202,13 +202,12 @@ export async function executePrepared(
         };
         break;
       case "approval":
+        if (!same(receipt.transactionHash, hash))
+          throw new Error("Receipt transaction hash mismatch.");
         verification = {
           action: "approval",
           evidence: {
-            outcome:
-              same(receipt.transactionHash, hash) && receipt.status === "0x1"
-                ? "receipt_success"
-                : "failed",
+            outcome: receipt.status === "0x1" ? "receipt_success" : "failed",
           },
         };
         break;
