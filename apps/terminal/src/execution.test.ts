@@ -726,6 +726,49 @@ test("send or receipt timeout reports unknown or pending and never retries", asy
   }
 });
 
+test("review mutation prevents send; invalid submission hash remains unknown without receipt or retry", async () => {
+  const mutated = fixture();
+  mutated.io.confirm = async (_kind, p) => {
+    assert(p.transaction);
+    p.transaction.data = "0xdead";
+    return true;
+  };
+  await expect(executePrepared(mutated.io)).rejects.toThrow(
+    "changed after confirmation",
+  );
+  expect(mutated.sent).toHaveLength(0);
+  const invalid = fixture();
+  let sends = 0;
+  let receipts = 0;
+  invalid.io.send = async () => {
+    sends++;
+    return "invalid hash";
+  };
+  invalid.io.receipt = async () => {
+    receipts++;
+    return receipt();
+  };
+  expect(await executePrepared(invalid.io)).toEqual({
+    kind: "unknown",
+    transactionHash: null,
+  });
+  expect(sends).toBe(1);
+  expect(receipts).toBe(0);
+});
+
+test("receipt identity and removed logs cannot establish token deltas", () => {
+  const r = receipt();
+  expect(
+    verifyReceipt(
+      { ...r, transactionHash: `0x${"b".repeat(64)}` },
+      hash,
+      prepared(),
+    ).outcome,
+  ).toBe("unavailable");
+  r.logs[0].removed = true;
+  expect(verifyReceipt(r, hash, prepared()).outcome).toBe("unavailable");
+});
+
 test("receipt success alone cannot pass; partial input, low output, and intermediate residue fail", () => {
   for (const logs of [
     [],

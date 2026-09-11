@@ -6,6 +6,7 @@ import {
   type UnsignedTransaction,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import {
+  assertPreparationUnchanged,
   type Receipt,
   type TrustedExecution,
   validatePreparation,
@@ -65,6 +66,7 @@ export type ExecutionIO = {
     p: PrepareExecutionResponse,
   ) => Promise<boolean>;
   send: (tx: UnsignedTransaction) => Promise<string>;
+  // Use chain.waitCanonicalReceipt: wallet/SDK success alone is not canonical evidence.
   receipt: (hash: string) => Promise<Receipt>;
   report: (event: ExecutionEvent) => void;
   reportPreparation?: boolean;
@@ -120,22 +122,7 @@ export async function executePrepared(
     io.slippageBps,
     io.trusted,
   );
-  // Compare all executable terms, including route, minimum, deadline and approval.
-  // A newer simulation block and output estimate do not change signed terms.
-  const immutable = (p: PrepareExecutionResponse) =>
-    toJsonString(PrepareExecutionResponseSchema, {
-      ...p,
-      simulationBlock: undefined,
-      simulatedAmountOutAtomic: "",
-      message: "",
-    });
-  if (
-    immutable(checked) !== immutable(prepared) ||
-    snapshot !== toJsonString(PrepareExecutionResponseSchema, prepared)
-  )
-    throw new Error(
-      "Preparation changed after confirmation. Nothing sent; rerun quote.",
-    );
+  assertPreparationUnchanged(prepared, checked, snapshot);
   if (!(await rpcMatchesExpectedChain()))
     throw new Error("RPC network changed. Nothing sent.");
   validatePreparation(

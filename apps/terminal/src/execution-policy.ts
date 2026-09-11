@@ -1,7 +1,9 @@
+import { toJsonString } from "@bufbuild/protobuf";
 import { type Address, encodeFunctionData, parseAbi } from "viem";
 import {
   PreparationStatus,
   type PrepareExecutionResponse,
+  PrepareExecutionResponseSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 
 const address = /^0x[0-9a-fA-F]{40}$/;
@@ -240,6 +242,28 @@ export function verifyReceipt(
       reason: "Receipt cannot establish standard ERC20 transfer invariants.",
     };
   }
+}
+
+export function assertPreparationUnchanged(
+  prepared: PrepareExecutionResponse,
+  checked: PrepareExecutionResponse,
+  snapshot: string,
+) {
+  // A newer simulation block, estimate and message do not change executable terms.
+  const immutable = (p: PrepareExecutionResponse) =>
+    toJsonString(PrepareExecutionResponseSchema, {
+      ...p,
+      simulationBlock: undefined,
+      simulatedAmountOutAtomic: "",
+      message: "",
+    });
+  if (
+    immutable(checked) !== immutable(prepared) ||
+    snapshot !== toJsonString(PrepareExecutionResponseSchema, prepared)
+  )
+    throw new Error(
+      "Preparation changed after confirmation. Nothing sent; rerun quote.",
+    );
 }
 
 export function validatePreparation(
