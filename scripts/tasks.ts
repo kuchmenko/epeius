@@ -79,6 +79,11 @@ async function task(name: string) {
         root,
         env,
       );
+      await run(
+        ["go", "install", "honnef.co/go/tools/cmd/staticcheck@2026.1"],
+        root,
+        env,
+      );
       await run(["go", "mod", "download"], join(root, "generated/go"));
       await run(["go", "mod", "download"], engineDir);
       break;
@@ -139,6 +144,15 @@ async function task(name: string) {
         throw new Error(`Run gofmt on: ${unformatted}`);
       for (const directory of [join(root, "generated/go"), engineDir]) {
         await run(["go", "vet", "./..."], directory);
+        if (directory === engineDir)
+          await run(
+            [
+              join(root, ".tools/bin/staticcheck"),
+              "-checks=all,-ST1000,-ST1005",
+              "./...",
+            ],
+            engineDir,
+          );
         // Go's test cache does not track the TypeScript subprocess inputs.
         await run(["go", "test", "-race", "-count=1", "./..."], directory);
       }

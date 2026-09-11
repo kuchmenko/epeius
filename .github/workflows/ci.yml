@@ -2,7 +2,13 @@ name: Check
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -30,6 +36,9 @@ jobs:
       - run: bun install --cwd scripts/testnet --frozen-lockfile --ignore-scripts
       - run: bun run setup
       - run: bun run check
+      - name: Check Protobuf compatibility
+        if: github.event_name == 'pull_request'
+        run: bunx --no-install buf breaking --against "https://github.com/kuchmenko/epeius.git#branch=main"
       - run: bun run check:generated
       - name: Check dependency files stayed unchanged
         run: git diff --exit-code -- bun.lock generated/go/go.mod generated/go/go.sum services/quote-engine/go.mod services/quote-engine/go.sum
@@ -49,6 +58,7 @@ jobs:
       - run: bun install --cwd scripts/testnet --frozen-lockfile --ignore-scripts
       - run: bun scripts/testnet/prepare.mjs
       - run: bun test scripts/testnet
+      - run: forge fmt --check contracts/src/Executor.sol contracts/test/Executor.t.sol contracts/test/ExecutorRouters.t.sol
       - run: forge test --root contracts
       - name: Check harness dependency files stayed unchanged
         run: git diff --exit-code -- scripts/testnet/bun.lock
