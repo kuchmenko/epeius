@@ -10,8 +10,17 @@ import {
 } from "../generated/abi";
 import { abiFiles, syncAbis } from "./abi";
 
-test("canonical ABI projections are reproducible and match committed files", async () => {
-  expect(await abiFiles()).toEqual(await abiFiles());
+test("canonical ABI projections regenerate into an empty build directory", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "epeius-abi-output-"));
+  try {
+    const expected = await abiFiles();
+    await syncAbis(false, temporary);
+    for (const [path, text] of expected)
+      expect(await readFile(join(temporary, path), "utf8")).toBe(text);
+    await syncAbis(true, temporary);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
   await syncAbis(true);
 });
 

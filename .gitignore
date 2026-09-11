@@ -10,3 +10,9 @@ coverage/
 /contracts/cache/
 /contracts/broadcast/
 /.testnet/
+/generated/abi/index.ts
+/generated/go/**/*.pb.go
+/generated/go/**/*.connect.go
+/generated/ts/**/*_pb.ts
+/services/quote-engine/internal/contractabi/*.go
+/services/quote-engine/internal/contractabi/*.json

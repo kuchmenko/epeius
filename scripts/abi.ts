@@ -88,17 +88,19 @@ func parse(source string) abi.ABI {
   return files;
 }
 
-export async function syncAbis(check: boolean) {
+export async function syncAbis(check: boolean, destination = root) {
   const files = await abiFiles();
   for (const directory of [goDirectory, tsDirectory]) {
-    const existing = await readdir(join(root, directory)).catch(() => []);
+    const existing = await readdir(join(destination, directory)).catch(
+      () => [],
+    );
     if (existing.some((name) => !files.has(`${directory}/${name}`)))
       throw new Error(
         `Stale generated ABI files in ${directory}; remove them explicitly.`,
       );
   }
   for (const [path, text] of files) {
-    const absolute = join(root, path);
+    const absolute = join(destination, path);
     if (check) {
       if ((await readFile(absolute, "utf8").catch(() => undefined)) !== text)
         throw new Error(

@@ -35,6 +35,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun install --cwd scripts/testnet --frozen-lockfile --ignore-scripts
       - run: bun run setup
+      - run: bun run generate
       - name: Check Protobuf compatibility
         if: github.event_name == 'pull_request'
         run: bunx --no-install buf breaking --against "https://github.com/kuchmenko/epeius.git#branch=main"
@@ -55,7 +56,12 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.5.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.4
+          cache: false
       - run: bun install --cwd scripts/testnet --frozen-lockfile --ignore-scripts
+      - run: bun scripts/abi.ts
       - run: bun scripts/testnet/prepare.mjs
       - run: bun test scripts/testnet
       - run: forge fmt --check contracts/src/Executor.sol contracts/test/Executor.t.sol contracts/test/ExecutorRouters.t.sol

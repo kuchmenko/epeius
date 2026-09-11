@@ -49,15 +49,34 @@ async function generatedFiles(directory: string): Promise<Map<string, string>> {
       withFileTypes: true,
     })) {
       const name = join(path, entry.name);
-      // ABI projections have their own canonical inputs and drift check.
-      if (name === "abi") continue;
       if (entry.isDirectory()) await visit(name);
-      else if (name.endsWith(".go") || name.endsWith(".ts"))
-        files.set(name, await Bun.file(join(directory, name)).text());
+      else files.set(name, await Bun.file(join(directory, name)).text());
     }
   }
   await visit("");
   return files;
+}
+
+async function generate(destination = root) {
+  await mkdir(destination, { recursive: true });
+  // Clear only compiler outputs, never the generated Go module's go.mod/go.sum.
+  for (const pattern of [
+    "generated/go/**/*.pb.go",
+    "generated/go/**/*.connect.go",
+    "generated/ts/**/*_pb.ts",
+  ]) {
+    for await (const path of new Bun.Glob(pattern).scan(destination))
+      await rm(join(destination, path));
+  }
+  await run([
+    "bunx",
+    "--no-install",
+    "buf",
+    "generate",
+    "--output",
+    destination,
+  ]);
+  await syncAbis(false, destination);
 }
 
 async function task(name: string) {
@@ -92,30 +111,23 @@ async function task(name: string) {
       break;
     }
     case "generate":
-      await run(["bunx", "--no-install", "buf", "generate"]);
-      await syncAbis(false);
+      await generate();
       break;
     case "check:generated": {
-      await syncAbis(true);
       const temporary = await mkdtemp(join(tmpdir(), "epeius-generation-"));
       try {
-        await run([
-          "bunx",
-          "--no-install",
-          "buf",
-          "generate",
-          "--output",
-          temporary,
-        ]);
-        const expected = await generatedFiles(join(temporary, "generated"));
-        const actual = await generatedFiles(join(root, "generated"));
+        // Neither run can reuse working-tree outputs or the other's files.
+        const first = join(temporary, "first");
+        const second = join(temporary, "second");
+        await generate(first);
+        await generate(second);
+        const expected = await generatedFiles(first);
+        const actual = await generatedFiles(second);
         if (
           actual.size !== expected.size ||
           [...expected].some(([name, text]) => actual.get(name) !== text)
         ) {
-          throw new Error(
-            "Generated bindings differ. Run bun run generate and remove stale generated files.",
-          );
+          throw new Error("Clean generation is not reproducible.");
         }
       } finally {
         await rm(temporary, { recursive: true, force: true });
@@ -123,7 +135,7 @@ async function task(name: string) {
       break;
     }
     case "check": {
-      await syncAbis(true);
+      await generate();
       await run(["bunx", "--no-install", "biome", "check", "."]);
       await run(["bunx", "--no-install", "buf", "lint"]);
       await run([

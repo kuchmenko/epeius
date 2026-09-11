@@ -10,17 +10,20 @@ bun run setup
 bun run generate
 ```
 
-`setup` installs pinned Go generators and Staticcheck in `.tools/bin` and downloads Go modules. No global protocol generator is needed. `generate` updates checked-in Go and TypeScript bindings from `proto/epeius/quote/v1/quote.proto`, plus contract ABI projections from `contracts/abi`. Edit the canonical inputs, not generated files. [ABI provenance and update instructions](../contracts/abi/README.md) describe the pinned router versions, upstream licenses, hashes, and independent encoding checks. Generation reads local files only; it never downloads an ABI or accepts one from the engine.
+`setup` installs pinned Go generators and Staticcheck in `.tools/bin` and downloads Go modules. No global protocol generator is needed. `generate` creates ignored Go and TypeScript bindings from `proto/epeius/quote/v1/quote.proto`, plus ABI projections from `contracts/abi`. Canonical inputs, generator configuration, dependency locks and `generated/go/go.mod`/`go.sum` remain tracked; generated source files do not. [ABI provenance and update instructions](../contracts/abi/README.md) describe the pinned router versions, upstream licenses, hashes, and independent encoding checks. Generation reads local files only; it never downloads an ABI or accepts one from the engine. Initial dependency/tool installation may need network access; generation works offline once prerequisites are installed.
+
+`bun run engine`, `terminal`, `smoke` and `e2e` generate before loading their source entrypoint; `bun run check` generates before typechecking, testing and building. Run `bun run generate` first when invoking `go build`, `go test`, `bun test` or a source file directly. Go embeds the local ABI mirrors at compile time; a source archive or container build must generate them before compiling. The compiled engine needs no code generator or ABI files at runtime. Do not remove generated files from an in-progress build context.
 
 Testnet tooling has a separate lockfile and dependency directory:
 
 ```bash
 bun install --cwd scripts/testnet --frozen-lockfile --ignore-scripts
+bun scripts/abi.ts
 bun scripts/testnet/prepare.mjs
 bun test scripts/testnet
 ```
 
-`--cwd scripts/testnet` keeps its `node_modules` local and uses `scripts/testnet/bun.lock`, separate from root workspace dependencies. `--ignore-scripts` prevents dependency lifecycle scripts. See [Testnet harness and contracts](testnet.md) before running network commands.
+`--cwd scripts/testnet` keeps its `node_modules` local and uses `scripts/testnet/bun.lock`, separate from root workspace dependencies. `--ignore-scripts` prevents dependency lifecycle scripts. ABI-only generation needs Bun and Go's `gofmt`, but not protobuf plugins. `bun run harness <arguments>` and `bun run --cwd scripts/testnet test` generate ABI outputs before importing harness code. See [Testnet harness and contracts](testnet.md) before running network commands.
 
 ## Verification
 
@@ -31,8 +34,8 @@ bun run smoke --chain base --in WETH --out USDC --amount 0.01
 forge test --root contracts
 ```
 
-- `check` runs Biome, TypeScript checks, Go vet, Staticcheck for the first-party quote engine, Go race tests, Bun tests, and builds. Staticcheck inherits its default checks except ST1005 because fixed outward simulation messages are sentence-style protocol text. Generated Go remains covered by formatting, vet, race, and generated-file drift checks, not Staticcheck. Run `bun run setup` first so the pinned Staticcheck binary is available. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
-- `check:generated` regenerates protobuf bindings in a temporary directory and compares them with checked-in files. It also checks canonical ABI hashes and compares deterministic TypeScript projections and Go embedded mirrors. `check` includes the same ABI drift check.
+- `check` runs Biome, TypeScript checks, Go vet, Staticcheck for the first-party quote engine, Go race tests, Bun tests, and builds. Staticcheck inherits its default checks except ST1005 because fixed outward simulation messages are sentence-style protocol text. Generated Go remains covered by formatting, vet, race, and generation reproducibility checks, not Staticcheck. Run `bun run setup` first so the pinned Staticcheck binary is available. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
+- `check:generated` generates protobuf and ABI outputs twice into separate empty temporary directories and compares their full contents. It validates canonical ABI hashes on both runs. It checks reproducibility without relying on local or committed outputs; it does not claim to detect stale committed bindings, since those are no longer tracked.
 - `smoke` uses the TOML endpoint and an already running engine. Pass one explicit configured chain, token pair and positive amount; the command above is an example, not a default. Use `--config <path>` for another configuration. It requires every engine chain to be connected, checks token identities against local configuration, and validates the requested quote's connected route endpoints, pinned block and stable raw-output winner. It is read-only and does not stop the engine. Run a separate invocation to check the reverse direction.
 - `forge test` runs local executor and harness tests, including authentic Uniswap/Pancake partial-input behavior. Use `forge test --root contracts --fuzz-runs 10000` for the larger valid-allocation fuzz run. Run `forge fmt --check contracts/src/Executor.sol contracts/test/Executor.t.sol contracts/test/ExecutorRouters.t.sol` to check the maintained Solidity sources. Neither command deploys to Base Sepolia.
 
@@ -49,8 +52,8 @@ For execution review, run the CLI with local Connect/RPC fixtures and a stub Cas
 | Path or stream | Producer | Interpretation |
 | --- | --- | --- |
 | `dist/epeius-engine` | engine build | Local Go executable; rebuilt by `bun run engine` |
-| `generated/go/`, `generated/ts/` | `bun run generate` | Checked-in protocol bindings; `check:generated` detects drift |
-| `generated/abi/`, `services/quote-engine/internal/contractabi/` | `bun scripts/abi.ts` or `bun run generate` | Typed TS ABIs and embedded geth ABIs generated from `contracts/abi`; never edit mirrors |
+| `generated/go/`, `generated/ts/` | `bun run generate` | Ignored protocol bindings; Go module manifests remain tracked |
+| `generated/abi/`, `services/quote-engine/internal/contractabi/` | `bun scripts/abi.ts` or `bun run generate` | Ignored typed TS ABIs and embedded geth ABIs generated from `contracts/abi`; never edit mirrors |
 | `.tools/bin/` | `bun run setup` | Ignored pinned Go tools |
 | stdout/stderr | check and smoke commands | Child output is inherited or summarized; nonzero exit means a check failed |
 | `contracts/out/`, `contracts/cache/` | Forge build/tests | Ignored compiler artifacts and cache |
