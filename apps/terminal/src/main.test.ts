@@ -10,7 +10,13 @@ import {
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { readConfig, readExecutionConfig, validateEngineUrl } from "./config";
+import type {
+  ExecutionOutcome,
+  ExecutionResult,
+  Verification,
+} from "./execution";
 import { configureChain } from "./execution-composition";
+import { executionExitCode } from "./main";
 import { decimalToAtomic, parseAtomic, resolveToken } from "./tokens";
 
 const token = (symbol: string, address: string, decimals: number) => ({
@@ -18,6 +24,30 @@ const token = (symbol: string, address: string, decimals: number) => ({
   symbol,
   address,
   decimals,
+});
+
+test("CLI exit mapping covers every execution outcome; verification is action-specific", () => {
+  const expected: Record<ExecutionOutcome, number> = {
+    preview: 0,
+    canceled: 1,
+    "approval-confirmed": 0,
+    "swap-verified": 0,
+    failed: 1,
+    unknown: 1,
+  };
+  for (const [kind, code] of Object.entries(expected))
+    expect(
+      executionExitCode({
+        kind,
+        transactionHash: `0x${"a".repeat(64)}`,
+      } as ExecutionResult),
+    ).toBe(code);
+  // @ts-expect-error Approval receipt success cannot claim swap delta proof.
+  const invalid: Verification = {
+    action: "swap",
+    evidence: { outcome: "receipt_success" },
+  };
+  void invalid;
 });
 
 test("decimal amounts convert exactly at 0, 6, and 18 decimals", () => {
@@ -32,7 +62,7 @@ test("decimal amounts convert exactly at 0, 6, and 18 decimals", () => {
   expect(() => decimalToAtomic("0", 18)).toThrow("positive");
   expect(decimalToAtomic(((1n << 256n) - 1n).toString(), 0)).toHaveLength(78);
   expect(() => decimalToAtomic((1n << 256n).toString(), 0)).toThrow("uint256");
-  for (const value of ["-1", "1e3", "01", "1."])
+  for (const value of ["-1", "+1", "1e3", "01", "1.", ".1", "1_0", "1.0000000"])
     expect(() => decimalToAtomic(value, 6)).toThrow();
 });
 

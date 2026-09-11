@@ -47,6 +47,53 @@ test("RPC preserves raw receipt, null polling and canonical block identity witho
   }
 });
 
+test("canonical polling rejects short, odd and zero hashes before reading the block", async () => {
+  const unsealed = [
+    undefined,
+    `0x${"0".repeat(64)}`,
+    `0x${"a".repeat(63)}`,
+    `0x${"a".repeat(65)}`,
+  ];
+  let reads = 0,
+    blocks = 0;
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const body = await request.json();
+      if (body.method === "eth_getBlockByNumber") {
+        blocks++;
+        expect(reads).toBe(5);
+        return Response.json({ id: body.id, result: { hash: blockHash } });
+      }
+      const block = reads < unsealed.length ? unsealed[reads] : blockHash;
+      reads++;
+      return Response.json({
+        id: body.id,
+        result: {
+          transactionHash: hash,
+          status: "0x1",
+          blockNumber: "0x1",
+          blockHash: block,
+          logs: [],
+        },
+      });
+    },
+  });
+  try {
+    expect(
+      (
+        await readChain(
+          server.url.href,
+          new AbortController().signal,
+        ).waitCanonicalReceipt(hash)
+      ).blockHash,
+    ).toBe(blockHash);
+    expect(blocks).toBe(1);
+  } finally {
+    server.stop(true);
+  }
+}, 7000);
+
 test("RPC malformed JSON, error and 503 fail once without exposing diagnostics", async () => {
   for (const response of [
     new Response("not json"),
