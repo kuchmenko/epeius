@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { keccak256 } from "viem";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const local = resolve(root, ".testnet");
@@ -36,9 +37,7 @@ const pool = JSON.parse(
     resolve(local, "pancake-out/PancakeV3Pool.sol/PancakeV3Pool.json"),
   ),
 );
-const actual = execFileSync("cast", ["keccak", pool.bytecode.object], {
-  encoding: "utf8",
-}).trim();
+const actual = keccak256(pool.bytecode.object);
 if (actual !== hash) throw new Error(`Compiled pool hash mismatch: ${actual}`);
 const npmPool = JSON.parse(
   readFileSync(
