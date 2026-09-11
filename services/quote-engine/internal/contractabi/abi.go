@@ -40,6 +40,11 @@ var pancakeV3RouterJSON string
 
 var PancakeV3Router = parse(pancakeV3RouterJSON)
 
+//go:embed UniswapPeripheryState.json
+var uniswapPeripheryStateJSON string
+
+var UniswapPeripheryState = parse(uniswapPeripheryStateJSON)
+
 //go:embed UniswapQuoterV2.json
 var uniswapQuoterV2JSON string
 

@@ -12,6 +12,7 @@ const goNames = new Set([
   "UniswapRouter02",
   "UniswapV3Factory",
   "UniswapQuoterV2",
+  "UniswapPeripheryState",
   "PancakeV3Router",
   "PancakeV3Factory",
   "PancakeQuoterV2",

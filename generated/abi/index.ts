@@ -942,6 +942,17 @@ export const pancakeQuoterV2Abi = [
 
 export const pancakeV3FactoryAbi = [
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "_poolDeployer",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
     "anonymous": false,
     "inputs": [
       {
@@ -1163,7 +1174,7 @@ export const pancakeV3FactoryAbi = [
     "inputs": [
       {
         "internalType": "uint24",
-        "name": "fee",
+        "name": "",
         "type": "uint24"
       }
     ],
@@ -1182,7 +1193,7 @@ export const pancakeV3FactoryAbi = [
     "inputs": [
       {
         "internalType": "uint24",
-        "name": "fee",
+        "name": "",
         "type": "uint24"
       }
     ],
@@ -1206,17 +1217,17 @@ export const pancakeV3FactoryAbi = [
     "inputs": [
       {
         "internalType": "address",
-        "name": "tokenA",
+        "name": "",
         "type": "address"
       },
       {
         "internalType": "address",
-        "name": "tokenB",
+        "name": "",
         "type": "address"
       },
       {
         "internalType": "uint24",
-        "name": "fee",
+        "name": "",
         "type": "uint24"
       }
     ],
@@ -1224,7 +1235,20 @@ export const pancakeV3FactoryAbi = [
     "outputs": [
       {
         "internalType": "address",
-        "name": "pool",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "lmPoolDeployer",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
         "type": "address"
       }
     ],
@@ -1234,6 +1258,19 @@ export const pancakeV3FactoryAbi = [
   {
     "inputs": [],
     "name": "owner",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "poolDeployer",
     "outputs": [
       {
         "internalType": "address",

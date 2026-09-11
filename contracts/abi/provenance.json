@@ -43,10 +43,10 @@
   },
   {
     "name": "PancakeV3Factory",
-    "origin": "https://unpkg.com/@pancakeswap/v3-core@1.0.2/artifacts/contracts/interfaces/IPancakeV3Factory.sol/IPancakeV3Factory.json",
+    "origin": "https://unpkg.com/@pancakeswap/v3-core@1.0.2/artifacts/contracts/PancakeV3Factory.sol/PancakeV3Factory.json",
     "license": "GPL-2.0-or-later",
-    "sourceSha256": "c8a14df1e73277cdf0b804310f30a236680ba36d92969bffae183ca736395d07",
-    "abiSha256": "53f217a62fa23fd25dff52777b409fa036792be49a3d51a3d413c6cbd6500443"
+    "sourceSha256": "a075f3314718f871cfe2370090b553ed0efa3fe7061a4f8be468542d7e433731",
+    "abiSha256": "f818b9eda2460f7c94deff948cee8659711928e4315bd5fbc04ba06059c3a3fb"
   },
   {
     "name": "PancakeV3Pool",
