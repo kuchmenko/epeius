@@ -107,11 +107,11 @@ func admitAllocations(chain Chain, saved storedQuote, requested []*quotev1.Route
 	var result []*quotev1.QuotedAllocation
 	for _, a := range requested {
 		if a == nil || len(a.AmountInAtomic) > 78 || !positiveInteger.MatchString(a.AmountInAtomic) {
-			return nil, errExecutorRoute
+			return nil, errors.New("invalid executor allocation amount")
 		}
 		amount, ok := new(big.Int).SetString(a.AmountInAtomic, 10)
 		if !ok || amount.BitLen() > 256 {
-			return nil, errExecutorRoute
+			return nil, errors.New("invalid executor allocation amount")
 		}
 		total.Add(total, amount)
 		var route *quotev1.RouteQuote

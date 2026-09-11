@@ -73,12 +73,18 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 	}
 	if !recheck {
 		if err := reader.Canonical(ctx, rpc.Snapshot{BlockNumber: saved.final.Block.Number, BlockHash: saved.final.Block.Hash}); err != nil {
-			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote block is no longer canonical")
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "The quote block could not be confirmed; request a fresh quote.")
 		}
 		var message string
 		if len(r.Allocations) > 0 {
 			allocations, err := quoteAllocations(ctx, chain, saved, r.Allocations)
 			if err != nil {
+				if errors.Is(err, errExecutorRoute) {
+					return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "Selected route is not supported by the configured executor.")
+				}
+				if errors.Is(err, errAllocationTotal) {
+					return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "Allocation inputs must sum to the quoted input amount.")
+				}
 				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor allocations could not be quoted")
 			}
 			p, message = executorPreparation(chain, saved, r, allocations, now, snapshot.Timestamp)
@@ -107,7 +113,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 	}
 	deadline, _ := strconv.ParseUint(response.DeadlineUnix, 10, 64)
 	if !time.Now().Before(p.expires) || snapshot.Timestamp >= deadline {
-		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "preparation expired")
+		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Quote or preparation expired; request a fresh quote.")
 	}
 	amount, _ := new(big.Int).SetString(response.AmountInAtomic, 10)
 	minimum, _ := new(big.Int).SetString(response.AmountOutMinimumAtomic, 10)
@@ -120,20 +126,23 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		var exists bool
 		p.approval, exists = h.Store.markApproval(r.QuoteId, response.Recipient+p.transaction.To, new(big.Int).SetBytes(allowanceBytes).Cmp(amount) < 0, time.Now())
 		if !exists || !time.Now().Before(saved.expires) {
-			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote expired during preparation")
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote expired or unavailable during preparation; request a fresh quote")
 		}
 	}
 	if new(big.Int).SetBytes(allowanceBytes).Cmp(amount) < 0 {
 		if recheck && !p.approval {
-			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "allowance changed; request a fresh quote")
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Approval state changed; request a fresh quote.")
 		}
 		data, _ := erc20ABI.Pack("approve", common.HexToAddress(p.transaction.To), amount)
 		response.Status = quotev1.PreparationStatus_PREPARATION_STATUS_APPROVAL_REQUIRED
-		response.Message = "approve the required amount, then request a fresh quote"
+		response.Message = "Approve the required amount, then request a fresh quote."
 		response.ApprovalSpender = p.transaction.To
 		response.ApprovalTransaction = &quotev1.UnsignedTransaction{ChainId: chain.ChainID, From: response.Recipient, To: response.TokenIn, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "100000"}
-		if err := reader.Canonical(ctx, snapshot); err != nil || !time.Now().Before(p.expires) {
-			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "approval check expired or block changed")
+		if err := reader.Canonical(ctx, snapshot); err != nil {
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "The approval check block could not be confirmed; request a fresh quote.")
+		}
+		if !time.Now().Before(p.expires) {
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Quote or preparation expired; request a fresh quote.")
 		}
 		response.SimulationBlock = &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
 		p.approval = true
@@ -141,7 +150,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		return connect.NewResponse(response), nil
 	}
 	if p.approval {
-		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "approval changed; request a fresh quote")
+		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Approval state changed; request a fresh quote.")
 	}
 	var output string
 	if len(response.Allocations) > 0 {
@@ -158,13 +167,13 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		output, err = h.Simulator.Simulate(ctx, p.transaction, response.Route, snapshot, amount, minimum)
 	}
 	if err != nil {
-		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "swap simulation could not prove safe execution")
+		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, simulationMessage(err))
 	}
 	if err := reader.Canonical(ctx, snapshot); err != nil {
-		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "simulation block is no longer canonical")
+		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "The simulation block could not be confirmed; request a fresh quote.")
 	}
 	if !time.Now().Before(p.expires) {
-		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "preparation expired during simulation")
+		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Quote or preparation expired; request a fresh quote.")
 	}
 	response.Status = quotev1.PreparationStatus_PREPARATION_STATUS_READY
 	response.Transaction = proto.CloneOf(p.transaction)
@@ -172,6 +181,16 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 	response.SimulatedAmountOutAtomic = output
 	h.Store.savePreparation(p)
 	return connect.NewResponse(response), nil
+}
+
+func simulationMessage(err error) string {
+	for _, known := range []error{errSimulationNotConfigured, errSimulationUnavailable, errSimulationTimeout, errSimulationEvidence, errSimulationInputAmount, errSimulationMinimumOutput, errSimulationProtectedBalance, errSimulationAllowance} {
+		if errors.Is(err, known) {
+			// Return only the fixed sentinel text, never an upstream wrapper.
+			return known.Error()
+		}
+	}
+	return "swap simulation could not prove safe execution"
 }
 
 // These constructors finish immutable terms and calldata once. Their failure
