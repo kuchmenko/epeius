@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 )
 
 type Caller interface {
@@ -45,7 +46,7 @@ func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big
 	if err != nil {
 		return common.Address{}, nil, errors.New("pool discovery failed at the pinned block")
 	}
-	values, err := factoryABI.Unpack("getPool", result)
+	values, err := evm.Unpack(factoryABI.Methods["getPool"], result)
 	if err != nil {
 		return common.Address{}, nil, errors.New("invalid factory response")
 	}
@@ -61,8 +62,10 @@ func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big
 	if err != nil {
 		return pool, nil, errors.New("quote failed at the pinned block")
 	}
-	values, err = quoterABI.Unpack("quoteExactInputSingle", result)
-	if err != nil {
+	values, err = evm.Unpack(quoterABI.Methods["quoteExactInputSingle"], result)
+	// The SDK represents uint160 as *big.Int and does not constrain its width
+	// during re-encoding. Enforce the actual QuoterV2 output type explicitly.
+	if err != nil || values[1].(*big.Int).BitLen() > 160 {
 		return pool, nil, errors.New("invalid quoter response")
 	}
 	output := values[0].(*big.Int)

@@ -102,6 +102,10 @@ func TestQuoteResponsesAndFailures(t *testing.T) {
 	pool := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	validPool := addressWord(pool)
 	validQuote := bytes.Join([][]byte{word(big.NewInt(9)), word(big.NewInt(1)), word(big.NewInt(2)), word(big.NewInt(3))}, nil)
+	dirtyPool := append([]byte(nil), validPool...)
+	dirtyPool[0] = 1
+	widePrice := append([]byte(nil), validQuote...)
+	widePrice[43] = 1 // Bit 160 is outside uint160, even though it fits a uint256 word.
 	tests := []struct {
 		name       string
 		factory    []byte
@@ -116,8 +120,12 @@ func TestQuoteResponsesAndFailures(t *testing.T) {
 		{"missing pool", make([]byte, 32), nil, nil, nil, common.Address{}, nil, "", 1},
 		{"factory call error", nil, errors.New("secret upstream detail"), nil, nil, common.Address{}, nil, "pool discovery failed at the pinned block", 1},
 		{"malformed factory response", []byte{1}, nil, nil, nil, common.Address{}, nil, "invalid factory response", 1},
+		{"dirty pool address padding", dirtyPool, nil, validQuote, nil, common.Address{}, nil, "invalid factory response", 1},
+		{"trailing factory bytes", append(append([]byte(nil), validPool...), 0), nil, validQuote, nil, common.Address{}, nil, "invalid factory response", 1},
 		{"quote call error", validPool, nil, nil, errors.New("secret upstream detail"), pool, nil, "quote failed at the pinned block", 2},
 		{"malformed quote response", validPool, nil, []byte{1}, nil, pool, nil, "invalid quoter response", 2},
+		{"trailing quoter bytes", validPool, nil, append(append([]byte(nil), validQuote...), 0), nil, pool, nil, "invalid quoter response", 2},
+		{"noncanonical uint160 price", validPool, nil, widePrice, nil, pool, nil, "invalid quoter response", 2},
 		{"zero output", validPool, nil, make([]byte, 128), nil, pool, nil, "quote returned zero output", 2},
 		{"valid output", validPool, nil, validQuote, nil, pool, big.NewInt(9), "", 2},
 	}
