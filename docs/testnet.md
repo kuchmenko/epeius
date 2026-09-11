@@ -41,6 +41,10 @@ Use separate encrypted harness and terminal wallets. Keep keystores and password
 
 RPC URL values are not printed or passed to subprocess arguments. Only password-file path reaches Foundry. There is no private-key option or implicit environment wallet. Signing is local with `cast mktx`; submission occurs only with `--broadcast` after configured chain ID, signer, contract links, balance, and gas checks pass.
 
+Ethereum transport, ABI encoding/decoding, CREATE addresses, hashing and units use pinned viem. Contract calls use the trusted [canonical ABI inputs](../contracts/abi/README.md), not ABIs supplied by an RPC response. Raw RPC requests disable retries and use a fresh 60-second abort signal covering response headers and body. Cast remains the encrypted wallet adapter; independent Cast encodings in tests are separate evidence.
+
+Contract return data must decode and re-encode to exactly the same bytes. Malformed padding, trailing bytes, invalid booleans and out-of-range values now fail admission rather than being silently truncated. This is an intentional stricter check before planning writes. V3 price, tick-range and liquidity recipes remain protocol-specific harness policy.
+
 ## Deploy and seed
 
 Set shell variables such as `ENV_FILE`, `HARNESS_ADDRESS`, `TERMINAL_ADDRESS`, `KEYSTORE`, and `PASSWORD_FILE`, then review dry runs first:

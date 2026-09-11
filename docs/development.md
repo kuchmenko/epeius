@@ -27,13 +27,13 @@ bun test scripts/testnet
 ```bash
 bun run check
 bun run check:generated
-bun run smoke
+bun run smoke --chain base --in WETH --out USDC --amount 0.01
 forge test --root contracts
 ```
 
 - `check` runs Biome, TypeScript checks, Go vet, Staticcheck for the first-party quote engine, Go race tests, Bun tests, and builds. Staticcheck inherits its default checks except ST1005 because fixed outward simulation messages are sentence-style protocol text. Generated Go remains covered by formatting, vet, race, and generated-file drift checks, not Staticcheck. Run `bun run setup` first so the pinned Staticcheck binary is available. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
 - `check:generated` regenerates protobuf bindings in a temporary directory and compares them with checked-in files. It also checks canonical ABI hashes and compares deterministic TypeScript projections and Go embedded mirrors. `check` includes the same ABI drift check.
-- `smoke` uses root TOML endpoint and an already running engine. It requires every engine chain to be connected and checks positive Base WETH/USDC quotes in both directions. It is read-only and does not stop the engine.
+- `smoke` uses the TOML endpoint and an already running engine. Pass one explicit configured chain, token pair and positive amount; the command above is an example, not a default. Use `--config <path>` for another configuration. It requires every engine chain to be connected, checks token identities against local configuration, and validates the requested quote's connected route endpoints, pinned block and stable raw-output winner. It is read-only and does not stop the engine. Run a separate invocation to check the reverse direction.
 - `forge test` runs local executor and harness tests, including authentic Uniswap/Pancake partial-input behavior. Use `forge test --root contracts --fuzz-runs 10000` for the larger valid-allocation fuzz run. Run `forge fmt --check contracts/src/Executor.sol contracts/test/Executor.t.sol contracts/test/ExecutorRouters.t.sol` to check the maintained Solidity sources. Neither command deploys to Base Sepolia.
 
 CI uses credential-free local RPC and Connect fixtures. Live testnet checks are separate. Passing local or dev checks is not evidence of production behavior.
