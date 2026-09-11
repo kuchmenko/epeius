@@ -81,13 +81,29 @@ scripts/                          Launch, generation, checks, smoke, and E2E run
 docs/                             Unified documentation
 ```
 
+## Engine implementation contracts
+
+`quote/handler.go` schedules opaque `QuoteCandidate` callbacks from `ProtocolQuoter`; it owns budgets, cancellation, concurrency, stable ordering and raw-output ranking. `v3.go` owns V3 candidate paths and quote/requote; `v3_deployments.go` owns its topology checks. The shared `Reader` requires EVM calls and snapshots, not a V3 provider.
+
+`PreparationStrategy` in `quote/preparation.go` selects a supported route or allocation plan, then builds one transaction, an independent spender and explicit simulation obligations from frozen economic terms. `routers.go` and `executor.go` implement the current variants. `execution.go` stores detached terms and rechecks them without rebuilding calldata. `tenderly.go` consumes balance/allowance probes; it does not infer router or executor policy from a route.
+
+`quote/composition.go` selects shipped implementations. `config.Load` accepts protocol validation supplied by startup; the shipped `config.ValidateV3Chain` checks current V3 and fixed-executor settings. New implementations can live beside the current ones without adding protocol switches to search, preparation lifecycle or simulation. The alternate-implementation test exercises config through quote and preparation with no V3 legs, different target/spender, stable ties and build-once rechecks. It is a test implementation, not a new supported protocol.
+
+Go RPC uses go-ethereum with canonical hash-pinned EIP-1898 calls. ABI decoding uses canonical artifacts and strict re-encoding where needed. Factory address padding, trailing bytes and an out-of-range QuoterV2 uint160 result are now rejected explicitly; the SDK alone does not enforce every ABI integer width.
+
 ## Terminal execution modules
 
-`main.ts` dispatches commands and maps typed results to the existing exit codes. `execution-command.ts` connects config, wallet, RPC, prompts, and JSONL output. `execution.ts` runs preparation, validation, consent, immutable recheck, one handoff, and verification using supplied operations. `execution-policy.ts` independently checks local configuration, amounts, calldata, and receipt deltas. `trade.ts` refreshes only after `approval-confirmed`; it does not infer approval success from an output callback.
+`main.ts` dispatches commands and maps typed results to the existing exit codes. `execution-command.ts` connects config, wallet, RPC, prompts, and JSONL output. `execution.ts` builds a validated plan once, then runs consent, immutable recheck, one send, and verification using supplied operations. `execution-policy.ts` owns common trust, amount, expiry and immutable-term checks. `uniswap.ts`, `pancake.ts` and `executor.ts` own their encoding, admission and presentation; `v3.ts` contains shared V3 path rules. `receipt.ts` proves the plan's explicit ERC20 delta obligations. `trade.ts` refreshes only after `approval-confirmed`; it does not infer approval success from an output callback.
 
 `ExecutionResult` distinguishes `preview`, `canceled`, `approval-confirmed`, `swap-verified`, `failed`, and `unknown`. Known submitted outcomes keep their transaction hash. Pre-send validation errors still reach the CLI error path. Preview and verified approval/swap map to exit 0; cancellation, failure, and unknown map to exit 1. A trade is complete only after a verified swap, not after approval. `ExecutionEvent` types the existing machine payloads without changing their wire fields.
 
-`config.ts` owns TOML parsing and conditional normalization for the terminal and E2E runner. `wallet-cast.ts` owns credentials, account discovery, and Cast submission; `chain.ts` owns read-only RPC and canonical receipt polling. `format.ts` renders human review with checked token metadata. No wallet registry, generic plugin layer, JavaScript private keys, WalletConnect, or account-abstraction implementation is present.
+Runtime `ExecutionAction`, `VerificationOutcome` and `ExecutionOutcome` constants name the existing string values. Action-specific verification and exhaustive switches prevent a swap proof from becoming an approval result or a new outcome from silently falling through to failure. Wire tests keep literal expected JSONL values independent of these constants.
+
+`config.ts` owns TOML parsing; `readExecutionConfig` receives protocol configuration from explicit `execution-composition.ts` wiring. Protocol-specific selector descriptions come from the selected implementation, not a formatting switch. The alternate-plan test uses a different target and spender, a custom selector and explicit custody obligations without changing the common flow.
+
+`wallet-cast.ts` owns credentials, account discovery, and Cast submission. `chain.ts` uses raw viem RPC requests and canonical receipt polling, with retries/batching disabled and a fresh 15-second abort covering headers and body. It does not delegate canonical acceptance to a convenience waiter. `format.ts` renders human review with checked token metadata. No wallet registry, generic plugin layer, JavaScript private keys, WalletConnect, or account-abstraction implementation is present.
+
+An approval receipt for a different transaction now produces the existing `pending_or_unknown` / `unavailable` event and an internal `unknown` result, retaining the submitted hash. It does not trigger quote refresh or another send. A matching canonical failed receipt remains `failed`. This intentional behavior correction is separate from the structural refactor.
 
 ## Extension rules
 
