@@ -2,7 +2,7 @@ import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { quoteClient } from "../apps/terminal/src/client";
-import { readConfig } from "../apps/terminal/src/config";
+import { readConfig, readSettings } from "../apps/terminal/src/config";
 import { decimalToAtomic, resolveToken } from "../apps/terminal/src/tokens";
 import { PreparationStatus } from "../generated/ts/epeius/quote/v1/quote_pb";
 
@@ -80,17 +80,7 @@ async function main(args: string[]) {
   if (!values.config)
     throw new Error("Provide --config for the seeded harness.");
   const config = await readConfig(values.config);
-  const settings = Bun.TOML.parse(await Bun.file(config.path).text()) as {
-    terminal?: { default_chain?: string };
-    chains?: Record<
-      string,
-      {
-        chain_id?: number;
-        execution_enabled?: boolean;
-        deployments?: Record<string, { kind?: string }>;
-      }
-    >;
-  };
+  const settings = await readSettings(config.path);
   const chainKey = values.chain ?? settings.terminal?.default_chain;
   if (!chainKey) throw new Error("Provide --chain or terminal.default_chain.");
   const chain = settings.chains?.[chainKey];
