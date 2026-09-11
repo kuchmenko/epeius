@@ -52,6 +52,8 @@ Statuses:
 - `REQUOTE_REQUIRED`: quote, block, allowance, or preparation is stale or unavailable.
 - `REJECTED`: execution or required safety evidence is unavailable or invalid.
 
+`APPROVAL_REQUIRED` contains only the validated approval transaction, never the swap transaction. `REJECTED` and `REQUOTE_REQUIRED` contain neither transaction. Clients check these statuses before comparing route or allocation terms, since rejected responses need not carry executable terms. Malformed requests and unknown direct route IDs remain Connect `InvalidArgument`; unknown allocation route IDs remain `REJECTED`.
+
 Preparation binds sender, recipient, atomic input, minimum output, route, deadline, and unsigned transaction. Rechecking may update simulation block, simulated output, and message, but may not change executable terms. IDs are process-local and expire; engine restart invalidates them.
 
 See [Execution contract](execution.md) for simulation evidence, deadlines, receipt semantics, partial consumption, and unsupported tokens and calls.
@@ -61,6 +63,10 @@ See [Execution contract](execution.md) for simulation evidence, deadlines, recei
 Terminal `--json` uses Protobuf JSON. Default-valued fields can be omitted, field names use JSON conventions, and decimal uint256 values remain strings. Diagnostics are separate stderr output, not protocol messages.
 
 Provider failures can be returned inside a successful `QuoteFinal`. Transport cancellation, deadline expiry, invalid arguments, unavailable engine/RPC, and failed preconditions fail the RPC. Clients must not convert an RPC failure into an empty successful quote.
+
+Preparation reasons for known engine failures are fixed safe text, not upstream error strings. Unknown upstream failures are generic. Missing Tenderly configuration, transport failure, timeout, incomplete evidence, and failed simulation safety checks remain distinct explanations under `REJECTED`. Changed approval state or inability to confirm a canonical block uses `REQUOTE_REQUIRED`. Canonical uncertainty is not a proven reorg, and failed simulation is not proof of actual token loss. Clients must not parse English messages as error codes or maintain a message whitelist.
+
+Terminal `ExecutionResult` and `ExecutionEvent` are internal TypeScript types, not additions to this protocol. Result kinds do not add a JSONL discriminator. Existing quote, selection, preparation, cancellation, submitted-hash, and verification payloads retain their fields and order. Human review goes to stderr; raw Protobuf JSON on stdout keeps envelope text and full transaction bytes. This is not a guarantee of redacting arbitrary output from a malicious engine.
 
 ## Compatibility
 

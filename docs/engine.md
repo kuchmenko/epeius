@@ -82,6 +82,18 @@ Configured token and deployment addresses are normalized to prefixed EVM address
 
 RPCs must support EIP-1898 block-hash calls. There is no fallback to latest state. `bestRouteId` recommends the greatest gross atomic output among returned routes, with stable candidate-order ties; it is neither gas-adjusted nor globally optimal on partial searches. Explicit executor preparation re-quotes one or two caller-chosen allocations at exact inputs and the original block; see [executor configuration](execution.md#configured-executor). Gas pricing, allocation optimization, Slipstream execution, databases, and indexing remain outside the current engine.
 
+## Preparation internals
+
+The in-memory store owns quote/preparation lookup, cloning, expiry, eviction, and approval bookkeeping. Its mutex does not cover network calls. Both stores retain their 30-second lifetime and 1024-entry limits; a process restart invalidates stored IDs. Recheck reads immutable prepared terms rather than rebuilding route, deadline, minimum, allocations, or calldata.
+
+Search and allocation re-quotes share a path quote operation that feeds each hop's fresh output into the next hop. Search skips a missing pool path; executor preparation rejects it and compares every pool identity with the stored route. The path operation does not select routes, calculate slippage, or manage approval.
+
+Before any allocation quote RPC, preparation validates every allocation's positive uint256 input, stored route, configured executor membership, distinct venue, enabled deployment, path, and total input. Invalid later allocations and total mismatches cannot cause a partial set of quote calls. Snapshot and canonical-block reads may still occur before those checks.
+
+Protocol kind, configured deployment ID, and fixed executor ABI venue are different values. The executor admits only its two configured deployments and maps them to venue 0/1. Another deployment of the same protocol can be searchable without being executor-compatible. Direct and executor preparation use separate calldata construction paths while sharing the immutable preparation contract.
+
+Known preparation failures return fixed safe reasons. Tenderly configuration, availability, timeout, evidence, input/output, protected-balance, and remaining-allowance failures reject execution without either transaction field. Canonical block uncertainty or changed approval state requires a new quote. Unknown upstream errors remain generic, without raw request or response details. These messages explain status; they are not machine error codes. See [protocol status rules](protocol.md#execution-preparation).
+
 ## Troubleshooting
 
 - **No readiness:** read stderr, validate TOML, and check that at least one RPC variable is set to the correct network.
