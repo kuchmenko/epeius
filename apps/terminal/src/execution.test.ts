@@ -17,7 +17,7 @@ import {
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type ExecutionIO, executePrepared } from "./execution";
 import { configureExecution } from "./execution-composition";
-import { validatePreparation } from "./execution-policy";
+import { uint256Decimal, validatePreparation } from "./execution-policy";
 import { expectedExecutorData } from "./executor";
 import { pancakeData } from "./pancake";
 import { type Receipt, verifyReceipt } from "./receipt";
@@ -159,6 +159,74 @@ function fixture() {
   };
   return { io, p, sent, requests, reports, confirmations };
 }
+
+test("uint256 decimal admission preserves zero and leading zeros without accepting other numeric syntax", () => {
+  expect(uint256Decimal("0000", "Amount")).toBe(0n);
+  expect(uint256Decimal("0009007199254740993", "Amount")).toBe(
+    9007199254740993n,
+  );
+  expect(uint256Decimal(`000${(1n << 256n) - 1n}`, "Amount")).toBe(
+    (1n << 256n) - 1n,
+  );
+  for (const value of [
+    "",
+    "+1",
+    "-1",
+    "1e3",
+    "0x10",
+    "1.0",
+    " 1",
+    (1n << 256n).toString(),
+  ])
+    expect(() => uint256Decimal(value, "Amount")).toThrow("uint256");
+});
+
+test("approval and swap map canonical success, revert and unavailable receipt explicitly", async () => {
+  for (const approval of [false, true])
+    for (const status of ["0x1", "0x0", "unavailable"]) {
+      const f = fixture();
+      if (approval) {
+        assert(f.p.transaction);
+        f.p.status = PreparationStatus.APPROVAL_REQUIRED;
+        f.p.approvalSpender = router;
+        f.p.approvalTransaction = {
+          ...f.p.transaction,
+          to: input,
+          data: `0x095ea7b3${router.slice(2).padStart(64, "0")}${"65".padStart(64, "0")}`,
+        };
+        f.p.transaction = undefined;
+      }
+      f.io.receipt = async () => {
+        if (status === "unavailable") throw new Error("offline");
+        return { ...receipt(), status };
+      };
+      const result = await executePrepared(f.io);
+      expect(result.kind).toBe(
+        status === "unavailable"
+          ? "unknown"
+          : status === "0x0"
+            ? "failed"
+            : approval
+              ? "approval-confirmed"
+              : "swap-verified",
+      );
+      expect(f.reports.at(-1)).toMatchObject({
+        transactionHash: hash,
+        verification: {
+          outcome:
+            status === "unavailable"
+              ? "unavailable"
+              : status === "0x0"
+                ? "failed"
+                : approval
+                  ? "receipt_success"
+                  : "passed",
+        },
+      });
+      expect(f.requests).toEqual([undefined, "p1"]);
+      expect(f.sent).toHaveLength(1);
+    }
+});
 
 test("submitted JSONL keys and order precede receipt observation", async () => {
   const f = fixture();

@@ -34,11 +34,22 @@ export type ReceiptObligations = {
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const transfer = encodeEventTopics({ abi: erc20Abi, eventName: "Transfer" })[0];
 
+export type SwapVerification =
+  | { outcome: "unavailable" | "failed"; reason: string }
+  | {
+      outcome: "passed" | "failed";
+      inputSpentAtomic: string;
+      outputReceivedAtomic: string;
+      routerIntermediateDeltas: Record<string, string>;
+      touchedTokenOwnerDeltas?: Record<string, string>;
+      reason: string;
+    };
+
 export function verifyReceipt(
   receipt: Receipt,
   hash: string,
   obligations: ReceiptObligations,
-) {
+): SwapVerification {
   if (!same(receipt.transactionHash, hash))
     return {
       outcome: "unavailable",

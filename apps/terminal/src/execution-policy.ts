@@ -42,18 +42,12 @@ export type ExecutionPlan = {
 } & ({ action: "approval" } | { action: "swap"; receipt: ReceiptObligations });
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-const uint256MaxDecimal = maxUint256.toString();
 
 export const uint256Decimal = (value: string, label: string) => {
-  const normalized = value.replace(/^0+(?=\d)/, "");
-  if (
-    !/^[0-9]+$/.test(value) ||
-    normalized.length > uint256MaxDecimal.length ||
-    (normalized.length === uint256MaxDecimal.length &&
-      normalized > uint256MaxDecimal)
-  )
-    throw new Error(`${label} must fit uint256.`);
-  return BigInt(normalized);
+  if (!/^[0-9]+$/.test(value)) throw new Error(`${label} must fit uint256.`);
+  const parsed = BigInt(value);
+  if (parsed > maxUint256) throw new Error(`${label} must fit uint256.`);
+  return parsed;
 };
 
 export function assertPreparationUnchanged(

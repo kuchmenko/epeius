@@ -23,11 +23,21 @@ import {
 import { runTrade } from "./trade";
 
 export function executionExitCode(result: ExecutionResult) {
-  return ["preview", "approval-confirmed", "swap-verified"].includes(
-    result.kind,
-  )
-    ? 0
-    : 1;
+  const outcome = result.kind;
+  switch (outcome) {
+    case "preview":
+    case "approval-confirmed":
+    case "swap-verified":
+      return 0;
+    case "canceled":
+    case "failed":
+    case "unknown":
+      return 1;
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`Unhandled execution outcome: ${String(unhandled)}`);
+    }
+  }
 }
 
 const help = `Epeius — EVM quote terminal

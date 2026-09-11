@@ -12,9 +12,20 @@ import {
   type TrustedExecution,
   validatePreparation,
 } from "./execution-policy";
-import { type Receipt, verifyReceipt } from "./receipt";
+import { type Receipt, type SwapVerification, verifyReceipt } from "./receipt";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+export type ExecutionAction = ExecutionPlan["action"];
+export type Verification =
+  | {
+      action: "approval";
+      evidence: { outcome: "receipt_success" | "failed" | "unavailable" };
+    }
+  | { action: "swap"; evidence: SwapVerification };
+export type VerificationOutcome =
+  | Verification["evidence"]["outcome"]
+  | "pending";
 
 export type ExecutionResult =
   | { kind: "preview" | "canceled" }
@@ -23,6 +34,7 @@ export type ExecutionResult =
       transactionHash: string;
     }
   | { kind: "unknown"; transactionHash: string | null };
+export type ExecutionOutcome = ExecutionResult["kind"];
 
 // Existing JSONL payloads; the internal result discriminator is not serialized.
 export type ExecutionEvent =
@@ -31,14 +43,12 @@ export type ExecutionEvent =
   | {
       transactionHash: string;
       submission: "submitted";
-      kind: "approval" | "swap";
-      verification: { outcome: "pending" };
+      kind: ExecutionAction;
+      verification: { outcome: Extract<VerificationOutcome, "pending"> };
     }
   | {
       transactionHash: string;
-      verification:
-        | ReturnType<typeof verifyReceipt>
-        | { outcome: "receipt_success" | "failed" };
+      verification: Verification["evidence"];
       nextAction?: string;
     }
   | {
@@ -62,7 +72,7 @@ export type ExecutionIO = {
   chainId: () => Promise<string>;
   prepare: (preparationId?: string) => Promise<PrepareExecutionResponse>;
   confirm: (
-    kind: "approval" | "swap",
+    kind: ExecutionAction,
     p: PrepareExecutionResponse,
     plan: ExecutionPlan,
   ) => Promise<boolean>;
@@ -73,6 +83,46 @@ export type ExecutionIO = {
   reportPreparation?: boolean;
   swapOnly?: boolean;
 };
+
+function verifiedResult(
+  verification: Verification,
+  transactionHash: string,
+): ExecutionResult {
+  switch (verification.action) {
+    case "approval": {
+      const outcome = verification.evidence.outcome;
+      switch (outcome) {
+        case "receipt_success":
+          return { kind: "approval-confirmed", transactionHash };
+        case "failed":
+          return { kind: "failed", transactionHash };
+        case "unavailable":
+          return { kind: "unknown", transactionHash };
+        default:
+          return impossible(outcome);
+      }
+    }
+    case "swap": {
+      const outcome = verification.evidence.outcome;
+      switch (outcome) {
+        case "passed":
+          return { kind: "swap-verified", transactionHash };
+        case "failed":
+          return { kind: "failed", transactionHash };
+        case "unavailable":
+          return { kind: "unknown", transactionHash };
+        default:
+          return impossible(outcome);
+      }
+    }
+    default:
+      return impossible(verification);
+  }
+}
+
+function impossible(value: never): never {
+  throw new Error(`Unhandled execution state: ${String(value)}`);
+}
 
 export async function executePrepared(
   io: ExecutionIO,
@@ -143,18 +193,31 @@ export async function executePrepared(
   });
   try {
     const receipt = await io.receipt(hash);
-    const verification =
-      plan.action === "swap"
-        ? verifyReceipt(receipt, hash, plan.receipt)
-        : {
+    let verification: Verification;
+    switch (plan.action) {
+      case "swap":
+        verification = {
+          action: "swap",
+          evidence: verifyReceipt(receipt, hash, plan.receipt),
+        };
+        break;
+      case "approval":
+        verification = {
+          action: "approval",
+          evidence: {
             outcome:
               same(receipt.transactionHash, hash) && receipt.status === "0x1"
-                ? ("receipt_success" as const)
-                : ("failed" as const),
-          };
+                ? "receipt_success"
+                : "failed",
+          },
+        };
+        break;
+      default:
+        return impossible(plan);
+    }
     io.report({
       transactionHash: hash,
-      verification,
+      verification: verification.evidence,
       ...(kind === "approval"
         ? {
             nextAction:
@@ -162,17 +225,7 @@ export async function executePrepared(
           }
         : {}),
     });
-    return {
-      kind:
-        verification.outcome === "receipt_success"
-          ? "approval-confirmed"
-          : verification.outcome === "passed"
-            ? "swap-verified"
-            : verification.outcome === "unavailable"
-              ? "unknown"
-              : "failed",
-      transactionHash: hash,
-    };
+    return verifiedResult(verification, hash);
   } catch {
     io.report({
       transactionHash: hash,
