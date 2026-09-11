@@ -1,3 +1,4 @@
+import { type Address, encodeFunctionData, parseAbi } from "viem";
 import {
   PreparationStatus,
   type PrepareExecutionResponse,
@@ -24,11 +25,21 @@ export type TrustedExecution = {
   >;
 };
 
-const word = (value: bigint) => {
-  if (value < 0n || value >= uint256Limit)
-    throw new Error("ABI word must fit uint256.");
-  return value.toString(16).padStart(64, "0");
-};
+// Reviewed router layouts differ in deadline placement. Never use an engine-supplied ABI.
+const uniswapABI = parseAbi([
+  "function exactInput((bytes path, address recipient, uint256 amountIn, uint256 amountOutMinimum) params) payable returns (uint256)",
+  "function multicall(uint256 deadline, bytes[] data) payable returns (bytes[])",
+]);
+const pancakeABI = parseAbi([
+  "function exactInput((bytes path, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum) params) payable returns (uint256)",
+]);
+const executorABI = parseAbi([
+  "function execute(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut, uint256 deadline, (uint8 venue, uint256 amountIn, (address tokenOut, uint24 fee)[] hops)[] allocations) returns (uint256)",
+]);
+const approvalABI = parseAbi([
+  "function approve(address spender, uint256 amount) returns (bool)",
+]);
+
 export const uint256Decimal = (value: string, label: string) => {
   const normalized = value.replace(/^0+(?=\d)/, "");
   if (
@@ -40,17 +51,11 @@ export const uint256Decimal = (value: string, label: string) => {
     throw new Error(`${label} must fit uint256.`);
   return BigInt(normalized);
 };
-const addressWord = (value: string) =>
-  value.slice(2).toLowerCase().padStart(64, "0");
-const dynamicBytes = (hex: string) => {
-  const value = hex.slice(2).toLowerCase();
-  return `${word(BigInt(value.length / 2))}${value.padEnd(Math.ceil(value.length / 64) * 64, "0")}`;
-};
 
 export function expectedSwapData(
   p: PrepareExecutionResponse,
   kind: "uniswap-v3" | "pancake-v3",
-) {
+): string {
   if (!p.route) throw new Error("Invalid route terms.");
   if (p.route.legs.some((leg) => leg.selector.case !== "feePips"))
     throw new Error("Invalid route terms.");
@@ -59,27 +64,60 @@ export function expectedSwapData(
       (leg) =>
         `${leg.tokenIn.slice(2).toLowerCase()}${leg.selector.value?.toString(16).padStart(6, "0")}`,
     )
-    .join("")}${p.route.legs.at(-1)?.tokenOut.slice(2).toLowerCase()}`;
-  const pathData = dynamicBytes(path);
+    .join("")}${p.route.legs.at(-1)?.tokenOut.slice(2).toLowerCase()}` as const;
+  const params = {
+    path,
+    recipient: p.recipient.toLowerCase() as Address,
+    amountIn: uint256Decimal(p.amountInAtomic, "Input amount"),
+    amountOutMinimum: uint256Decimal(
+      p.amountOutMinimumAtomic,
+      "Minimum output amount",
+    ),
+  };
+  const deadline = uint256Decimal(p.deadlineUnix, "Deadline");
   if (kind === "pancake-v3")
-    return `0xc04b8d59${word(32n)}${word(160n)}${addressWord(p.recipient)}${word(BigInt(p.deadlineUnix))}${word(BigInt(p.amountInAtomic))}${word(BigInt(p.amountOutMinimumAtomic))}${pathData}`;
-  const inner = `b858183f${word(32n)}${word(128n)}${addressWord(p.recipient)}${word(BigInt(p.amountInAtomic))}${word(BigInt(p.amountOutMinimumAtomic))}${pathData}`;
-  return `0x5ae401dc${word(BigInt(p.deadlineUnix))}${word(64n)}${word(1n)}${word(32n)}${word(BigInt(inner.length / 2))}${inner.padEnd(Math.ceil(inner.length / 64) * 64, "0")}`;
+    return encodeFunctionData({
+      abi: pancakeABI,
+      functionName: "exactInput",
+      args: [{ ...params, deadline }],
+    });
+  const inner = encodeFunctionData({
+    abi: uniswapABI,
+    functionName: "exactInput",
+    args: [params],
+  });
+  return encodeFunctionData({
+    abi: uniswapABI,
+    functionName: "multicall",
+    args: [deadline, [inner]],
+  });
 }
 
-export function expectedExecutorData(p: PrepareExecutionResponse) {
-  const bodies = p.allocations.map((allocation) => {
+export function expectedExecutorData(p: PrepareExecutionResponse): string {
+  const allocations = p.allocations.map((allocation) => {
     if (!allocation.route) throw new Error("Missing allocation route.");
     const route = allocation.route;
-    return `${word(route.provider === "uniswap-v3" ? 0n : 1n)}${word(BigInt(allocation.amountInAtomic))}${word(96n)}${word(BigInt(route.legs.length))}${route.legs.map((leg) => `${addressWord(leg.tokenOut)}${word(BigInt(leg.selector.value ?? 0))}`).join("")}`;
+    return {
+      venue: route.provider === "uniswap-v3" ? 0 : 1,
+      amountIn: uint256Decimal(allocation.amountInAtomic, "Allocation input"),
+      hops: route.legs.map((leg) => ({
+        tokenOut: leg.tokenOut.toLowerCase() as Address,
+        fee: leg.selector.value ?? 0,
+      })),
+    };
   });
-  let offset = BigInt(bodies.length * 32);
-  const offsets = bodies.map((body) => {
-    const current = word(offset);
-    offset += BigInt(body.length / 2);
-    return current;
+  return encodeFunctionData({
+    abi: executorABI,
+    functionName: "execute",
+    args: [
+      p.tokenIn.toLowerCase() as Address,
+      p.tokenOut.toLowerCase() as Address,
+      uint256Decimal(p.amountInAtomic, "Input amount"),
+      uint256Decimal(p.amountOutMinimumAtomic, "Minimum output amount"),
+      uint256Decimal(p.deadlineUnix, "Deadline"),
+      allocations,
+    ],
   });
-  return `0x19b5e3d5${addressWord(p.tokenIn)}${addressWord(p.tokenOut)}${word(BigInt(p.amountInAtomic))}${word(BigInt(p.amountOutMinimumAtomic))}${word(BigInt(p.deadlineUnix))}${word(192n)}${word(BigInt(bodies.length))}${offsets.join("")}${bodies.join("")}`;
 }
 
 export type Receipt = {
@@ -361,7 +399,11 @@ export function validatePreparation(
   const spender = executor ? trusted.executor?.address : deployment?.router;
   if (!spender) throw new Error("Missing configured spender.");
   if (approval) {
-    const expected = `0x095ea7b3${p.approvalSpender.slice(2).toLowerCase().padStart(64, "0")}${word(amountIn)}`;
+    const expected = encodeFunctionData({
+      abi: approvalABI,
+      functionName: "approve",
+      args: [spender.toLowerCase() as Address, amountIn],
+    });
     if (
       !address.test(p.approvalSpender) ||
       !same(p.approvalSpender, spender) ||

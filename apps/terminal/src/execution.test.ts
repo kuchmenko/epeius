@@ -605,6 +605,43 @@ test("swap calldata matches independent router ABI fixtures", () => {
   }
 });
 
+test("fee boundaries match independent Cast calldata and local admission", () => {
+  // Offline cast calldata exactInput((bytes,address,uint256,uint256)), then
+  // multicall(uint256,bytes[]): path IN / fee / OUT, sender, 101, 197, 4102444800.
+  for (const [fee, digest] of [
+    [0, "65a69c9134116b0c7be7482bc220c4ac2de0d3f477ab9da7dd7024ab69b39664"],
+    [
+      999999,
+      "11e0deb064daa3eb436e0e30df24af833f8ae442a79f659ecf84cecb64b6ec5a",
+    ],
+  ] as const) {
+    const p = prepared();
+    assert(p.route && p.transaction);
+    p.route.legs = [
+      {
+        ...p.route.legs[0],
+        tokenOut: output,
+        selector: { case: "feePips", value: fee },
+      },
+    ];
+    p.transaction.data = expectedSwapData(p, "uniswap-v3");
+    expect(
+      createHash("sha256")
+        .update(Buffer.from(p.transaction.data.slice(2), "hex"))
+        .digest("hex"),
+    ).toBe(digest);
+    const config = structuredClone(trusted);
+    config.deployments.uni.fees = [fee, 1000000];
+    expect(validatePreparation(p, sender, expectedChainId, 50, config)).toBe(
+      p.transaction,
+    );
+    p.route.legs[0].selector = { case: "feePips", value: 1000000 };
+    expect(() =>
+      validatePreparation(p, sender, expectedChainId, 50, config),
+    ).toThrow("not allowed");
+  }
+});
+
 test("rejects altered target, calldata, path, amount, deadline, recipient and approval spender", () => {
   const mutations: Array<(p: ReturnType<typeof prepared>) => void> = [
     (p) => {
