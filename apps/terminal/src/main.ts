@@ -9,7 +9,7 @@ import {
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
-import { executionCommand } from "./execution";
+import { executionCommand } from "./execution-command";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import {
   chainFromStatus,

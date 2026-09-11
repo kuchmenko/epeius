@@ -14,15 +14,14 @@ import {
   QuoteFinalSchema,
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import { type ExecutionIO, executePrepared } from "./execution";
 import {
-  type ExecutionIO,
-  executePrepared,
   expectedExecutorData,
   expectedSwapData,
   type Receipt,
   validatePreparation,
   verifyReceipt,
-} from "./execution";
+} from "./execution-policy";
 
 const addr = (digit: string) => `0x${digit.repeat(40)}`;
 const sender = addr("1"),

@@ -3,11 +3,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create } from "@bufbuild/protobuf";
+import { executePrepared } from "../apps/terminal/src/execution";
 import {
-  executePrepared,
   expectedSwapData,
   type Receipt,
-} from "../apps/terminal/src/execution";
+} from "../apps/terminal/src/execution-policy";
 import { runTrade, type TradeIO } from "../apps/terminal/src/trade";
 import {
   BlockContextSchema,

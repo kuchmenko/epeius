@@ -5,15 +5,15 @@ import {
   type PrepareExecutionResponse,
   PrepareExecutionResponseSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import { executePrepared } from "./execution";
+import { parseAllocations } from "./execution-command";
 import {
-  executePrepared,
   expectedExecutorData,
-  parseAllocations,
   type Receipt,
   type TrustedExecution,
   validatePreparation,
   verifyReceipt,
-} from "./execution";
+} from "./execution-policy";
 
 const addr = (digit: string) => `0x${digit.repeat(40)}`;
 const input = addr("1"),
