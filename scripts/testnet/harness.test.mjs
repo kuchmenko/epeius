@@ -4,11 +4,19 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { erc20Abi } from "viem";
+import {
+  pancakeV3PoolAbi,
+  uniswapPeripheryStateAbi,
+  uniswapV3FactoryAbi,
+  uniswapV3PoolAbi,
+} from "../../generated/abi/index.ts";
 import {
   address,
   canonicalReceipt,
   createAddress,
   createRpc,
+  decodeResult,
   fixture,
   loadProfile,
   options,
@@ -342,6 +350,9 @@ test("seed preflights every pool before estimating an earlier createPool", async
   const previousURL = process.env.HARNESS_ISOLATED_RPC;
   const methods = [];
   let spacingCalls = 0;
+  let valid = false;
+  const estimates = [];
+  const pool = "0x0000000000000000000000000000000000000024";
   process.env.HARNESS_ISOLATED_RPC = "https://isolated.invalid/rpc";
   const word = (value) => `0x${value.replace(/^0x/, "").padStart(64, "0")}`;
   const numberWord = (value) => word(BigInt(value).toString(16));
@@ -362,6 +373,11 @@ test("seed preflights every pool before estimating an earlier createPool", async
     if (method === "eth_chainId") result = "0x14a34";
     else if (method === "eth_getCode") result = "0x6000";
     else if (method === "eth_getTransactionCount") result = "0x0";
+    else if (method === "eth_estimateGas") {
+      assert.ok(valid, "preflight must finish before any estimate");
+      estimates.push(params[0]);
+      result = "0x10000";
+    } else if (method === "eth_gasPrice") result = "0x1";
     else if (method === "eth_call") {
       const { to, data } = params[0];
       const selector = data.slice(0, 10);
@@ -381,8 +397,10 @@ test("seed preflights every pool before estimating an earlier createPool", async
       else if (selector === "0xd5f39488") result = word(pancake.deployer);
       else if (selector === "0x22afcccb") {
         spacingCalls++;
-        result = numberWord(spacingCalls === 1 ? 60 : 0);
-      } else if (selector === "0x1698ee82") result = word("0");
+        result = numberWord(valid || spacingCalls === 1 ? 60 : 0);
+      } else if (selector === "0x1698ee82") result = word(valid ? pool : "0");
+      else if (selector === "0x3850c7bd")
+        result = `0x${"0".repeat(64 * 6)}${"0".repeat(63)}1`;
       else throw new Error(`Unexpected eth_call selector ${selector}`);
     } else throw new Error(`Unexpected method ${method}`);
     return Response.json({ result });
@@ -415,23 +433,18 @@ test("seed preflights every pool before estimating an earlier createPool", async
     writeFileSync(config, source);
     writeFileSync(manifestPath, JSON.stringify(manifest));
     const before = await Bun.file(manifestPath).text();
-
-    await assert.rejects(
-      run(
-        options([
-          "seed",
-          "--sender",
-          sender,
-          "--recipient",
-          sender,
-          "--config",
-          config,
-          "--manifest",
-          manifestPath,
-        ]),
-      ),
-      /invalid tick spacing/,
-    );
+    const args = options([
+      "seed",
+      "--sender",
+      sender,
+      "--recipient",
+      sender,
+      "--config",
+      config,
+      "--manifest",
+      manifestPath,
+    ]);
+    await assert.rejects(run(args), /invalid tick spacing/);
 
     assert.equal(spacingCalls, 2);
     assert.equal(methods.includes("eth_estimateGas"), false);
@@ -440,6 +453,65 @@ test("seed preflights every pool before estimating an earlier createPool", async
       false,
     );
     assert.equal(await Bun.file(manifestPath).text(), before);
+    valid = true;
+    await run(args);
+    // The profile's 500 fee is wide; 3000 is narrow. For 18/6 decimals,
+    // the aligned center is -276360; widths are 12000 and 120 ticks.
+    const vectors = [
+      [
+        tokens.A.address,
+        "mint(address,uint256)",
+        sender,
+        "1000000000000000000000000",
+      ],
+      [
+        tokens.A.address,
+        "approve(address,uint256)",
+        manifest.seeder,
+        "1000000000000000000000000",
+      ],
+      [tokens.B.address, "mint(address,uint256)", sender, "1000000000000"],
+      [
+        tokens.B.address,
+        "approve(address,uint256)",
+        manifest.seeder,
+        "1000000000000",
+      ],
+      [pool, "initialize(uint160)", String((1n << 96n) / 1000000n)],
+      [
+        manifest.seeder,
+        "seed(address,address,int24,int24,uint128)",
+        uni.factory,
+        pool,
+        "-288360",
+        "-264360",
+        "10000000000000000",
+      ],
+      [pool, "initialize(uint160)", String((1n << 96n) / 1000000n)],
+      [
+        manifest.seeder,
+        "seed(address,address,int24,int24,uint128)",
+        uni.factory,
+        pool,
+        "-276480",
+        "-276240",
+        "10000000000000000",
+      ],
+    ];
+    assert.equal(estimates.length, vectors.length);
+    for (const [index, [to, signature, ...values]] of vectors.entries()) {
+      const oracle = spawnSync("cast", ["calldata", signature, ...values], {
+        encoding: "utf8",
+      });
+      assert.equal(oracle.status, 0, oracle.stderr);
+      assert.deepEqual(estimates[index], {
+        from: sender,
+        to,
+        data: oracle.stdout.trim(),
+      });
+    }
+    assert.equal(await Bun.file(manifestPath).text(), before);
+    assert.ok(methods.every((method) => !/send|sign/i.test(method)));
   } finally {
     globalThis.fetch = previousFetch;
     if (previousURL === undefined) delete process.env.HARNESS_ISOLATED_RPC;
@@ -934,5 +1006,100 @@ test("each RPC has a fresh 60-second abort covering body consumption", async () 
   } finally {
     globalThis.fetch = previousFetch;
     AbortSignal.timeout = previousTimeout;
+  }
+});
+
+test("static returndata requires exact canonical words including signed int24", () => {
+  // Independent ABI words, not serialized with the production encoder.
+  const word = (n) =>
+    (n < 0n ? (1n << 256n) + n : n).toString(16).padStart(64, "0");
+  for (const value of [-8388608n, -60n, -1n, 0n, 60n, 8388607n])
+    assert.equal(
+      decodeResult(
+        uniswapV3FactoryAbi,
+        "feeAmountTickSpacing",
+        `0x${word(value)}`,
+      ),
+      Number(value),
+    );
+  assert.equal(decodeResult(erc20Abi, "decimals", `0x${word(255n)}`), 255);
+  assert.equal(
+    decodeResult(uniswapPeripheryStateAbi, "factory", `0x${word(1n)}`),
+    sender,
+  );
+  const slot = [(1n << 96n) + 7n, -60n, 1n, 2n, 3n, 255n, 1n]
+    .map(word)
+    .join("");
+  assert.deepEqual(decodeResult(uniswapV3PoolAbi, "slot0", `0x${slot}`), [
+    (1n << 96n) + 7n,
+    -60,
+    1,
+    2,
+    3,
+    255,
+    true,
+  ]);
+  const pancakeSlot = [1n << 96n, -1n, 0n, 0n, 0n, 65536n, 0n]
+    .map(word)
+    .join("");
+  assert.deepEqual(
+    decodeResult(pancakeV3PoolAbi, "slot0", `0x${pancakeSlot}`),
+    [1n << 96n, -1, 0, 0, 0, 65536, false],
+  );
+  for (const [abi, name, data] of [
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", "0x"],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${"00".repeat(31)}`],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${word(60n)}00`],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${word(8388608n)}`],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${word(-8388609n)}`],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${word(0xffffffn)}`],
+    [uniswapPeripheryStateAbi, "factory", `0x${word((1n << 160n) + 1n)}`],
+    [erc20Abi, "decimals", `0x${word(256n)}`],
+    [uniswapV3PoolAbi, "slot0", `0x${slot.slice(0, -64)}`],
+    [uniswapV3PoolAbi, "slot0", `0x${slot}${word(0n)}`],
+    [uniswapV3PoolAbi, "slot0", `0x${slot.slice(0, -64)}${word(2n)}`],
+    [uniswapV3PoolAbi, "slot0", `0x${pancakeSlot}`],
+    [uniswapPeripheryStateAbi, "factory", "private malformed body"],
+  ]) {
+    assert.throws(() => decodeResult(abi, name, data), {
+      message: `Invalid ${name} returndata`,
+    });
+  }
+});
+
+test("malformed linkage returndata stops before wallet, nonce or transaction planning", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.BASE_SEPOLIA_RPC_URL;
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-linkage-"));
+  const methods = [];
+  process.env.BASE_SEPOLIA_RPC_URL = "https://linkage.invalid";
+  globalThis.fetch = async (_url, request) => {
+    const { method } = JSON.parse(request.body);
+    methods.push(method);
+    if (method === "eth_chainId") return Response.json({ result: "0x14a34" });
+    if (method === "eth_getCode") return Response.json({ result: "0x6000" });
+    assert.equal(method, "eth_call");
+    // Correct low 20 bytes, but nonzero address padding was previously sliced away.
+    return Response.json({
+      result: `0x${"1".repeat(24)}${uni.factory.slice(2)}`,
+    });
+  };
+  try {
+    const path = resolve(dir, "manifest.json");
+    await assert.rejects(
+      run(options(["deploy", "--sender", sender, "--manifest", path])),
+      /Invalid factory returndata/,
+    );
+    assert.equal(existsSync(path), false);
+    assert.ok(
+      methods.every((method) =>
+        ["eth_chainId", "eth_getCode", "eth_call"].includes(method),
+      ),
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.BASE_SEPOLIA_RPC_URL;
+    else process.env.BASE_SEPOLIA_RPC_URL = previousURL;
+    rmSync(dir, { recursive: true });
   }
 });

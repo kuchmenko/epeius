@@ -14,6 +14,7 @@ import {
   decodeFunctionResult,
   encodeDeployData,
   encodeFunctionData,
+  encodeFunctionResult,
   erc20Abi,
   getContractAddress,
   http,
@@ -74,7 +75,16 @@ export function createRpc(url) {
 }
 
 export function decodeResult(abi, functionName, data) {
-  return decodeFunctionResult({ abi, functionName, data });
+  try {
+    if (!isHex(data, { strict: true })) throw new Error();
+    const result = decodeFunctionResult({ abi, functionName, data });
+    // Decoding alone accepts extra bytes and noncanonical address/integer words.
+    if (!same(encodeFunctionResult({ abi, functionName, result }), data))
+      throw new Error();
+    return result;
+  } catch {
+    throw new Error(`Invalid ${functionName} returndata`);
+  }
 }
 
 export async function canonicalReceipt(rpc, hash, previous) {
