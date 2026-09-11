@@ -1,7 +1,24 @@
 language: en-US
+tone_instructions: "Report only reachable defects, security issues, broken contracts, and tests that can pass wrong behavior. Check existing test layers before claiming missing coverage."
+chat:
+  art: false
+  auto_reply: false
 reviews:
   profile: quiet
   request_changes_workflow: false
+  high_level_summary: false
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  review_details: false
+  review_status: false
+  enable_prompt_for_ai_agents: false
   auto_apply_labels: false
   auto_assign_reviewers: false
   auto_review:
@@ -9,14 +26,41 @@ reviews:
     drafts: false
     auto_incremental_review: true
     auto_pause_after_reviewed_commits: 0
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "github-actions[bot]"
   path_filters:
     - "!generated/**"
+    - "!**/bun.lock"
+    - "!contracts/abi/**"
+    - "!contracts/fixtures/**"
+    - "!docs/base-sepolia-acceptance.json"
     - "!dist/**"
     - "!.tools/**"
     - "!.testnet/**"
     - "!contracts/out/**"
     - "!contracts/cache/**"
     - "!contracts/broadcast/**"
+  path_instructions:
+    - path: "apps/terminal/src/**"
+      instructions: "Focus on exact local admission and consent, immutable rechecks, one wallet handoff with no resend, canonical receipts, token deltas, and credential-safe errors. Use docs/execution.md."
+    - path: "services/quote-engine/**"
+      instructions: "Focus on canonical-block quote and preparation consistency, deterministic concurrency, cloned stored state, deployment isolation, exact integers, and fixed safe simulation errors."
+    - path: "contracts/src/**"
+      instructions: "Focus on full-spend token accounting, actual hop outputs, exact allowance cleanup, reentrancy, deadlines, route validation, dust isolation, aggregate minimum, and caller-only payout. Use contracts/README.md."
+    - path: "**/*test*"
+      instructions: "Report only tests whose assertions can pass a plausible wrong implementation. Search other test layers before claiming coverage is missing."
+    - path: "proto/**"
+      instructions: "Flag breaking wire changes, reused removed fields or names, presence changes, and missing Go/TypeScript regeneration."
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    title:
+      mode: "off"
+    description:
+      mode: "off"
+    issue_assessment:
+      mode: "off"
   finishing_touches:
     docstrings:
       enabled: false
@@ -29,6 +73,27 @@ reviews:
     fix_ci:
       enabled: false
     resolve_merge_conflict:
+      enabled: false
+  tools:
+    biome:
+      enabled: false
+    buf:
+      enabled: false
+    golangci-lint:
+      enabled: false
+    markdownlint:
+      enabled: false
+    yamllint:
+      enabled: false
+    gitleaks:
+      enabled: false
+    trufflehog:
+      enabled: false
+    opengrep:
+      enabled: false
+    semgrep:
+      enabled: false
+    osvScanner:
       enabled: false
 knowledge_base:
   code_guidelines:

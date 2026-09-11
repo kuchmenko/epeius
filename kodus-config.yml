@@ -1,22 +1,45 @@
 version: 2.0
 automatedReviewActive: true
+showStatusFeedback: false
 reviewCadence:
   type: automatic
 runOnDraft: false
 pullRequestApprovalActive: false
 isRequestChangesActive: false
-byokModel: ""
+enableCommittableSuggestions: false
 reviewOptions:
   bug: true
   performance: true
   security: true
   business_logic: true
 suggestionControl:
-  applyFiltersToKodyRules: false
+  applyFiltersToKodyRules: true
   severityLevelFilter: high
+summary:
+  generatePRSummary: false
 ideRulesSyncEnabled: true
+kodyRulesGeneratorEnabled: false
+kodyKnowledgeApproval:
+  enabled: true
+customMessages:
+  globalSettings:
+    hideComments: false
+    suggestionCopyPrompt: false
+  errorReviewMessage:
+    status: "off"
+    content: ""
+  startReviewMessage:
+    status: "off"
+    content: ""
+  endReviewMessage:
+    status: "off"
+    content: ""
 ignorePaths:
   - "generated/**"
+  - "**/bun.lock"
+  - "contracts/abi/**"
+  - "contracts/fixtures/**"
+  - "docs/base-sepolia-acceptance.json"
   - "dist/**"
   - ".tools/**"
   - ".testnet/**"

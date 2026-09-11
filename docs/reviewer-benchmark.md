@@ -28,9 +28,16 @@ This bootstrap pull request is not benchmark evidence. Reviewer configuration is
 
 Use defects where correct and incorrect behavior differ on asymmetric inputs: values above 2^53, equal-output tie order under reversed completion, partial-search status, approval followed by fresh preparation, an unknown result after wallet handoff, partial router input consumption, floor-after-sum allocations such as 37/64, or a harness write missing its broadcast gate.
 
-## Record
+## Ten-pull-request scorecard
 
-For each reviewer and commit, record:
+One review round is one ready, non-draft head SHA. All four reviewers must target that same SHA. If a reviewer is rate-limited, skipped, or failed, record that result; do not rerun it against another commit and count it as the same round. Capture all outputs before applying fixes.
+
+Use one row per reviewer and round:
+
+| PR | Round | Head SHA | Category | Reviewer | Start UTC | End UTC | Cost | Findings | Valid | Invalid or withdrawn | Cross-reviewer duplicates | Unique valid | Stale | Repeated after fix | Missed known issue | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+
+Classify findings as follows:
 
 - valid findings: reachable issue, violated contract, and decisive evidence;
 - invalid findings: contradicted by code, tests, docs, or current requirements;
@@ -42,4 +49,10 @@ For each reviewer and commit, record:
 - failed, skipped, or incomplete runs;
 - available token or monetary cost, without estimating missing data.
 
-Keep raw counts and links. Do not collapse results into one score that hides false positives or failed runs. After at least three representative pull requests, keep, tune, or disable each reviewer based on valid unique findings, noise, latency, failure rate, and cost. Never weaken deterministic CI because an AI reviewer usually catches the same defect.
+Finding units are actionable inline findings, not summaries, reactions, or status comments. Normalize severity from confirmed impact rather than vendor labels. Keep raw counts and links; do not collapse results into one score that hides false positives or failed runs.
+
+Select ten pull requests covering at least three terminal/execution TypeScript changes, three quote-engine Go changes, two Solidity or execution-contract changes, one Proto/config/CI change, and one docs/dependency-only change. Do not seed defects into a branch that may merge; close any purpose-built fixture pull request.
+
+After ten pull requests, calculate precision as valid findings divided by actionable findings, unique valid findings per pull request, duplicate and stale rates, repeated-after-fix count, comments per pull request, median latency, total and per-pull-request cost, and failure/skip count. Precision is `N/A`, not 100%, when a reviewer posts no findings.
+
+Keep a reviewer in the continuous loop only if it adds at least two confirmed unique findings and reaches at least 70% precision. Otherwise disable its automatic reviews or reserve it for a separate high-risk pass. This threshold is an experiment decision, not a universal model-quality claim. Never weaken deterministic CI because an AI reviewer usually catches the same defect.
