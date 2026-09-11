@@ -1,0 +1,37 @@
+language: en-US
+reviews:
+  profile: quiet
+  request_changes_workflow: false
+  auto_apply_labels: false
+  auto_assign_reviewers: false
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+  path_filters:
+    - "!generated/**"
+    - "!dist/**"
+    - "!.tools/**"
+    - "!.testnet/**"
+    - "!contracts/out/**"
+    - "!contracts/cache/**"
+    - "!contracts/broadcast/**"
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "**/AGENTS.md"

@@ -1,0 +1,48 @@
+{
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "description": "Repository-wide architecture, protocol, and verification rules"
+    },
+    {
+      "path": "services/quote-engine/AGENTS.md",
+      "description": "Quote and preparation invariants",
+      "scope": ["services/quote-engine/**"]
+    },
+    {
+      "path": "apps/terminal/AGENTS.md",
+      "description": "Consent, signing, submission, and receipt rules",
+      "scope": ["apps/terminal/**"]
+    },
+    {
+      "path": "contracts/AGENTS.md",
+      "description": "Executor accounting and supported contract behavior",
+      "scope": ["contracts/**"]
+    },
+    {
+      "path": "scripts/testnet/AGENTS.md",
+      "description": "Harness safety and evidence limits",
+      "scope": ["scripts/testnet/**"]
+    },
+    {
+      "path": "docs/protocol.md",
+      "description": "ConnectRPC contract",
+      "scope": [
+        "proto/**",
+        "generated/**",
+        "services/quote-engine/**",
+        "apps/terminal/**"
+      ]
+    },
+    {
+      "path": "docs/execution.md",
+      "description": "Execution trust model and safety contract",
+      "scope": ["services/quote-engine/**", "apps/terminal/**", "contracts/**"]
+    },
+    {
+      "path": "docs/testnet.md",
+      "description": "Harness behavior and evidence interpretation",
+      "scope": ["scripts/testnet/**", "contracts/**"]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "strictness": 3,
+  "commentTypes": ["logic", "syntax"],
+  "triggerOnDrafts": false,
+  "triggerOnUpdates": true,
+  "statusCheck": true,
+  "autoApprove": {
+    "enabled": false
+  },
+  "ignorePatterns": "generated/**\ndist/**\n.tools/**\n.testnet/**\ncontracts/out/**\ncontracts/cache/**\ncontracts/broadcast/**"
+}

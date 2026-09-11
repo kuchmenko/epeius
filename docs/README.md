@@ -10,6 +10,7 @@ Use this page as the index for current components and operator workflows.
 - [Execution contract](execution.md): trust split, immutable preparation terms, simulation evidence, approval flow, partial-input limitation, and unsupported execution cases.
 - [Development tooling](development.md): setup, generation, checks, build outputs, and local test output.
 - [Protocol](protocol.md): ConnectRPC service, request and response meanings, compatibility rules, and interpretation of partial quote results.
+- [AI reviewer benchmark](reviewer-benchmark.md): automatic review trigger contract, canary procedure, and evaluation metrics.
 
 ## First tasks
 
@@ -20,6 +21,7 @@ Use this page as the index for current components and operator workflows.
 | Prepare or execute on an enabled chain | [Terminal execution](terminal.md#configured-chain-execution), then [execution contract](execution.md) |
 | Deploy and seed disposable test pools | [Testnet harness](testnet.md) |
 | Run repository checks | [Development tooling](development.md#verification) |
+| Evaluate AI reviewers | [AI reviewer benchmark](reviewer-benchmark.md) |
 | Integrate another client | [Protocol](protocol.md) |
 
 ## Output map

@@ -1,0 +1,25 @@
+version: 2.0
+automatedReviewActive: true
+reviewCadence:
+  type: automatic
+runOnDraft: false
+pullRequestApprovalActive: false
+isRequestChangesActive: false
+byokModel: ""
+reviewOptions:
+  bug: true
+  performance: true
+  security: true
+  business_logic: true
+suggestionControl:
+  applyFiltersToKodyRules: false
+  severityLevelFilter: high
+ideRulesSyncEnabled: true
+ignorePaths:
+  - "generated/**"
+  - "dist/**"
+  - ".tools/**"
+  - ".testnet/**"
+  - "contracts/out/**"
+  - "contracts/cache/**"
+  - "contracts/broadcast/**"
