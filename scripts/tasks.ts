@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { syncAbis } from "./abi";
 
 export const root = resolve(import.meta.dir, "..");
 export const engineDir = join(root, "services/quote-engine");
@@ -48,6 +49,8 @@ async function generatedFiles(directory: string): Promise<Map<string, string>> {
       withFileTypes: true,
     })) {
       const name = join(path, entry.name);
+      // ABI projections have their own canonical inputs and drift check.
+      if (name === "abi") continue;
       if (entry.isDirectory()) await visit(name);
       else if (name.endsWith(".go") || name.endsWith(".ts"))
         files.set(name, await Bun.file(join(directory, name)).text());
@@ -90,8 +93,10 @@ async function task(name: string) {
     }
     case "generate":
       await run(["bunx", "--no-install", "buf", "generate"]);
+      await syncAbis(false);
       break;
     case "check:generated": {
+      await syncAbis(true);
       const temporary = await mkdtemp(join(tmpdir(), "epeius-generation-"));
       try {
         await run([
@@ -118,6 +123,7 @@ async function task(name: string) {
       break;
     }
     case "check": {
+      await syncAbis(true);
       await run(["bunx", "--no-install", "biome", "check", "."]);
       await run(["bunx", "--no-install", "buf", "lint"]);
       await run([

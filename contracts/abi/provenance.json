@@ -1,0 +1,107 @@
+[
+  {
+    "name": "ERC20",
+    "origin": "https://unpkg.com/@openzeppelin/contracts@5.0.2/build/contracts/IERC20.json",
+    "license": "MIT",
+    "sourceSha256": "3160b6e42b9bf65cab495e347aeb772b45e11b05d449ede78334fd619a1200ef",
+    "abiSha256": "d0b262690493b29eaab4010f372b767251f146ff4cd1741154724a9f7c9ce0cd"
+  },
+  {
+    "name": "Executor",
+    "origin": "contracts/src/Executor.sol at 1b57a3f6c7354d96ea2ad4ec95c57c18b4e0cd0b; solc 0.8.24, contracts/foundry.toml",
+    "license": "MIT",
+    "sourceSha256": "dcb781de32bfd86c865d4f64ceb7d2334d5de8f7876a1479994ecb8d46290ed9",
+    "abiSha256": "05c865a6b5e79880c49df7efc4b2c6978400f3f1da5abf70cd04fc421694ba16"
+  },
+  {
+    "name": "LiquiditySeeder",
+    "origin": "contracts/src/LiquiditySeeder.sol at 1b57a3f6c7354d96ea2ad4ec95c57c18b4e0cd0b; solc 0.8.24, contracts/foundry.toml",
+    "license": "MIT",
+    "sourceSha256": "cc9018d2dca459d1ce1ea114ee0f95d598ec5f6cfc172c56d7b546ffed252bcb",
+    "abiSha256": "96cbfb87fc339cfe2df6395503f89158e743abad2ac29be41015e662f6775de6"
+  },
+  {
+    "name": "PancakeBootstrap",
+    "origin": "contracts/pancake/PancakeBootstrap.sol at 1b57a3f6c7354d96ea2ad4ec95c57c18b4e0cd0b; solc 0.7.6, contracts/pancake/foundry.toml",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "396b40d384991f807d0ff96b1090a01f8037daeb3a4d74a02f0855bc995626d3",
+    "abiSha256": "cb0bd6e84aa7cd754b5cb269aef19574ea26b0c3b757ad85c9818d376f92200c"
+  },
+  {
+    "name": "PancakePoolDeployer",
+    "origin": "https://github.com/pancakeswap/pancake-v3-contracts/blob/986847948755cba528324d41be19480731c36c2a/projects/v3-core/contracts/PancakeV3PoolDeployer.sol; solc 0.7.6, contracts/pancake/foundry.toml",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "3fa73c9eb1d93d2ca3f34ee6064414bbdf374b66fd4a44fa0d4a2ddf069cf028",
+    "abiSha256": "15b1e1d06130b33d9b800a3c5d6d4bb613db6fc646469330a7d67b0fa0de9a1d"
+  },
+  {
+    "name": "PancakeQuoterV2",
+    "origin": "https://unpkg.com/@pancakeswap/v3-periphery@1.0.2/artifacts/contracts/lens/QuoterV2.sol/QuoterV2.json",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "ac2955794487d5dd1c5f55427e5f893b95e81032b2c261bc1ddb531d798256e5",
+    "abiSha256": "a728962fdaa194d2da70570454864fa398b540e2582e20dd925d70de2631b9d1"
+  },
+  {
+    "name": "PancakeV3Factory",
+    "origin": "https://unpkg.com/@pancakeswap/v3-core@1.0.2/artifacts/contracts/interfaces/IPancakeV3Factory.sol/IPancakeV3Factory.json",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "c8a14df1e73277cdf0b804310f30a236680ba36d92969bffae183ca736395d07",
+    "abiSha256": "53f217a62fa23fd25dff52777b409fa036792be49a3d51a3d413c6cbd6500443"
+  },
+  {
+    "name": "PancakeV3Pool",
+    "origin": "https://unpkg.com/@pancakeswap/v3-core@1.0.2/artifacts/contracts/interfaces/IPancakeV3Pool.sol/IPancakeV3Pool.json",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "5957cdc466ddc111e063f392d9e601f892891cd31f49c493af8f8b565104b1d5",
+    "abiSha256": "1f9d2b7a8ba8d9500c7b1db9f5925f5e9e9466f0e62764cad2624f636e4df0d3"
+  },
+  {
+    "name": "PancakeV3Router",
+    "origin": "https://unpkg.com/@pancakeswap/v3-periphery@1.0.2/artifacts/contracts/SwapRouter.sol/SwapRouter.json",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "7779cef09158740ed3fa93870444896c5f060d0f852b24343fcdcc5f69246708",
+    "abiSha256": "b6070610b5f812f1dacfcb356fd1e7a322c1258045c3e89c7da54a0e8dc1c315"
+  },
+  {
+    "name": "TestToken",
+    "origin": "contracts/src/TestToken.sol at 1b57a3f6c7354d96ea2ad4ec95c57c18b4e0cd0b; solc 0.8.24, contracts/foundry.toml",
+    "license": "MIT",
+    "sourceSha256": "ee0e51812f9e8adb5d8f1c250abfb147f91d1037641fd3a62ae9b445e9041e86",
+    "abiSha256": "546a0949b900e61433adbfc9f2573c9cf2fb5556f8a280021bbbaa85a40d59d0"
+  },
+  {
+    "name": "UniswapPeripheryState",
+    "origin": "https://unpkg.com/@uniswap/v3-periphery@1.3.0/artifacts/contracts/interfaces/IPeripheryImmutableState.sol/IPeripheryImmutableState.json",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "a595927168f01c3b19928da4bdb367de3b340cf64a4fcac97d7549d4dc9188c5",
+    "abiSha256": "bdaa0551eb7d5766c3bff6b5295c6120d9e61151aef07099785121e5b0d05164"
+  },
+  {
+    "name": "UniswapQuoterV2",
+    "origin": "https://unpkg.com/@uniswap/v3-periphery@1.4.4/artifacts/contracts/interfaces/IQuoterV2.sol/IQuoterV2.json (complete ABI retained from previously pinned source)",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "0087302d3ecc6714108fa6d876a1b0338d35dcd6975ca4e23e309458c666ca30",
+    "abiSha256": "0087302d3ecc6714108fa6d876a1b0338d35dcd6975ca4e23e309458c666ca30"
+  },
+  {
+    "name": "UniswapRouter02",
+    "origin": "https://unpkg.com/@uniswap/swap-router-contracts@1.1.0/artifacts/contracts/SwapRouter02.sol/SwapRouter02.json",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "210a7bf29f26de9f45d35dac1214943eca41c3a002007dd6a0e1aa870bf2d2d1",
+    "abiSha256": "08d0321b05b9824f82f7df69cf65a6b712926936c2cb5ad57499a2f23342bf4c"
+  },
+  {
+    "name": "UniswapV3Factory",
+    "origin": "https://unpkg.com/@uniswap/v3-core@1.0.0/artifacts/contracts/interfaces/IUniswapV3Factory.sol/IUniswapV3Factory.json (complete ABI retained from previously pinned source)",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "843b74a64e854b56b558883880baa71599c06287fad1b28f3de8ece12a804e41",
+    "abiSha256": "843b74a64e854b56b558883880baa71599c06287fad1b28f3de8ece12a804e41"
+  },
+  {
+    "name": "UniswapV3Pool",
+    "origin": "https://unpkg.com/@uniswap/v3-core@1.0.1/artifacts/contracts/interfaces/IUniswapV3Pool.sol/IUniswapV3Pool.json",
+    "license": "GPL-2.0-or-later",
+    "sourceSha256": "1cb22d8cc5f70b1cef8a4f59bdd49541f01279bfba116878244ed913fe4cba33",
+    "abiSha256": "d3882d5ad8ac400dd9c64e8783675551c561c28b0085632c7f05988f9c904c40"
+  }
+]

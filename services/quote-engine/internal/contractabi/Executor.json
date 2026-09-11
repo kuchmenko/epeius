@@ -1,0 +1,185 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "uniswapRouter_",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "pancakeRouter_",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "execute",
+    "inputs": [
+      {
+        "name": "tokenIn",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "tokenOut",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amountIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minAmountOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "allocations",
+        "type": "tuple[]",
+        "internalType": "struct Executor.Allocation[]",
+        "components": [
+          {
+            "name": "venue",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "hops",
+            "type": "tuple[]",
+            "internalType": "struct Executor.Hop[]",
+            "components": [
+              {
+                "name": "tokenOut",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "fee",
+                "type": "uint24",
+                "internalType": "uint24"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "pancakeRouter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "uniswapRouter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "error",
+    "name": "AddressEmptyCode",
+    "inputs": [
+      {
+        "name": "target",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AddressInsufficientBalance",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BalanceMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Expired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "FailedInnerCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "IncompleteSpend",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InsufficientOutput",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidPlan",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SafeERC20FailedOperation",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  }
+]
