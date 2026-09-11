@@ -200,9 +200,7 @@ func TestWrongChainAndProviderErrorsAreSafe(t *testing.T) {
 			}
 		})
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "provider echoed secret", http.StatusUnauthorized)
-	}))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "provider echoed secret", 401) }))
 	_, err := Verify(context.Background(), "base", 8453, server.URL+"/secret")
 	server.Close()
 	if err == nil || strings.Contains(err.Error(), "secret") {

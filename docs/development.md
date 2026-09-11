@@ -31,7 +31,7 @@ bun run smoke
 forge test --root contracts
 ```
 
-- `check` runs Biome, TypeScript checks, Go vet, Staticcheck for the quote engine, Go race tests, Bun tests, and builds. Run `bun run setup` first so the pinned Staticcheck binary is available. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
+- `check` runs Biome, TypeScript checks, Go vet, Staticcheck for the first-party quote engine, Go race tests, Bun tests, and builds. Generated Go remains covered by formatting, vet, race, and generated-file drift checks, not Staticcheck. Run `bun run setup` first so the pinned Staticcheck binary is available. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
 - `check:generated` regenerates bindings in a temporary directory and compares them with checked-in files.
 - `smoke` uses root TOML endpoint and an already running engine. It requires every engine chain to be connected and checks positive Base WETH/USDC quotes in both directions. It is read-only and does not stop the engine.
 - `forge test` runs local executor and harness tests, including authentic Uniswap/Pancake partial-input behavior. Use `forge test --root contracts --fuzz-runs 10000` for the larger valid-allocation fuzz run. Run `forge fmt --check contracts/src/Executor.sol contracts/test/Executor.t.sol contracts/test/ExecutorRouters.t.sol` to check the maintained Solidity sources. Neither command deploys to Base Sepolia.
