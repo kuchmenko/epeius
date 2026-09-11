@@ -48,7 +48,7 @@ func TestSwapCalldataAuthenticSelectorsAndDeadline(t *testing.T) {
 			if !bytes.Equal(data[:4], crypto.Keccak256([]byte("multicall(uint256,bytes[])"))[:4]) {
 				t.Fatal("missing deadline multicall")
 			}
-			values, err := uniRouterABI.Methods["multicall"].Inputs.Unpack(data[4:])
+			values, err := uniDeadlineCall.Inputs.Unpack(data[4:])
 			if err != nil {
 				t.Fatal(err)
 			}

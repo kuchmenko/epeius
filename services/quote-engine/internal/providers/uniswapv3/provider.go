@@ -7,7 +7,9 @@ import (
 	"errors"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 )
 
 type Caller interface {
@@ -18,6 +20,7 @@ type Provider struct {
 	Client         Caller
 	FactoryAddress common.Address
 	QuoterAddress  common.Address
+	Pancake        bool
 }
 
 type singleInput struct {
@@ -30,6 +33,10 @@ type singleInput struct {
 
 // Quote returns a zero pool and nil amount when no pool exists for this fee.
 func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big.Int, fee uint32, block common.Hash) (common.Address, *big.Int, error) {
+	var factoryABI, quoterABI abi.ABI = contractabi.UniswapV3Factory, contractabi.UniswapQuoterV2
+	if p.Pancake {
+		factoryABI, quoterABI = contractabi.PancakeV3Factory, contractabi.PancakeQuoterV2
+	}
 	data, err := factoryABI.Pack("getPool", in, out, new(big.Int).SetUint64(uint64(fee)))
 	if err != nil {
 		return common.Address{}, nil, err

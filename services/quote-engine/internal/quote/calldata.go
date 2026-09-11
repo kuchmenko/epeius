@@ -5,25 +5,16 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 )
 
-func mustABI(source string) abi.ABI {
-	result, err := abi.JSON(strings.NewReader(source))
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-var erc20ABI = mustABI(`[{"name":"allowance","type":"function","inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"outputs":[{"type":"uint256"}]},{"name":"approve","type":"function","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"type":"bool"}]},{"name":"balanceOf","type":"function","inputs":[{"name":"owner","type":"address"}],"outputs":[{"type":"uint256"}]}]`)
-var uniRouterABI = mustABI(`[{"name":"exactInput","type":"function","inputs":[{"name":"params","type":"tuple","components":[{"name":"path","type":"bytes"},{"name":"recipient","type":"address"},{"name":"amountIn","type":"uint256"},{"name":"amountOutMinimum","type":"uint256"}]}],"outputs":[{"type":"uint256"}]},{"name":"multicall","type":"function","inputs":[{"name":"deadline","type":"uint256"},{"name":"data","type":"bytes[]"}],"outputs":[{"type":"bytes[]"}]}]`)
-
-// Pancake v3-periphery ISwapRouter (not SmartRouter): the deadline is inside the tuple.
-// https://github.com/pancakeswap/pancake-v3-contracts/blob/main/projects/v3-periphery/contracts/interfaces/ISwapRouter.sol
-var pancakeRouterABI = mustABI(`[{"name":"exactInput","type":"function","inputs":[{"name":"params","type":"tuple","components":[{"name":"path","type":"bytes"},{"name":"recipient","type":"address"},{"name":"deadline","type":"uint256"},{"name":"amountIn","type":"uint256"},{"name":"amountOutMinimum","type":"uint256"}]}],"outputs":[{"type":"uint256"}]}]`)
+var erc20ABI = contractabi.ERC20
+var uniRouterABI = contractabi.UniswapRouter02
+var pancakeRouterABI = contractabi.PancakeV3Router
+var uniDeadlineCall = evm.Method(uniRouterABI, "multicall(uint256,bytes[])")
 
 func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
 	if len(route.Legs) < 1 || len(route.Legs) > 2 {
@@ -57,5 +48,5 @@ func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, min
 	if err != nil {
 		return nil, err
 	}
-	return uniRouterABI.Pack("multicall", new(big.Int).SetUint64(deadline), [][]byte{inner})
+	return uniRouterABI.Pack(uniDeadlineCall.Name, new(big.Int).SetUint64(deadline), [][]byte{inner})
 }

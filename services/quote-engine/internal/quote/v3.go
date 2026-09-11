@@ -76,8 +76,8 @@ func (q v3Quoter) Verify(ctx context.Context, hash common.Hash) error {
 
 // quotePath quotes an admitted path sequentially at one pinned block. A nil
 // output without an error means a pool is missing, not that the RPC failed.
-func quotePath(ctx context.Context, caller uniswapv3.Caller, deployment config.Deployment, tokens []common.Address, fees []uint32, amount *big.Int, hash common.Hash) ([]*quotev1.RouteLeg, *big.Int, error) {
-	provider := uniswapv3.Provider{Client: caller, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter)}
+func quotePath(ctx context.Context, caller Reader, deployment config.Deployment, tokens []common.Address, fees []uint32, amount *big.Int, hash common.Hash) ([]*quotev1.RouteLeg, *big.Int, error) {
+	provider := uniswapv3.Provider{Client: caller, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter), Pancake: deployment.Kind == "pancake-v3"}
 	output := new(big.Int).Set(amount)
 	var legs []*quotev1.RouteLeg
 	for i, fee := range fees {

@@ -7,13 +7,14 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 	"google.golang.org/protobuf/proto"
 )
 
-var executorABI = mustABI(`[{"name":"execute","type":"function","inputs":[{"name":"tokenIn","type":"address"},{"name":"tokenOut","type":"address"},{"name":"amountIn","type":"uint256"},{"name":"minAmountOut","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"allocations","type":"tuple[]","components":[{"name":"venue","type":"uint8"},{"name":"amountIn","type":"uint256"},{"name":"hops","type":"tuple[]","components":[{"name":"tokenOut","type":"address"},{"name":"fee","type":"uint24"}]}]}],"outputs":[{"type":"uint256"}]}]`)
+var executorABI = contractabi.Executor
 
 // executorVenue resolves exact deployment membership, not just protocol kind.
 func executorVenue(chain config.Chain, route *quotev1.RouteQuote) (uint8, error) {
@@ -149,9 +150,14 @@ func verifyExecutor(ctx context.Context, reader Reader, chain config.Chain, hash
 	if err != nil || len(bytecode) == 0 {
 		return fail
 	}
-	for signature, id := range map[string]string{"uniswapRouter()": e.UniswapDeployment, "pancakeRouter()": e.PancakeDeployment} {
-		data, err := reader.Call(ctx, target, crypto.Keccak256([]byte(signature))[:4], hash)
-		if err != nil || len(data) != 32 || new(big.Int).SetBytes(data[:12]).Sign() != 0 || common.BytesToAddress(data) != common.HexToAddress(chain.Deployments[id].Router) {
+	for name, id := range map[string]string{"uniswapRouter": e.UniswapDeployment, "pancakeRouter": e.PancakeDeployment} {
+		method := executorABI.Methods[name]
+		data, err := reader.Call(ctx, target, method.ID, hash)
+		if err != nil {
+			return fail
+		}
+		values, err := evm.Unpack(method, data)
+		if err != nil || values[0].(common.Address) != common.HexToAddress(chain.Deployments[id].Router) {
 			return fail
 		}
 	}

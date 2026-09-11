@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 )
 
 func verifyDeployment(ctx context.Context, reader codeReader, d config.Deployment, hash common.Hash) error {
@@ -17,35 +19,39 @@ func verifyDeployment(ctx context.Context, reader codeReader, d config.Deploymen
 			return fail
 		}
 	}
-	getter := func(target, signature string) (common.Address, error) {
-		result, err := reader.Call(ctx, common.HexToAddress(target), crypto.Keccak256([]byte(signature))[:4], hash)
-		if err != nil || len(result) != 32 {
+	getter := func(target string, contract abi.ABI, name string) (common.Address, error) {
+		method := contract.Methods[name]
+		result, err := reader.Call(ctx, common.HexToAddress(target), method.ID, hash)
+		if err != nil {
 			return common.Address{}, fail
 		}
-		for _, b := range result[:12] {
-			if b != 0 {
-				return common.Address{}, fail
-			}
+		values, err := evm.Unpack(method, result)
+		if err != nil {
+			return common.Address{}, fail
 		}
-		value := common.BytesToAddress(result)
+		value := values[0].(common.Address)
 		if value == (common.Address{}) {
 			return value, fail
 		}
 		return value, nil
 	}
 	factory := common.HexToAddress(d.Factory)
-	quoterFactory, err := getter(d.Quoter, "factory()")
+	quoterABI, routerABI := contractabi.UniswapPeripheryState, contractabi.UniswapRouter02
+	if d.Kind == "pancake-v3" {
+		quoterABI, routerABI = contractabi.PancakeQuoterV2, contractabi.PancakeV3Router
+	}
+	quoterFactory, err := getter(d.Quoter, quoterABI, "factory")
 	if err != nil || quoterFactory != factory {
 		return fail
 	}
 	// SwapRouter02's constructor calls this argument factoryV3, but the
 	// inherited v3-periphery PeripheryImmutableState getter is factory().
-	routerFactory, err := getter(d.Router, "factory()")
+	routerFactory, err := getter(d.Router, routerABI, "factory")
 	if err != nil || routerFactory != factory {
 		return fail
 	}
 	if d.Kind == "pancake-v3" {
-		deployer, err := getter(d.Factory, "poolDeployer()")
+		deployer, err := getter(d.Factory, contractabi.PancakeV3Factory, "poolDeployer")
 		if err != nil {
 			return fail
 		}
@@ -53,8 +59,8 @@ func verifyDeployment(ctx context.Context, reader codeReader, d config.Deploymen
 		if err != nil || len(code) == 0 {
 			return fail
 		}
-		for _, target := range []string{d.Quoter, d.Router} {
-			linked, err := getter(target, "deployer()")
+		for target, contract := range map[string]abi.ABI{d.Quoter: quoterABI, d.Router: routerABI} {
+			linked, err := getter(target, contract, "deployer")
 			if err != nil || linked != deployer {
 				return fail
 			}
