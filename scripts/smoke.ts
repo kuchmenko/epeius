@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { parseArgs } from "node:util";
 import { fromJsonString } from "@bufbuild/protobuf";
+import { isHash } from "viem";
 import { quoteClient } from "../apps/terminal/src/client";
 import { readConfig } from "../apps/terminal/src/config";
 import {
@@ -46,7 +47,7 @@ export function assertQuote(
   tokenIn: string,
   tokenOut: string,
 ) {
-  assert.ok(quote.block && /^0x[0-9a-f]{64}$/.test(quote.block.hash));
+  assert.ok(quote.block && isHash(quote.block.hash));
   assert.ok(quote.routes.length > 0, "Scenario returned no routes");
   let best = quote.routes[0];
   for (const route of quote.routes) {

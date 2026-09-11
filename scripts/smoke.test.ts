@@ -96,6 +96,12 @@ test("smoke accepts connected direct and two-hop routes and first maximum recomm
   result.routes = [result.routes[0]];
   result.bestRouteId = "direct";
   assertQuote(result, tokenA, tokenC);
+  assert.ok(result.block);
+  result.block.hash = `0x${"A".repeat(64)}`;
+  result.routes[0].block = result.block;
+  assertQuote(result, tokenA, tokenC);
+  result.block.hash = "0x1234";
+  assert.throws(() => assertQuote(result, tokenA, tokenC));
 });
 
 for (const [name, mutate] of [
