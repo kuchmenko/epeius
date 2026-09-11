@@ -46,9 +46,10 @@ func TestExecutorIndependentCalldataVectors(t *testing.T) {
 	}
 	for _, v := range fixture.Vectors {
 		t.Run(v.Name, func(t *testing.T) {
+			chain := config.Chain{Executor: &config.Executor{UniswapDeployment: "uni", PancakeDeployment: "pan"}, Deployments: map[string]config.Deployment{"uni": {Kind: "uniswap-v3"}, "pan": {Kind: "pancake-v3"}}}
 			p := &quotev1.PrepareExecutionResponse{TokenIn: v.TokenIn, TokenOut: v.TokenOut, AmountInAtomic: v.AmountIn, AmountOutMinimumAtomic: v.MinAmountOut}
 			for _, a := range v.Allocations {
-				route := &quotev1.RouteQuote{Provider: []string{"uniswap-v3", "pancake-v3"}[a.Venue]}
+				route := &quotev1.RouteQuote{Provider: []string{"uniswap-v3", "pancake-v3"}[a.Venue], DeploymentId: []string{"uni", "pan"}[a.Venue]}
 				input := v.TokenIn
 				for _, hop := range a.Hops {
 					route.Legs = append(route.Legs, &quotev1.RouteLeg{TokenIn: input, TokenOut: hop.TokenOut, Selector: &quotev1.RouteLeg_FeePips{FeePips: hop.Fee}})
@@ -57,7 +58,7 @@ func TestExecutorIndependentCalldataVectors(t *testing.T) {
 				p.Allocations = append(p.Allocations, &quotev1.QuotedAllocation{AmountInAtomic: a.AmountIn, Route: route})
 			}
 			deadline, _ := strconv.ParseUint(v.Deadline, 10, 64)
-			encoded, err := executorData(p, deadline)
+			encoded, err := executorData(chain, p, deadline)
 			if err != nil || hexutil.Encode(encoded) != v.Calldata {
 				t.Fatalf("encoding mismatch: %v", err)
 			}
@@ -147,6 +148,7 @@ func executorFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, *
 
 func TestExecutorPreparationExactQuotesAggregateRoundingAndImmutableRecheck(t *testing.T) {
 	h, r, _, quotes := executorFixture(t)
+	original := proto.CloneOf(h.Store.quotes["q"].final)
 	p := prepare(t, h, r)
 	if p.Status != quotev1.PreparationStatus_PREPARATION_STATUS_READY || p.Route != nil || p.AmountOutMinimumAtomic != "250" || *quotes != 3 {
 		t.Fatalf("unexpected preparation: %v", p)
@@ -160,6 +162,9 @@ func TestExecutorPreparationExactQuotesAggregateRoundingAndImmutableRecheck(t *t
 	checked := prepare(t, h, &quotev1.PrepareExecutionRequest{PreparationId: p.PreparationId})
 	if !proto.Equal(p, checked) || *quotes != 3 {
 		t.Fatal("recheck re-quoted or mutated terms")
+	}
+	if !proto.Equal(original, h.Store.quotes["q"].final) {
+		t.Fatal("allocation re-quote mutated original quote")
 	}
 }
 
@@ -183,6 +188,12 @@ func TestExecutorInvalidAllocationsFailBeforeQuote(t *testing.T) {
 	for _, mutate := range []func(*quotev1.PrepareExecutionRequest){
 		func(r *quotev1.PrepareExecutionRequest) { r.Allocations[0].AmountInAtomic = "0" },
 		func(r *quotev1.PrepareExecutionRequest) { r.Allocations[0].AmountInAtomic = "38" },
+		func(r *quotev1.PrepareExecutionRequest) { r.Allocations[1] = nil },
+		func(r *quotev1.PrepareExecutionRequest) { r.Allocations[1].AmountInAtomic = "064" },
+		func(r *quotev1.PrepareExecutionRequest) {
+			r.Allocations[1].AmountInAtomic = new(big.Int).Lsh(big.NewInt(1), 256).String()
+		},
+		func(r *quotev1.PrepareExecutionRequest) { r.Allocations[1].RouteId = "missing" },
 		func(r *quotev1.PrepareExecutionRequest) { r.Allocations[1].RouteId = r.Allocations[0].RouteId },
 		func(r *quotev1.PrepareExecutionRequest) { r.RouteId = "uni:3000" },
 		func(r *quotev1.PrepareExecutionRequest) { r.PreparationId = "p" },
@@ -223,6 +234,92 @@ func TestExecutorPreparationRejectsWrongRouterLinkAndMissingSimulator(t *testing
 		p := prepare(t, h, r)
 		if p.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED || p.Transaction != nil || p.ApprovalTransaction != nil {
 			t.Fatal("unverified executor accepted")
+		}
+	}
+}
+
+func TestExecutorAdmissionChecksSecondPathBeforeRPC(t *testing.T) {
+	for name, mutate := range map[string]func(*Chain, *quotev1.RouteQuote){
+		"other deployment same kind": func(c *Chain, r *quotev1.RouteQuote) {
+			c.Config.Deployments["other"] = c.Config.Deployments["pan"]
+			r.DeploymentId = "other"
+		},
+		"missing deployment":  func(c *Chain, _ *quotev1.RouteQuote) { delete(c.Config.Deployments, "pan") },
+		"disabled deployment": func(c *Chain, _ *quotev1.RouteQuote) { c.DeploymentErrors = map[string]string{"pan": "disabled"} },
+		"wrong kind": func(c *Chain, _ *quotev1.RouteQuote) {
+			d := c.Config.Deployments["pan"]
+			d.Kind = "uniswap-v3"
+			c.Config.Deployments["pan"] = d
+		},
+		"nil leg": func(_ *Chain, r *quotev1.RouteQuote) { r.Legs[1] = nil },
+		"tick spacing": func(_ *Chain, r *quotev1.RouteQuote) {
+			r.Legs[1].Selector = &quotev1.RouteLeg_TickSpacing{TickSpacing: 10}
+		},
+		"fee limit": func(_ *Chain, r *quotev1.RouteQuote) {
+			r.Legs[1].Selector = &quotev1.RouteLeg_FeePips{FeePips: 1000000}
+		},
+		"disconnected": func(_ *Chain, r *quotev1.RouteQuote) { r.Legs[1].TokenIn = tokenA },
+		"wrong pair":   func(_ *Chain, r *quotev1.RouteQuote) { r.Legs[1].TokenOut = tokenB },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, r, _, quotes := executorFixture(t)
+			chain := h.Chains["test"]
+			mutate(&chain, h.Store.quotes["q"].final.Routes[1])
+			reader := chain.Client.(executorReader)
+			reader.call = func(context.Context, common.Address, []byte, common.Hash) ([]byte, error) {
+				t.Fatal("invalid plan made a contract call")
+				return nil, nil
+			}
+			chain.Client = reader
+			h.Chains["test"] = chain
+			p := prepare(t, h, r)
+			if p.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED || p.Transaction != nil || p.ApprovalTransaction != nil || *quotes != 0 {
+				t.Fatal("invalid second path was not rejected before RPC")
+			}
+		})
+	}
+}
+
+func TestExecutorRejectsMissingOrChangedPools(t *testing.T) {
+	for _, pool := range []common.Address{{}, common.HexToAddress(wallet)} {
+		h, r, _, _ := executorFixture(t)
+		chain := h.Chains["test"]
+		reader := chain.Client.(executorReader)
+		original := reader.call
+		reader.call = func(ctx context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
+			if hexutil.Encode(data[:4]) == "0x1698ee82" {
+				return poolResponse(pool), nil
+			}
+			return original(ctx, to, data, hash)
+		}
+		chain.Client = reader
+		h.Chains["test"] = chain
+		before := proto.CloneOf(h.Store.quotes["q"].final)
+		p := prepare(t, h, r)
+		if p.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED || p.Transaction != nil || p.ApprovalTransaction != nil || !proto.Equal(before, h.Store.quotes["q"].final) {
+			t.Fatal("missing or changed pool accepted or original quote mutated")
+		}
+	}
+}
+
+func TestExecutorGetterRejectsNoncanonicalAddressWords(t *testing.T) {
+	for _, size := range []int{31, 32, 33} {
+		h, _, _, _ := executorFixture(t)
+		chain := h.Chains["test"]
+		reader := chain.Client.(executorReader)
+		original := reader.call
+		reader.call = func(ctx context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
+			value, err := original(ctx, to, data, hash)
+			if to == common.HexToAddress(executorAddress) {
+				value = append(value, 0)[:size]
+				if size == 32 {
+					value[0] = 1
+				}
+			}
+			return value, err
+		}
+		if err := verifyExecutor(context.Background(), reader, chain.Config, common.HexToHash(blockHash)); err == nil {
+			t.Fatal("getter accepted wrong length or nonzero address padding")
 		}
 	}
 }

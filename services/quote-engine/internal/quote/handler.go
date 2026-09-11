@@ -134,18 +134,7 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 				start := time.Now()
 				id := candidate.id
 				deployment := chain.Config.Deployments[candidate.deployment]
-				provider := uniswapv3.Provider{Client: chain.Client, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter)}
-				output := new(big.Int).Set(amount)
-				var legs []*quotev1.RouteLeg
-				var err error
-				for i, fee := range candidate.fees {
-					var pool common.Address
-					pool, output, err = provider.Quote(searchCtx, candidate.tokens[i], candidate.tokens[i+1], output, fee, common.HexToHash(snapshot.BlockHash))
-					if err != nil || output == nil {
-						break
-					}
-					legs = append(legs, &quotev1.RouteLeg{Pool: pool.Hex(), TokenIn: candidate.tokens[i].Hex(), TokenOut: candidate.tokens[i+1].Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: fee}})
-				}
+				legs, output, err := quotePath(searchCtx, chain.Client, deployment, candidate.tokens, candidate.fees, amount, common.HexToHash(snapshot.BlockHash))
 				if searchCtx.Err() != nil {
 					results <- result{index: index, err: &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: "search budget expired"}}
 					return

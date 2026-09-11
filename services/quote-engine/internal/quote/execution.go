@@ -89,7 +89,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 			deadline := snapshot.Timestamp + 120
 			sender := common.HexToAddress(r.Sender).Hex()
 			response := &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: saved.request.AmountInAtomic, TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Allocations: allocations}
-			data, err := executorData(response, deadline)
+			data, err := executorData(chain.Config, response, deadline)
 			if err != nil {
 				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor plan could not be encoded")
 			}

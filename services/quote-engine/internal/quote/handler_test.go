@@ -705,3 +705,74 @@ func TestBestRouteCanBeDirectOrTwoHopOnEitherVenue(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotePathSequentialInputsAndMissingVersusError(t *testing.T) {
+	for _, mode := range []string{"complete", "missing", "error"} {
+		t.Run(mode, func(t *testing.T) {
+			tokens := []common.Address{common.HexToAddress(tokenA), common.HexToAddress(tokenB), common.HexToAddress(tokenC)}
+			fees := []uint32{0, 999999}
+			calls := 0
+			client := readerFake{call: func(_ context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
+				hop := calls / 2
+				quoter := calls%2 == 1
+				calls++
+				if hash != common.HexToHash(blockHash) || common.BytesToAddress(data[4:36]) != tokens[hop] || common.BytesToAddress(data[36:68]) != tokens[hop+1] || calldataFee(data) != fees[hop] {
+					t.Fatal("path tokens, fees or pinned hash changed")
+				}
+				if !quoter {
+					if to != testFactory {
+						t.Fatal("wrong factory")
+					}
+					if hop == 1 && mode == "missing" {
+						return make([]byte, 32), nil
+					}
+					if hop == 1 && mode == "error" {
+						return nil, errors.New("private RPC failure")
+					}
+					return poolResponse(tokens[hop]), nil
+				}
+				if to != testQuoter || new(big.Int).SetBytes(data[68:100]).Uint64() != []uint64{37, 79}[hop] {
+					t.Fatal("hop did not use exact preceding output")
+				}
+				return quoteResponse([]uint64{79, 173}[hop]), nil
+			}}
+			amount := big.NewInt(37)
+			legs, output, err := quotePath(context.Background(), client, config.Deployment{Factory: testFactory.Hex(), Quoter: testQuoter.Hex()}, tokens, fees, amount, common.HexToHash(blockHash))
+			if amount.Int64() != 37 {
+				t.Fatal("input amount mutated")
+			}
+			if mode == "complete" {
+				if err != nil || output.String() != "173" || len(legs) != 2 || legs[1].Pool != tokenB || calls != 4 {
+					t.Fatal("incomplete path result")
+				}
+			} else if output != nil || legs != nil || (err != nil) != (mode == "error") || calls != 3 {
+				t.Fatal("missing path confused with RPC failure")
+			}
+		})
+	}
+}
+
+func TestSearchKeepsSameKindDeploymentsSeparateFromExecutor(t *testing.T) {
+	cfg := testChainConfig()
+	d := cfg.Deployments["uniswap-v3"]
+	d.Fees = []uint32{500}
+	cfg.Deployments = map[string]config.Deployment{"configured": d, "other": d}
+	cfg.Executor = &config.Executor{UniswapDeployment: "configured", PancakeDeployment: "pancake"}
+	client := readerFake{snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil }, call: func(_ context.Context, to common.Address, _ []byte, _ common.Hash) ([]byte, error) {
+		if to == testFactory {
+			return poolResponse(common.HexToAddress(tokenA)), nil
+		}
+		return quoteResponse(173), nil
+	}}
+	h := Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 2}
+	response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
+	if err != nil || len(response.Msg.Routes) != 2 {
+		t.Fatal("search hid same-kind deployment", err)
+	}
+	for _, route := range response.Msg.Routes {
+		venue, err := executorVenue(cfg, route)
+		if (err == nil) != (route.DeploymentId == "configured") || err == nil && venue != 0 {
+			t.Fatal("executor used kind instead of deployment membership")
+		}
+	}
+}
