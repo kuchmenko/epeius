@@ -155,7 +155,7 @@ func executionFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, 
 
 func prepare(t *testing.T, h Handler, r *quotev1.PrepareExecutionRequest) *quotev1.PrepareExecutionResponse {
 	t.Helper()
-	response, err := h.PrepareExecution(context.Background(), connect.NewRequest(r))
+	response, err := configuredHandler(h).PrepareExecution(context.Background(), connect.NewRequest(r))
 	if err != nil {
 		t.Fatal(err)
 	}

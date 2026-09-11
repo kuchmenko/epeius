@@ -5,7 +5,6 @@ import (
 	"errors"
 	"math/big"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -70,28 +69,15 @@ func quoteAllocations(ctx context.Context, chain Chain, saved storedQuote, reque
 		return nil, err
 	}
 	for _, a := range result {
-		started := time.Now()
-		tokens := []common.Address{common.HexToAddress(a.Route.Legs[0].TokenIn)}
-		var fees []uint32
-		for _, leg := range a.Route.Legs {
-			tokens = append(tokens, common.HexToAddress(leg.TokenOut))
-			fees = append(fees, leg.GetFeePips())
+		quoter := chain.Quoters[a.Route.DeploymentId]
+		if quoter == nil {
+			return nil, errExecutorRoute
 		}
 		amount, _ := new(big.Int).SetString(a.AmountInAtomic, 10)
-		legs, output, err := quotePath(ctx, chain.Client, chain.Config.Deployments[a.Route.DeploymentId], tokens, fees, amount, common.HexToHash(saved.final.Block.Hash))
-		if err != nil || output == nil || output.Sign() <= 0 || output.BitLen() > 256 {
-			return nil, errors.New("executor path could not be quoted")
+		a.Route, err = quoter.Requote(ctx, a.Route, amount, saved.final.Block)
+		if err != nil {
+			return nil, err
 		}
-		for i, leg := range legs {
-			if common.HexToAddress(leg.Pool) != common.HexToAddress(a.Route.Legs[i].Pool) {
-				return nil, errors.New("executor path pool changed")
-			}
-		}
-		a.Route.Legs = legs
-		a.Route.AmountOutAtomic = output.String()
-		a.Route.LatencyMs = uint32(time.Since(started).Milliseconds())
-		a.Route.Block = proto.CloneOf(saved.final.Block)
-		a.Route.NetworkCostOutAtomic, a.Route.EffectiveOutAtomic = nil, nil
 	}
 	return result, nil
 }

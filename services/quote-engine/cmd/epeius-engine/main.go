@@ -206,6 +206,7 @@ func openChains(ctx context.Context, configured map[string]config.Chain, getenv 
 					chain.Error = err.Error()
 				} else {
 					chain.Client, chain.Snapshot = client, snapshot
+					chain = quote.ConfigureChain(chain)
 					chain = quote.VerifyDeployments(checkCtx, chain)
 				}
 				cancel()

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"math/big"
 	"regexp"
 	"sort"
@@ -16,13 +15,25 @@ import (
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/generated/go/epeius/quote/v1/quotev1connect"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
-	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv3"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
 type Reader interface {
-	uniswapv3.Caller
+	Call(context.Context, common.Address, []byte, common.Hash) ([]byte, error)
 	Snapshot(context.Context) (rpc.Snapshot, error)
+}
+
+// ProtocolQuoter owns protocol candidates, complete path quoting and topology.
+// Candidate callbacks return nil without error for a missing route.
+type ProtocolQuoter interface {
+	Candidates(*quotev1.QuoteRequest, *quotev1.BlockContext) func(context.Context) (QuoteCandidate, bool)
+	Requote(context.Context, *quotev1.RouteQuote, *big.Int, *quotev1.BlockContext) (*quotev1.RouteQuote, error)
+	Verify(context.Context, common.Hash) error
+}
+
+type QuoteCandidate struct {
+	ID    string
+	Quote func(context.Context) (*quotev1.RouteQuote, error)
 }
 
 type Handler struct {
@@ -40,6 +51,7 @@ type Chain struct {
 	Error            string
 	Config           config.Chain
 	DeploymentErrors map[string]string
+	Quoters          map[string]ProtocolQuoter
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)
@@ -104,16 +116,24 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	}
 	block := &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
 	final := &quotev1.QuoteFinal{QuoteId: rand.Text(), Block: block, SearchComplete: true}
-	candidates := newCandidates(chain.Config, in, out)
-	available := candidates.deployments[:0]
-	for _, deployment := range candidates.deployments {
-		if message := chain.DeploymentErrors[deployment.id]; message != "" {
-			final.Errors = append(final.Errors, &quotev1.ProviderError{Provider: chain.Config.Deployments[deployment.id].Kind, Message: deployment.id + ": " + message})
+	var ids []string
+	for id := range chain.Config.Deployments {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var candidates searchCandidates
+	for _, id := range ids {
+		message := chain.DeploymentErrors[id]
+		quoter := chain.Quoters[id]
+		if message == "" && quoter == nil {
+			message = "quoting implementation unavailable"
+		}
+		if message != "" {
+			final.Errors = append(final.Errors, &quotev1.ProviderError{Provider: chain.Config.Deployments[id].Kind, Message: id + ": " + message})
 		} else {
-			available = append(available, deployment)
+			candidates.sources = append(candidates.sources, candidateSource{chain.Config.Deployments[id].Kind, quoter.Candidates(r, block)})
 		}
 	}
-	candidates.deployments = available
 	type result struct {
 		index int
 		route *quotev1.RouteQuote
@@ -123,7 +143,7 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 	results := make(chan result)
 	var workers sync.WaitGroup
 	for range concurrency {
-		index, candidate, ok := candidates.next(searchCtx)
+		index, kind, candidate, ok := candidates.next(searchCtx)
 		if !ok {
 			break
 		}
@@ -131,22 +151,20 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		go func() {
 			defer workers.Done()
 			for {
-				start := time.Now()
-				id := candidate.id
-				deployment := chain.Config.Deployments[candidate.deployment]
-				legs, output, err := quotePath(searchCtx, chain.Client, deployment, candidate.tokens, candidate.fees, amount, common.HexToHash(snapshot.BlockHash))
+				id := candidate.ID
+				route, err := candidate.Quote(searchCtx)
 				if searchCtx.Err() != nil {
-					results <- result{index: index, err: &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: "search budget expired"}}
+					results <- result{index: index, err: &quotev1.ProviderError{Provider: kind, RouteId: &id, Message: "search budget expired"}}
 					return
 				}
 				item := result{index: index}
 				if err != nil {
-					item.err = &quotev1.ProviderError{Provider: deployment.Kind, RouteId: &id, Message: err.Error()}
-				} else if output != nil {
-					item.route = &quotev1.RouteQuote{RouteId: id, Provider: deployment.Kind, DeploymentId: candidate.deployment, Legs: legs, AmountOutAtomic: output.String(), Block: block, LatencyMs: uint32(time.Since(start).Milliseconds())}
+					item.err = &quotev1.ProviderError{Provider: kind, RouteId: &id, Message: err.Error()}
+				} else {
+					item.route = route
 				}
 				results <- item
-				index, candidate, ok = candidates.next(searchCtx)
+				index, kind, candidate, ok = candidates.next(searchCtx)
 				if !ok {
 					return
 				}
@@ -220,83 +238,29 @@ func contextCode(err error) connect.Code {
 	return connect.CodeCanceled
 }
 
-type candidate struct {
-	id, deployment string
-	tokens         []common.Address
-	fees           []uint32
+type candidateSource struct {
+	kind string
+	next func(context.Context) (QuoteCandidate, bool)
 }
 
-type candidateDeployment struct {
-	id   string
-	fees []uint32
+type searchCandidates struct {
+	mu      sync.Mutex
+	sources []candidateSource
+	index   int
 }
 
-type candidateIterator struct {
-	mutex                                     sync.Mutex
-	deployments                               []candidateDeployment
-	intermediates                             []common.Address
-	in, out                                   common.Address
-	deployment, direct, middle, first, second int
-	index                                     int
-}
-
-func newCandidates(chain config.Chain, in, out common.Address) *candidateIterator {
-	iterator := &candidateIterator{in: in, out: out}
-	var ids []string
-	for id := range chain.Deployments {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, token := range chain.Tokens {
-		a := common.HexToAddress(token.Address)
-		if a != in && a != out {
-			iterator.intermediates = append(iterator.intermediates, a)
+func (s *searchCandidates) next(ctx context.Context) (int, string, QuoteCandidate, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for len(s.sources) > 0 && ctx.Err() == nil {
+		source := s.sources[0]
+		candidate, ok := source.next(ctx)
+		if ok {
+			index := s.index
+			s.index++
+			return index, source.kind, candidate, true
 		}
+		s.sources = s.sources[1:]
 	}
-	sort.Slice(iterator.intermediates, func(i, j int) bool { return iterator.intermediates[i].Hex() < iterator.intermediates[j].Hex() })
-	for _, id := range ids {
-		fees := append([]uint32(nil), chain.Deployments[id].Fees...)
-		sort.Slice(fees, func(i, j int) bool { return fees[i] < fees[j] })
-		iterator.deployments = append(iterator.deployments, candidateDeployment{id: id, fees: fees})
-	}
-	return iterator
-}
-
-func (i *candidateIterator) next(ctx context.Context) (int, candidate, bool) {
-	i.mutex.Lock()
-	defer i.mutex.Unlock()
-	if ctx.Err() != nil {
-		return 0, candidate{}, false
-	}
-	for i.deployment < len(i.deployments) {
-		deployment := i.deployments[i.deployment]
-		if i.direct < len(deployment.fees) {
-			fee := deployment.fees[i.direct]
-			i.direct++
-			return i.take(candidate{fmt.Sprintf("%s:%d", deployment.id, fee), deployment.id, []common.Address{i.in, i.out}, []uint32{fee}})
-		}
-		if i.middle < len(i.intermediates) {
-			first, second := deployment.fees[i.first], deployment.fees[i.second]
-			middle := i.intermediates[i.middle]
-			i.second++
-			if i.second == len(deployment.fees) {
-				i.second = 0
-				i.first++
-				if i.first == len(deployment.fees) {
-					i.first = 0
-					i.middle++
-				}
-			}
-			return i.take(candidate{fmt.Sprintf("%s:%d:%s:%d", deployment.id, first, middle.Hex(), second), deployment.id, []common.Address{i.in, middle, i.out}, []uint32{first, second}})
-		}
-		i.deployment++
-		i.direct, i.middle, i.first, i.second = 0, 0, 0, 0
-	}
-	return 0, candidate{}, false
-}
-
-func (i *candidateIterator) take(value candidate) (int, candidate, bool) {
-	index := i.index
-	i.index++
-	return index, value, true
+	return 0, "", QuoteCandidate{}, false
 }

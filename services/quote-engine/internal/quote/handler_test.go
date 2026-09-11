@@ -80,7 +80,7 @@ func calldataFee(data []byte) uint32 {
 }
 
 func callHandler(ctx context.Context, client Reader, request *quotev1.QuoteRequest) (*quotev1.QuoteFinal, error) {
-	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: testChainConfig()}}, QuoteConcurrency: 4}).GetQuote(ctx, connect.NewRequest(request))
+	response, err := configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: testChainConfig()}}, QuoteConcurrency: 4}).GetQuote(ctx, connect.NewRequest(request))
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +395,7 @@ func TestStatusAdvertisedTokenAddressCanBeQuotedVerbatim(t *testing.T) {
 		request := validRequest()
 		request.TokenIn = status.Tokens[0].Address
 		request.TokenOut = status.Tokens[1].Address
-		_, err := (Handler{Chains: map[string]Chain{"base": chain}, QuoteConcurrency: 2}).GetQuote(context.Background(), connect.NewRequest(request))
+		_, err := configuredHandler(Handler{Chains: map[string]Chain{"base": chain}, QuoteConcurrency: 2}).GetQuote(context.Background(), connect.NewRequest(request))
 		if err != nil {
 			t.Fatalf("GetQuote rejected Status token address %q: %v", request.TokenIn, err)
 		}
@@ -444,7 +444,7 @@ func TestExpiredBudgetDoesNotLaunchCartesianCandidates(t *testing.T) {
 	request.SearchBudgetMs = 1
 	done := make(chan error, 1)
 	go func() {
-		_, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: chainConfig}}, QuoteConcurrency: 3}).GetQuote(context.Background(), connect.NewRequest(request))
+		_, err := configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: chainConfig}}, QuoteConcurrency: 3}).GetQuote(context.Background(), connect.NewRequest(request))
 		done <- err
 	}()
 
@@ -524,7 +524,7 @@ func TestQuoteLargeConcurrencyOnlyStartsAvailableWork(t *testing.T) {
 			chain.DeploymentErrors = map[string]string{"uniswap-v3": "unavailable"}
 			wantCalls, wantErrors = 0, 1
 		}
-		h := Handler{Chains: map[string]Chain{"base": chain}, QuoteConcurrency: int(^uint(0) >> 1)}
+		h := configuredHandler(Handler{Chains: map[string]Chain{"base": chain}, QuoteConcurrency: int(^uint(0) >> 1)})
 		response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
 		if err != nil {
 			t.Fatal(err)
@@ -553,7 +553,7 @@ func TestQuoteConcurrencyBoundsCandidateCalls(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: testChainConfig()}}, QuoteConcurrency: concurrency}).GetQuote(context.Background(), connect.NewRequest(validRequest()))
+		_, err := configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: testChainConfig()}}, QuoteConcurrency: concurrency}).GetQuote(context.Background(), connect.NewRequest(validRequest()))
 		done <- err
 	}()
 	for range concurrency {
@@ -639,7 +639,7 @@ func TestBestRouteUsesExactIntegersAndCandidateOrderForTies(t *testing.T) {
 			d := cfg.Deployments["uniswap-v3"]
 			d.Fees = []uint32{500, 100}
 			cfg.Deployments["uniswap-v3"] = d
-			h := Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 2}
+			h := configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 2})
 			response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
 			if err != nil {
 				t.Fatal(err)
@@ -689,7 +689,7 @@ func TestBestRouteCanBeDirectOrTwoHopOnEitherVenue(t *testing.T) {
 						return quoteResponse(7), nil
 					},
 				}
-				h := Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 4}
+				h := configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 4})
 				response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
 				if err != nil {
 					t.Fatal(err)
@@ -764,7 +764,7 @@ func TestSearchKeepsSameKindDeploymentsSeparateFromExecutor(t *testing.T) {
 		}
 		return quoteResponse(173), nil
 	}}
-	h := Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 2}
+	h := configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: client, Config: cfg}}, QuoteConcurrency: 2})
 	response, err := h.GetQuote(context.Background(), connect.NewRequest(validRequest()))
 	if err != nil || len(response.Msg.Routes) != 2 {
 		t.Fatal("search hid same-kind deployment", err)
