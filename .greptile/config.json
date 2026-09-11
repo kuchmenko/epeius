@@ -1,0 +1,58 @@
+{
+  "strictness": 3,
+  "commentTypes": ["logic", "syntax"],
+  "triggerOnDrafts": false,
+  "triggerOnUpdates": true,
+  "statusCheck": true,
+  "statusCommentsEnabled": false,
+  "shouldUpdateDescription": false,
+  "fixWithAI": false,
+  "autoApprove": {
+    "enabled": false
+  },
+  "summarySection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": false
+  },
+  "issuesTableSection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": false
+  },
+  "confidenceScoreSection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": false
+  },
+  "sequenceDiagramSection": {
+    "included": false
+  },
+  "ignorePatterns": "generated/**\n**/bun.lock\ncontracts/abi/**\ncontracts/fixtures/**\ndocs/base-sepolia-acceptance.json\ndist/**\n.tools/**\n.testnet/**\ncontracts/out/**\ncontracts/cache/**\ncontracts/broadcast/**",
+  "rules": [
+    {
+      "id": "terminal-exact-consent",
+      "rule": "Report a high-severity issue when terminal code can submit terms that differ from the locally admitted and consented chain, account, target, spender, value, calldata, routes, amounts, minimum, or deadline; can resend after handoff; or treats receipt status without canonical identity and token deltas as verified success.",
+      "scope": ["apps/terminal/**"],
+      "severity": "high"
+    },
+    {
+      "id": "engine-exact-quote",
+      "rule": "Report a high-severity issue when quote or preparation code uses floating-point atomic math, mixes block snapshots, changes deterministic ordering, scales allocations, rebuilds immutable terms during recheck, confuses deployment identity with protocol kind, or leaks upstream errors.",
+      "scope": ["services/quote-engine/**"],
+      "severity": "high"
+    },
+    {
+      "id": "executor-accounting",
+      "rule": "Report a high-severity issue when executor code can accept malformed plans, spend entry dust, trust router return values instead of balance deltas, leave temporary allowances, accept partial input consumption, enforce allocation minima instead of one aggregate minimum, or fail to roll back the full call.",
+      "scope": ["contracts/**"],
+      "severity": "high"
+    },
+    {
+      "id": "harness-write-gates",
+      "rule": "Report a high-severity issue when harness code can sign or send without explicit broadcast and full preflight, exposes credentials, changes recovery bytes after an unknown send, or presents mutable public-testnet results as deterministic or production evidence.",
+      "scope": ["scripts/testnet/**"],
+      "severity": "high"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "description": "Repository-wide architecture, protocol, and verification rules"
+    },
+    {
+      "path": "services/quote-engine/AGENTS.md",
+      "description": "Quote and preparation invariants",
+      "scope": ["services/quote-engine/**"]
+    },
+    {
+      "path": "apps/terminal/AGENTS.md",
+      "description": "Consent, signing, submission, and receipt rules",
+      "scope": ["apps/terminal/**"]
+    },
+    {
+      "path": "contracts/AGENTS.md",
+      "description": "Executor accounting and supported contract behavior",
+      "scope": ["contracts/**"]
+    },
+    {
+      "path": "scripts/testnet/AGENTS.md",
+      "description": "Harness safety and evidence limits",
+      "scope": ["scripts/testnet/**"]
+    }
+  ]
+}

@@ -10,7 +10,7 @@ bun run setup
 bun run generate
 ```
 
-`setup` installs pinned Go generators in `.tools/bin` and downloads Go modules. No global protocol generator is needed. `generate` updates checked-in Go and TypeScript bindings from `proto/epeius/quote/v1/quote.proto`. Edit the proto, not generated files.
+`setup` installs pinned Go generators and Staticcheck in `.tools/bin`, then downloads Go modules. No global protocol generator is needed. `generate` updates checked-in Go and TypeScript bindings from `proto/epeius/quote/v1/quote.proto`. Edit the proto, not generated files.
 
 Testnet tooling has a separate lockfile and dependency directory:
 
@@ -31,12 +31,14 @@ bun run smoke
 forge test --root contracts
 ```
 
-- `check` runs Biome, TypeScript checks, Go race tests, Bun tests, and builds. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
+- `check` runs Biome, TypeScript checks, Go vet, Staticcheck for the first-party quote engine, Go race tests, Bun tests, and builds. Staticcheck inherits its default checks except ST1005 because fixed outward simulation messages are sentence-style protocol text. Generated Go remains covered by formatting, vet, race, and generated-file drift checks, not Staticcheck. Run `bun run setup` first so the pinned Staticcheck binary is available. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
 - `check:generated` regenerates bindings in a temporary directory and compares them with checked-in files.
 - `smoke` uses root TOML endpoint and an already running engine. It requires every engine chain to be connected and checks positive Base WETH/USDC quotes in both directions. It is read-only and does not stop the engine.
-- `forge test` runs local executor and harness tests, including authentic Uniswap/Pancake partial-input behavior. Use `forge test --root contracts --fuzz-runs 10000` for the larger valid-allocation fuzz run. It does not deploy to Base Sepolia.
+- `forge test` runs local executor and harness tests, including authentic Uniswap/Pancake partial-input behavior. Use `forge test --root contracts --fuzz-runs 10000` for the larger valid-allocation fuzz run. Run `forge fmt --check contracts/src/Executor.sol contracts/test/Executor.t.sol contracts/test/ExecutorRouters.t.sol` to check the maintained Solidity sources. Neither command deploys to Base Sepolia.
 
 CI uses credential-free local RPC and Connect fixtures. Live testnet checks are separate. Passing local or dev checks is not evidence of production behavior.
+
+Pull requests also run `buf breaking` against `main`. CI runs on pull requests and pushes to `main`; newer runs for the same pull request cancel older runs. Keep the existing `foundation` and `harness` job names stable when configuring required checks.
 
 `check` already includes Go vet/race and the Bun/Go Connect transport test; do not rerun those suites merely under different command names. Build the local harness prerequisites above before claiming the optional dry-deploy fixture passed rather than skipped. ABI regression evidence must remain independent: production terminal encoding uses a pinned ABI library, while Go ABI, Cast, and stored golden vectors check the same bytes. Do not generate expected test vectors with the production terminal encoder. Strict decimal parsing remains separate from ABI encoding.
 
@@ -48,7 +50,7 @@ For execution review, run the CLI with local Connect/RPC fixtures and a stub Cas
 | --- | --- | --- |
 | `dist/epeius-engine` | engine build | Local Go executable; rebuilt by `bun run engine` |
 | `generated/go/`, `generated/ts/` | `bun run generate` | Checked-in protocol bindings; `check:generated` detects drift |
-| `.tools/bin/` | `bun run setup` | Ignored pinned generators |
+| `.tools/bin/` | `bun run setup` | Ignored pinned Go tools |
 | stdout/stderr | check and smoke commands | Child output is inherited or summarized; nonzero exit means a check failed |
 | `contracts/out/`, `contracts/cache/` | Forge build/tests | Ignored compiler artifacts and cache |
 | `.testnet/` | harness preparation, deployment, and E2E | Ignored artifacts and sensitive recovery records; see [testnet output](testnet.md#outputs-and-interpretation) |
