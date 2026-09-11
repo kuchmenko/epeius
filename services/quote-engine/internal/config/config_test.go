@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 )
 
@@ -35,7 +36,7 @@ func loadText(t *testing.T, text string) (Config, error) {
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return Load(path, ValidateV3Chain)
+	return Load(path, ValidateChain)
 }
 
 func TestLoadValidConfig(t *testing.T) {
@@ -195,6 +196,45 @@ tick_spacings = [-8388608, -1, 1, 100, 8388607]
 	}
 	if _, err := loadText(t, strings.Replace(text, "0x2222222222222222222222222222222222222222", "0x4444444444444444444444444444444444444444", 1)); err != nil {
 		t.Fatal("rejected configured Slipstream address before runtime linkage verification")
+	}
+}
+
+func TestBalancerV2RequiresEthereumVaultAndFullLowercasePoolIDs(t *testing.T) {
+	const pool = "0x06df3b2bbb68adc8b0e302443692037ed9f91b42000000000000000000000063"
+	text := validConfig + `
+[chains.test-net.deployments.balancer]
+kind = "balancer-v2"
+
+[chains.test-net.deployments.balancer.options]
+vault = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+pools = ["` + pool + `"]
+`
+	got, err := loadText(t, text)
+	options, ok := got.Chains["test-net"].Deployments["balancer"].ProviderConfig.(balancer.Options)
+	if err != nil || !ok || options.Vault != "0xBA12222222228d8Ba445958a75a0704d566BF2C8" || !slices.Equal(options.Pools, []string{pool}) {
+		t.Fatalf("Balancer config rejected: %+v %v", got, err)
+	}
+	for _, change := range [][2]string{
+		{"0xBA12222222228d8Ba445958a75a0704d566BF2C8", "0x0000000000000000000000000000000000000000"},
+		{pool, pool[:42]},
+		{pool, strings.ToUpper(pool)},
+		{`pools = ["` + pool + `"]`, `pools = ["` + pool + `", "` + pool + `"]`},
+		{`pools = ["` + pool + `"]`, "pools = [\"" + pool + "\"]\nunknown = true"},
+	} {
+		if _, err := loadText(t, strings.Replace(text, change[0], change[1], 1)); err == nil {
+			t.Fatalf("invalid Balancer config accepted: %s", change[1])
+		}
+	}
+	for _, field := range []string{
+		`factory = "0x1111111111111111111111111111111111111111"`,
+		`quoter = "0x2222222222222222222222222222222222222222"`,
+		`router = "0x3333333333333333333333333333333333333333"`,
+		"fees = [500]",
+	} {
+		changed := strings.Replace(text, "kind = \"balancer-v2\"", "kind = \"balancer-v2\"\n"+field, 1)
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatalf("accepted inapplicable Balancer field %s", field)
+		}
 	}
 }
 

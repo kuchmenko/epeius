@@ -1,6 +1,6 @@
 # Epeius
 
-Epeius is an open-source EVM quote engine and trading terminal for researching deterministic multi-venue routing and verifiable execution. One Go engine serves every configured positive chain ID. A Bun terminal uses ConnectRPC to request quotes and, only when `execution_enabled = true`, prepare and submit transactions with a local signer. Chain, token, contract, and pool-fee allowlists come from TOML; there are no implicit Base WETH, USDC, or Uniswap defaults. The checked-in root configuration keeps execution disabled on every chain.
+Epeius is an open-source EVM quote engine and trading terminal for researching deterministic multi-venue routing and verifiable execution. One Go engine serves every configured positive chain ID. A Bun terminal uses ConnectRPC to request quotes and, only when `execution_enabled = true`, prepare and submit transactions with a local signer. Supported direct providers include Uniswap V3, Pancake V3, Aerodrome Slipstream, and Balancer V2. Chain, token, contract, and pool-selector allowlists come from TOML; there are no implicit network, token, or provider defaults. The checked-in root configuration keeps execution disabled on every chain.
 
 ## Quick start
 
@@ -34,6 +34,7 @@ Start at the [documentation index](docs/README.md):
 - [Terminal](docs/terminal.md)
 - [Testnet harness and contracts](docs/testnet.md)
 - [Execution contract and known limitations](docs/execution.md)
+- [Balancer V2 provider](docs/providers/balancer-v2.md)
 - [Development tooling](docs/development.md)
 - [ConnectRPC protocol](docs/protocol.md)
 

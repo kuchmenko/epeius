@@ -2,6 +2,7 @@ package quote
 
 import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 )
 
@@ -36,6 +37,17 @@ var providerRegistrations = map[string]providerRegistration{
 		return providerComponents{
 			quoter: provider, verifier: provider,
 			preparer: v3RouterPreparation{id: id, kind: deployment.Kind, target: deployment.Router, chainID: chain.ChainID, encode: slipstreamRouterData, verify: verifySlipstreamSignerDiscount, verificationFactory: deployment.Factory},
+		}
+	},
+	"balancer-v2": func(chain Chain, id string, deployment config.Deployment) providerComponents {
+		options, ok := deployment.ProviderConfig.(balancer.Options)
+		if !ok {
+			return providerComponents{}
+		}
+		provider := balancerV2Quoter{reader: chain.Client, id: id, options: options, poolErrors: map[string]string{}}
+		return providerComponents{
+			quoter: provider, verifier: provider,
+			preparer: balancerV2Preparation{id: id, chainID: chain.ChainID, options: options},
 		}
 	},
 }

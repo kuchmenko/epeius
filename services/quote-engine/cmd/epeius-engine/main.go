@@ -51,7 +51,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, output 
 		_, err := fmt.Fprintln(output, "usage: epeius-engine [--config PATH]\n       epeius-engine chains [--config PATH]\n       epeius-engine chain check KEY [--config PATH]")
 		return err
 	}
-	settings, err := config.Load(path, config.ValidateV3Chain)
+	settings, err := config.Load(path, config.ValidateChain)
 	if err != nil {
 		return err
 	}

@@ -158,10 +158,19 @@ export function formatQuote(
     lines.push(`Output: ${amount(tokenOut, route.amountOutAtomic)}`);
     if (route.block)
       lines.push(`Route block: ${route.block.number} (${route.block.hash})`);
-    for (const [index, leg] of route.legs.entries())
+    for (const [index, leg] of route.legs.entries()) {
+      const selector =
+        leg.selector.case === "feePips"
+          ? `fee ${leg.selector.value} pips`
+          : leg.selector.case === "tickSpacing"
+            ? `tick spacing ${leg.selector.value}`
+            : /^0x[0-9a-f]{64}$/.test(leg.pool)
+              ? `pool address 0x${leg.pool.slice(2, 42)}`
+              : "unknown selector";
       lines.push(
-        `Leg ${index + 1}: pool ${leg.pool}; ${leg.selector.case === "feePips" ? `fee ${leg.selector.value} pips` : leg.selector.case === "tickSpacing" ? `tick spacing ${leg.selector.value}` : "unknown selector"}; ${leg.tokenIn} to ${leg.tokenOut}`,
+        `Leg ${index + 1}: pool ${leg.pool}; ${selector}; ${leg.tokenIn} to ${leg.tokenOut}`,
       );
+    }
     lines.push(`Latency: ${route.latencyMs} ms`);
   }
   for (const error of quote.errors)

@@ -35,7 +35,7 @@ Clients send canonical token addresses, positive decimal atomic input, search bu
 
 `searchComplete: true` means all candidate attempts finished before the budget. It does not mean all candidates succeeded. `false` means some routes may be missing; returned routes and errors still describe completed work. No route means failure to find a usable route, even if search completed.
 
-Each route identifies provider, configured deployment, exact atomic output, block, latency, and one or two legs. Arbitrary-length routes are not supported. `feePips` is millionths and may be 0 through 999,999; a configured fee yields a route only when the configured factory has a pool. `tickSpacing` is a signed Slipstream selector, not a fee. Optional cost fields remain absent: unknown or uncomputed, never zero.
+Each route identifies provider, configured deployment, exact atomic output, block, latency, and protocol-defined legs. V3 routes have one or two legs and use `feePips`, measured in millionths. Balancer V2 routes have one leg, store complete lowercase `bytes32 poolId` in `pool`, and leave selector absent. Optional cost fields remain absent: unknown or uncomputed, never zero.
 
 All calls at quote time use one canonical EIP-1898 block hash. There is no fallback to latest state. Quote output is informational and does not authorize execution.
 

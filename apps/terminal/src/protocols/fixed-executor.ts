@@ -48,7 +48,7 @@ export function fixedExecutor(
   },
   deployments: Record<
     string,
-    { kind: string; router: string; fees?: number[] }
+    { kind: string; router?: string; fees?: number[] }
   >,
 ) {
   const address = `0x${raw.address?.replace(/^0x/i, "") ?? ""}`.toLowerCase();
@@ -63,6 +63,8 @@ export function fixedExecutor(
     !pan ||
     uni.kind !== "uniswap-v3" ||
     pan.kind !== "pancake-v3" ||
+    typeof uni.router !== "string" ||
+    typeof pan.router !== "string" ||
     !Array.isArray(uni.fees) ||
     !Array.isArray(pan.fees) ||
     uni.router === pan.router
