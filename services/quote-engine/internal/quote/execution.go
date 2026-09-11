@@ -7,7 +7,6 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -18,79 +17,6 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 )
-
-const retention = 30 * time.Second
-const storeLimit = 1024
-
-type storedQuote struct {
-	request   *quotev1.QuoteRequest
-	final     *quotev1.QuoteFinal
-	expires   time.Time
-	approvals map[string]bool
-}
-type preparation struct {
-	response    *quotev1.PrepareExecutionResponse
-	transaction *quotev1.UnsignedTransaction
-	chain       string
-	expires     time.Time
-	approval    bool
-}
-type Store struct {
-	mu           sync.Mutex
-	quotes       map[string]storedQuote
-	preparations map[string]preparation
-}
-
-func NewStore() *Store {
-	return &Store{quotes: map[string]storedQuote{}, preparations: map[string]preparation{}}
-}
-
-func (s *Store) prune(now time.Time) {
-	for id, q := range s.quotes {
-		if !now.Before(q.expires) {
-			delete(s.quotes, id)
-		}
-	}
-	for id, p := range s.preparations {
-		if !now.Before(p.expires) {
-			delete(s.preparations, id)
-		}
-	}
-}
-
-func (s *Store) saveQuote(r *quotev1.QuoteRequest, f *quotev1.QuoteFinal, now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.prune(time.Now())
-	if len(s.quotes) >= storeLimit {
-		var oldest string
-		var expiry time.Time
-		for id, q := range s.quotes {
-			if oldest == "" || q.expires.Before(expiry) {
-				oldest, expiry = id, q.expires
-			}
-		}
-		delete(s.quotes, oldest)
-	}
-	s.quotes[f.QuoteId] = storedQuote{proto.Clone(r).(*quotev1.QuoteRequest), proto.Clone(f).(*quotev1.QuoteFinal), now.Add(retention), map[string]bool{}}
-}
-
-func (s *Store) savePreparation(p preparation) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.prune(time.Now())
-	if len(s.preparations) >= storeLimit {
-		var oldest string
-		var expiry time.Time
-		for id, v := range s.preparations {
-			if oldest == "" || v.expires.Before(expiry) {
-				oldest, expiry = id, v.expires
-			}
-		}
-		delete(s.preparations, oldest)
-	}
-	s.preparations[p.response.PreparationId] = p
-}
 
 type Simulator interface {
 	Simulate(context.Context, *quotev1.UnsignedTransaction, *quotev1.RouteQuote, rpc.Snapshot, *big.Int, *big.Int) (string, error)
@@ -120,11 +46,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote unavailable; request a fresh quote")
 	}
 	now := time.Now()
-	h.Store.mu.Lock()
-	h.Store.prune(now)
-	saved, found := h.Store.quotes[r.QuoteId]
-	p, recheck := h.Store.preparations[r.PreparationId]
-	h.Store.mu.Unlock()
+	saved, found, p, recheck := h.Store.lookup(r.QuoteId, r.PreparationId, now)
 	if r.PreparationId != "" && !recheck || r.PreparationId == "" && !found {
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote or preparation expired or unavailable")
 	}
@@ -220,16 +142,8 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "allowance check failed")
 	}
 	if !recheck {
-		h.Store.mu.Lock()
-		q, exists := h.Store.quotes[r.QuoteId]
-		if exists {
-			approvalKey := response.Recipient + p.transaction.To
-			p.approval = q.approvals[approvalKey]
-			if new(big.Int).SetBytes(allowanceBytes).Cmp(amount) < 0 {
-				q.approvals[approvalKey] = true
-			}
-		}
-		h.Store.mu.Unlock()
+		var exists bool
+		p.approval, exists = h.Store.markApproval(r.QuoteId, response.Recipient+p.transaction.To, new(big.Int).SetBytes(allowanceBytes).Cmp(amount) < 0, time.Now())
 		if !exists || !time.Now().Before(saved.expires) {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote expired during preparation")
 		}

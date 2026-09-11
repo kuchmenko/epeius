@@ -303,3 +303,62 @@ func TestQuoteStoreClonesBoundsAndConcurrentAccess(t *testing.T) {
 		t.Fatal("expired quotes retained")
 	}
 }
+
+func TestStoreLookupAndApprovalAreDetachedAndAtomic(t *testing.T) {
+	s := NewStore()
+	now := time.Now()
+	s.saveQuote(&quotev1.QuoteRequest{AmountInAtomic: "37"}, &quotev1.QuoteFinal{QuoteId: "q", Routes: []*quotev1.RouteQuote{testRoute()}}, now)
+	p := preparation{response: &quotev1.PrepareExecutionResponse{PreparationId: "p", Route: testRoute()}, transaction: &quotev1.UnsignedTransaction{Data: "0x1234"}, expires: now.Add(retention)}
+	s.savePreparation(p)
+	p.transaction.Data = "changed after save"
+	p.response.Route.Legs[0].Pool = "changed after save"
+	q, found, loaded, recheck := s.lookup("q", "p", now)
+	if !found || !recheck || q.approvals != nil || loaded.transaction.Data != "0x1234" || loaded.response.Route.Legs[0].Pool != tokenA {
+		t.Fatal("Store did not detach saved terms")
+	}
+	q.request.AmountInAtomic = "64"
+	q.final.Routes[0].Legs[0].Pool = "changed after lookup"
+	loaded.transaction.Data = "changed after lookup"
+	loaded.response.Route.Legs[0].Pool = "changed after lookup"
+	q, _, loaded, _ = s.lookup("q", "p", now)
+	if q.request.AmountInAtomic != "37" || q.final.Routes[0].Legs[0].Pool != tokenA || loaded.transaction.Data != "0x1234" || loaded.response.Route.Legs[0].Pool != tokenA {
+		t.Fatal("lookup exposed stored terms")
+	}
+	var wait sync.WaitGroup
+	previous := make(chan bool, 32)
+	for range 32 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			wasRequired, found := s.markApproval("q", "wallet+spender", true, now)
+			if !found {
+				t.Error("live quote disappeared")
+			}
+			previous <- wasRequired
+			s.lookup("q", "p", now)
+		}()
+	}
+	wait.Wait()
+	close(previous)
+	first := 0
+	for wasRequired := range previous {
+		if !wasRequired {
+			first++
+		}
+	}
+	if first != 1 {
+		t.Fatalf("approval observation was not atomic: %d first writers", first)
+	}
+	if wasRequired, found := s.markApproval("q", "wallet+spender", false, now); !found || !wasRequired {
+		t.Fatal("approval history lost when allowance became sufficient")
+	}
+	if _, found, _, recheck := s.lookup("q", "p", now.Add(retention-time.Nanosecond)); !found || !recheck {
+		t.Fatal("terms expired before retention boundary")
+	}
+	if _, found, _, recheck := s.lookup("q", "p", now.Add(retention)); found || recheck {
+		t.Fatal("terms survived retention boundary")
+	}
+	if _, found := s.markApproval("q", "wallet+spender", true, now.Add(retention)); found {
+		t.Fatal("approval marking resurrected expired quote")
+	}
+}
