@@ -6,11 +6,9 @@ import (
 	"errors"
 	"math/big"
 	"strconv"
-	"strings"
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
@@ -20,6 +18,11 @@ import (
 
 type Simulator interface {
 	Simulate(context.Context, *quotev1.UnsignedTransaction, *quotev1.RouteQuote, rpc.Snapshot, *big.Int, *big.Int) (string, error)
+}
+
+type allocationSimulator interface {
+	Simulator
+	SimulateAllocations(context.Context, *quotev1.UnsignedTransaction, []*quotev1.QuotedAllocation, map[string]string, rpc.Snapshot, *big.Int, *big.Int) (string, error)
 }
 
 type executionReader interface {
@@ -72,59 +75,31 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		if err := reader.Canonical(ctx, rpc.Snapshot{BlockNumber: saved.final.Block.Number, BlockHash: saved.final.Block.Hash}); err != nil {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote block is no longer canonical")
 		}
+		var message string
 		if len(r.Allocations) > 0 {
 			allocations, err := quoteAllocations(ctx, chain, saved, r.Allocations)
 			if err != nil {
 				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor allocations could not be quoted")
 			}
-			output := new(big.Int)
-			for _, allocation := range allocations {
-				amount, _ := new(big.Int).SetString(allocation.Route.AmountOutAtomic, 10)
-				output.Add(output, amount)
-			}
-			minimum := new(big.Int).Div(new(big.Int).Mul(output, big.NewInt(int64(10000-r.SlippageBps))), big.NewInt(10000))
-			if minimum.Sign() == 0 || output.BitLen() > 256 {
-				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "invalid aggregate output")
-			}
-			deadline := snapshot.Timestamp + 120
-			sender := common.HexToAddress(r.Sender).Hex()
-			response := &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: saved.request.AmountInAtomic, TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Allocations: allocations}
-			data, err := executorData(chain.Config, response, deadline)
-			if err != nil {
-				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor plan could not be encoded")
-			}
-			p = preparation{chain: key, expires: now.Add(retention), response: response, transaction: &quotev1.UnsignedTransaction{ChainId: chain.ChainID, To: common.HexToAddress(chain.Config.Executor.Address).Hex(), From: sender, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "3000000"}}
+			p, message = executorPreparation(chain, saved, r, allocations, now, snapshot.Timestamp)
 		} else {
 			var route *quotev1.RouteQuote
 			for _, candidate := range saved.final.Routes {
 				if candidate.RouteId == r.RouteId {
-					route = proto.Clone(candidate).(*quotev1.RouteQuote)
+					route = proto.CloneOf(candidate)
 					break
 				}
 			}
 			if route == nil {
 				return invalid()
 			}
-			deployment, ok := chain.Config.Deployments[route.DeploymentId]
-			if !ok {
-				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "deployment unavailable")
-			}
-			amount, _ := new(big.Int).SetString(saved.request.AmountInAtomic, 10)
-			output, _ := new(big.Int).SetString(route.AmountOutAtomic, 10)
-			minimum := new(big.Int).Div(new(big.Int).Mul(output, big.NewInt(int64(10000-r.SlippageBps))), big.NewInt(10000))
-			if minimum.Sign() == 0 {
-				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "minimum output must be positive")
-			}
-			deadline := snapshot.Timestamp + 120
-			sender := common.HexToAddress(r.Sender).Hex()
-			data, err := swapData(deployment.Kind, route, sender, amount, minimum, deadline)
-			if err != nil {
-				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "unsupported route")
-			}
-			p = preparation{chain: key, expires: now.Add(retention), transaction: &quotev1.UnsignedTransaction{ChainId: chain.ChainID, To: common.HexToAddress(deployment.Router).Hex(), From: sender, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1500000"}, response: &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: amount.String(), TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Route: route}}
+			p, message = directPreparation(chain, saved, r, route, now, snapshot.Timestamp)
+		}
+		if message != "" {
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, message)
 		}
 	}
-	response := proto.Clone(p.response).(*quotev1.PrepareExecutionResponse)
+	response := proto.CloneOf(p.response)
 	if len(response.Allocations) > 0 {
 		if err := verifyExecutor(ctx, reader, chain.Config, common.HexToHash(snapshot.BlockHash)); err != nil {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor verification failed")
@@ -170,9 +145,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 	}
 	var output string
 	if len(response.Allocations) > 0 {
-		simulator, ok := h.Simulator.(interface {
-			SimulateAllocations(context.Context, *quotev1.UnsignedTransaction, []*quotev1.QuotedAllocation, map[string]string, rpc.Snapshot, *big.Int, *big.Int) (string, error)
-		})
+		simulator, ok := h.Simulator.(allocationSimulator)
 		if !ok {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor simulation unavailable")
 		}
@@ -194,59 +167,51 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "preparation expired during simulation")
 	}
 	response.Status = quotev1.PreparationStatus_PREPARATION_STATUS_READY
-	response.Transaction = proto.Clone(p.transaction).(*quotev1.UnsignedTransaction)
+	response.Transaction = proto.CloneOf(p.transaction)
 	response.SimulationBlock = &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
 	response.SimulatedAmountOutAtomic = output
 	h.Store.savePreparation(p)
 	return connect.NewResponse(response), nil
 }
 
-func mustABI(source string) abi.ABI {
-	result, err := abi.JSON(strings.NewReader(source))
-	if err != nil {
-		panic(err)
+// These constructors finish immutable terms and calldata once. Their failure
+// messages are fixed public text; packing errors never leave this package.
+func directPreparation(chain Chain, saved storedQuote, r *quotev1.PrepareExecutionRequest, route *quotev1.RouteQuote, now time.Time, timestamp uint64) (preparation, string) {
+	deployment, ok := chain.Config.Deployments[route.DeploymentId]
+	if !ok {
+		return preparation{}, "deployment unavailable"
 	}
-	return result
+	amount, _ := new(big.Int).SetString(saved.request.AmountInAtomic, 10)
+	output, _ := new(big.Int).SetString(route.AmountOutAtomic, 10)
+	minimum := new(big.Int).Div(new(big.Int).Mul(output, big.NewInt(int64(10000-r.SlippageBps))), big.NewInt(10000))
+	if minimum.Sign() == 0 {
+		return preparation{}, "minimum output must be positive"
+	}
+	deadline := timestamp + 120
+	sender := common.HexToAddress(r.Sender).Hex()
+	data, err := swapData(deployment.Kind, route, sender, amount, minimum, deadline)
+	if err != nil {
+		return preparation{}, "unsupported route"
+	}
+	return preparation{chain: saved.request.Chain, expires: now.Add(retention), transaction: &quotev1.UnsignedTransaction{ChainId: chain.ChainID, To: common.HexToAddress(deployment.Router).Hex(), From: sender, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1500000"}, response: &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: amount.String(), TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Route: route}}, ""
 }
 
-var erc20ABI = mustABI(`[{"name":"allowance","type":"function","inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"outputs":[{"type":"uint256"}]},{"name":"approve","type":"function","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"type":"bool"}]},{"name":"balanceOf","type":"function","inputs":[{"name":"owner","type":"address"}],"outputs":[{"type":"uint256"}]}]`)
-var uniRouterABI = mustABI(`[{"name":"exactInput","type":"function","inputs":[{"name":"params","type":"tuple","components":[{"name":"path","type":"bytes"},{"name":"recipient","type":"address"},{"name":"amountIn","type":"uint256"},{"name":"amountOutMinimum","type":"uint256"}]}],"outputs":[{"type":"uint256"}]},{"name":"multicall","type":"function","inputs":[{"name":"deadline","type":"uint256"},{"name":"data","type":"bytes[]"}],"outputs":[{"type":"bytes[]"}]}]`)
-
-// Pancake v3-periphery ISwapRouter (not SmartRouter): the deadline is inside the tuple.
-// https://github.com/pancakeswap/pancake-v3-contracts/blob/main/projects/v3-periphery/contracts/interfaces/ISwapRouter.sol
-var pancakeRouterABI = mustABI(`[{"name":"exactInput","type":"function","inputs":[{"name":"params","type":"tuple","components":[{"name":"path","type":"bytes"},{"name":"recipient","type":"address"},{"name":"deadline","type":"uint256"},{"name":"amountIn","type":"uint256"},{"name":"amountOutMinimum","type":"uint256"}]}],"outputs":[{"type":"uint256"}]}]`)
-
-func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
-	if len(route.Legs) < 1 || len(route.Legs) > 2 {
-		return nil, errors.New("unsupported path")
+func executorPreparation(chain Chain, saved storedQuote, r *quotev1.PrepareExecutionRequest, allocations []*quotev1.QuotedAllocation, now time.Time, timestamp uint64) (preparation, string) {
+	output := new(big.Int)
+	for _, allocation := range allocations {
+		amount, _ := new(big.Int).SetString(allocation.Route.AmountOutAtomic, 10)
+		output.Add(output, amount)
 	}
-	var path []byte
-	for i, leg := range route.Legs {
-		fee, ok := leg.Selector.(*quotev1.RouteLeg_FeePips)
-		if !ok || fee.FeePips >= 1000000 || !address.MatchString(leg.TokenIn) || !address.MatchString(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
-			return nil, errors.New("invalid path")
-		}
-		path = append(path, common.HexToAddress(leg.TokenIn).Bytes()...)
-		path = append(path, byte(fee.FeePips>>16), byte(fee.FeePips>>8), byte(fee.FeePips))
+	minimum := new(big.Int).Div(new(big.Int).Mul(output, big.NewInt(int64(10000-r.SlippageBps))), big.NewInt(10000))
+	if minimum.Sign() == 0 || output.BitLen() > 256 {
+		return preparation{}, "invalid aggregate output"
 	}
-	path = append(path, common.HexToAddress(route.Legs[len(route.Legs)-1].TokenOut).Bytes()...)
-	if kind == "pancake-v3" {
-		return pancakeRouterABI.Pack("exactInput", struct {
-			Path                                 []byte
-			Recipient                            common.Address
-			Deadline, AmountIn, AmountOutMinimum *big.Int
-		}{path, common.HexToAddress(sender), new(big.Int).SetUint64(deadline), amount, minimum})
-	}
-	if kind != "uniswap-v3" {
-		return nil, errors.New("unsupported router")
-	}
-	inner, err := uniRouterABI.Pack("exactInput", struct {
-		Path                       []byte
-		Recipient                  common.Address
-		AmountIn, AmountOutMinimum *big.Int
-	}{path, common.HexToAddress(sender), amount, minimum})
+	deadline := timestamp + 120
+	sender := common.HexToAddress(r.Sender).Hex()
+	response := &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: saved.request.AmountInAtomic, TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Allocations: allocations}
+	data, err := executorData(chain.Config, response, deadline)
 	if err != nil {
-		return nil, err
+		return preparation{}, "executor plan could not be encoded"
 	}
-	return uniRouterABI.Pack("multicall", new(big.Int).SetUint64(deadline), [][]byte{inner})
+	return preparation{chain: saved.request.Chain, expires: now.Add(retention), response: response, transaction: &quotev1.UnsignedTransaction{ChainId: chain.ChainID, To: common.HexToAddress(chain.Config.Executor.Address).Hex(), From: sender, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "3000000"}}, ""
 }
