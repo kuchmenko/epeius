@@ -87,58 +87,22 @@ type simulationResult struct {
 	} `json:"transaction"`
 }
 
-type balanceProbe struct{ token, owner string }
-
-func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, route *quotev1.RouteQuote, snapshot rpc.Snapshot, amount, minimum *big.Int) (string, error) {
-	if route == nil || len(route.Legs) < 1 || len(route.Legs) > 2 {
-		return "", errors.New("invalid simulation route")
-	}
-	probes := []balanceProbe{{route.Legs[0].TokenIn, tx.From}, {route.Legs[len(route.Legs)-1].TokenOut, tx.From}}
-	if len(route.Legs) == 2 {
-		probes = append(probes, balanceProbe{route.Legs[0].TokenOut, tx.To})
-	}
-	return t.simulate(ctx, tx, probes, nil, snapshot, amount, minimum)
-}
-
-func (t *Tenderly) SimulateAllocations(ctx context.Context, tx *quotev1.UnsignedTransaction, allocations []*quotev1.QuotedAllocation, routers map[string]string, snapshot rpc.Snapshot, amount, minimum *big.Int) (string, error) {
-	if len(allocations) < 1 || len(allocations) > 2 || allocations[0].GetRoute() == nil || len(allocations[0].Route.Legs) == 0 {
-		return "", errors.New("invalid simulation allocations")
-	}
-	first := allocations[0].Route.Legs
-	probes := []balanceProbe{{first[0].TokenIn, tx.From}, {first[len(first)-1].TokenOut, tx.From}}
-	// For allowance probes, owner names the spender; the owner is tx.To.
-	var allowances []balanceProbe
-	add := func(token, owner string) {
-		for _, existing := range probes {
-			if strings.EqualFold(existing.token, token) && strings.EqualFold(existing.owner, owner) {
-				return
-			}
-		}
-		probes = append(probes, balanceProbe{token, owner})
-	}
-	for _, a := range allocations {
-		if a.GetRoute() == nil || len(a.Route.Legs) < 1 || len(a.Route.Legs) > 2 || !address.MatchString(routers[a.Route.DeploymentId]) {
-			return "", errors.New("invalid simulation allocation route")
-		}
-		for _, leg := range a.Route.Legs {
-			allowances = append(allowances, balanceProbe{leg.TokenIn, routers[a.Route.DeploymentId]})
-			for _, token := range []string{leg.TokenIn, leg.TokenOut} {
-				// All executor balances and router balances must be preserved.
-				// Wallet intermediates must not change either.
-				for _, owner := range []string{tx.From, tx.To, routers[a.Route.DeploymentId]} {
-					add(token, owner)
-				}
-			}
-		}
-	}
-	return t.simulate(ctx, tx, probes, allowances, snapshot, amount, minimum)
-}
-
-func (t *Tenderly) simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, balances, allowances []balanceProbe, snapshot rpc.Snapshot, amount, minimum *big.Int) (string, error) {
+func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, checks SimulationChecks, snapshot rpc.Snapshot, amount, minimum *big.Int) (string, error) {
 	fail := errors.New("simulation verification failed")
 	slug := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 	if t.key == "" || !slug.MatchString(t.account) || !slug.MatchString(t.project) {
 		return "", errSimulationNotConfigured
+	}
+	balances := append([]BalanceProbe{checks.Input, checks.Output}, checks.Preserve...)
+	for _, probe := range balances {
+		if !address.MatchString(probe.Token) || !address.MatchString(probe.Owner) {
+			return "", fail
+		}
+	}
+	for _, probe := range checks.ClearAllowances {
+		if !address.MatchString(probe.Token) || !address.MatchString(probe.Owner) || !address.MatchString(probe.Spender) {
+			return "", fail
+		}
 	}
 	if !positiveInteger.MatchString(tx.ChainId) || tx.ChainId != snapshot.ChainID || tx.ValueAtomic != "0" {
 		return "", fail
@@ -166,7 +130,7 @@ func (t *Tenderly) simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 	}
 	var probes []simulationCall
 	for _, probe := range balances {
-		probes = append(probes, balance(probe.token, probe.owner))
+		probes = append(probes, balance(probe.Token, probe.Owner))
 	}
 	calls := append([]simulationCall(nil), probes...)
 	swap := base
@@ -174,10 +138,10 @@ func (t *Tenderly) simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 	swap.Input = tx.Data
 	calls = append(calls, swap)
 	calls = append(calls, probes...)
-	for _, probe := range allowances {
-		data, _ := erc20ABI.Pack("allowance", common.HexToAddress(tx.To), common.HexToAddress(probe.owner))
+	for _, probe := range checks.ClearAllowances {
+		data, _ := erc20ABI.Pack("allowance", common.HexToAddress(probe.Owner), common.HexToAddress(probe.Spender))
 		call := base
-		call.To, call.Input = probe.token, hexutil.Encode(data)
+		call.To, call.Input = probe.Token, hexutil.Encode(data)
 		calls = append(calls, call)
 	}
 	payload, err := json.Marshal(struct {

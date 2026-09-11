@@ -45,13 +45,15 @@ type Handler struct {
 }
 
 type Chain struct {
-	ChainID          string
-	Client           Reader
-	Snapshot         rpc.Snapshot
-	Error            string
-	Config           config.Chain
-	DeploymentErrors map[string]string
-	Quoters          map[string]ProtocolQuoter
+	ChainID            string
+	Client             Reader
+	Snapshot           rpc.Snapshot
+	Error              string
+	Config             config.Chain
+	DeploymentErrors   map[string]string
+	Quoters            map[string]ProtocolQuoter
+	Preparers          map[string]PreparationStrategy
+	AllocationPreparer PreparationStrategy
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)

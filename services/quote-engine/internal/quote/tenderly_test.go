@@ -24,6 +24,8 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+type balanceProbe struct{ token, owner string }
+
 func TestTenderlyExecutorVerifiesEveryTouchedTokenOwner(t *testing.T) {
 	const tokenD = "0x4444444444444444444444444444444444444444"
 	uni, pan := testRoute(), testRoute()
@@ -106,7 +108,8 @@ func TestTenderlyExecutorVerifiesEveryTouchedTokenOwner(t *testing.T) {
 			body, _ := json.Marshal(map[string]any{"simulation_results": results})
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 		})
-		output, err := service.SimulateAllocations(context.Background(), &quotev1.UnsignedTransaction{ChainId: "11155111", From: wallet, To: executorAddress, Data: "0x19b5e3d5abcd", ValueAtomic: "0", GasLimit: "3000000"}, allocations, map[string]string{"uni": router, "pan": pancakeAddress}, rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(101), big.NewInt(252))
+		tx := &quotev1.UnsignedTransaction{ChainId: "11155111", From: wallet, To: executorAddress, Data: "0x19b5e3d5abcd", ValueAtomic: "0", GasLimit: "3000000"}
+		output, err := service.Simulate(context.Background(), tx, executorChecks(tx, allocations, map[string]string{"uni": router, "pan": pancakeAddress}), rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(101), big.NewInt(252))
 		if changed == -1 && (err != nil || output != "252") {
 			t.Fatalf("valid executor simulation failed: %v", err)
 		}
@@ -247,7 +250,7 @@ func TestTenderlySequentialBundleExactBalancesAndFailClosed(t *testing.T) {
 				body, _ := json.Marshal(map[string]any{"simulation_results": results})
 				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 			})
-			output, err := tenderly.Simulate(context.Background(), &quotev1.UnsignedTransaction{ChainId: "11155111", From: wallet, To: router, Data: "0xaabbccdd", ValueAtomic: "0", GasLimit: "1500000"}, testRoute(), rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(111), big.NewInt(200))
+			output, err := tenderly.Simulate(context.Background(), &quotev1.UnsignedTransaction{ChainId: "11155111", From: wallet, To: router, Data: "0xaabbccdd", ValueAtomic: "0", GasLimit: "1500000"}, SimulationChecks{Input: BalanceProbe{tokenA, wallet}, Output: BalanceProbe{tokenC, wallet}, Preserve: []BalanceProbe{{tokenB, router}}}, rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(111), big.NewInt(200))
 			if test.want != nil {
 				if !errors.Is(err, test.want) || err.Error() != test.want.Error() || output != "" {
 					t.Fatalf("output=%q err=%v, want %v", output, err, test.want)
@@ -311,7 +314,7 @@ func TestTenderlyTransportErrorsAreSanitized(t *testing.T) {
 				}
 				return &http.Response{StatusCode: status, Header: http.Header{"X-Upstream-Error": {secret}}, Body: io.NopCloser(body)}, nil
 			})
-			output, err := service.Simulate(context.Background(), &quotev1.UnsignedTransaction{ChainId: "84532", From: wallet, To: router, Data: "0x", ValueAtomic: "0", GasLimit: "1500000"}, testRoute(), rpc.Snapshot{ChainID: "84532", BlockNumber: "1"}, big.NewInt(1), big.NewInt(1))
+			output, err := service.Simulate(context.Background(), &quotev1.UnsignedTransaction{ChainId: "84532", From: wallet, To: router, Data: "0x", ValueAtomic: "0", GasLimit: "1500000"}, SimulationChecks{Input: BalanceProbe{tokenA, wallet}, Output: BalanceProbe{tokenC, wallet}}, rpc.Snapshot{ChainID: "84532", BlockNumber: "1"}, big.NewInt(1), big.NewInt(1))
 			if !errors.Is(err, test.want) || err.Error() != test.want.Error() || strings.Contains(err.Error(), secret) || output != "" {
 				t.Fatalf("output=%q err=%v, want only %v", output, err, test.want)
 			}
@@ -349,7 +352,7 @@ func TestTenderlyConfigurationAndInvalidRequestAreDistinct(t *testing.T) {
 			tx := &quotev1.UnsignedTransaction{ChainId: "84532", From: wallet, To: router, Data: "0x", ValueAtomic: "0", GasLimit: "1500000"}
 			snapshot := rpc.Snapshot{ChainID: "84532", BlockNumber: "1"}
 			test.mutate(service, tx, &snapshot)
-			output, err := service.Simulate(context.Background(), tx, testRoute(), snapshot, big.NewInt(1), big.NewInt(1))
+			output, err := service.Simulate(context.Background(), tx, SimulationChecks{Input: BalanceProbe{tokenA, wallet}, Output: BalanceProbe{tokenC, wallet}}, snapshot, big.NewInt(1), big.NewInt(1))
 			want := "simulation verification failed"
 			if test.config {
 				want = "Simulation is not configured. Check the engine's Tenderly settings."
@@ -459,8 +462,7 @@ func TestTenderlyIndependentJSONFixture(t *testing.T) {
 	service.client.Transport = roundTrip(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture))}, nil
 	})
-	route := &quotev1.RouteQuote{Legs: []*quotev1.RouteLeg{{TokenIn: tokenA, TokenOut: tokenC}}}
-	output, err := service.Simulate(context.Background(), &quotev1.UnsignedTransaction{ChainId: "11155111", From: wallet, To: router, Data: "0xaabbccdd", ValueAtomic: "0", GasLimit: "1500000"}, route, rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(111), big.NewInt(200))
+	output, err := service.Simulate(context.Background(), &quotev1.UnsignedTransaction{ChainId: "11155111", From: wallet, To: router, Data: "0xaabbccdd", ValueAtomic: "0", GasLimit: "1500000"}, SimulationChecks{Input: BalanceProbe{tokenA, wallet}, Output: BalanceProbe{tokenC, wallet}}, rpc.Snapshot{ChainID: "11155111", BlockNumber: "112233", BlockHash: blockHash, Timestamp: 0x4321}, big.NewInt(111), big.NewInt(200))
 	if err != nil || output != "203" {
 		t.Fatalf("independent wire fixture: output=%q err=%v", output, err)
 	}

@@ -16,7 +16,7 @@ var uniRouterABI = contractabi.UniswapRouter02
 var pancakeRouterABI = contractabi.PancakeV3Router
 var uniDeadlineCall = evm.Method(uniRouterABI, "multicall(uint256,bytes[])")
 
-func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
+func v3Path(route *quotev1.RouteQuote) ([]byte, error) {
 	if len(route.Legs) < 1 || len(route.Legs) > 2 {
 		return nil, errors.New("unsupported path")
 	}
@@ -30,15 +30,25 @@ func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, min
 		path = append(path, byte(fee.FeePips>>16), byte(fee.FeePips>>8), byte(fee.FeePips))
 	}
 	path = append(path, common.HexToAddress(route.Legs[len(route.Legs)-1].TokenOut).Bytes()...)
-	if kind == "pancake-v3" {
-		return pancakeRouterABI.Pack("exactInput", struct {
-			Path                                 []byte
-			Recipient                            common.Address
-			Deadline, AmountIn, AmountOutMinimum *big.Int
-		}{path, common.HexToAddress(sender), new(big.Int).SetUint64(deadline), amount, minimum})
+	return path, nil
+}
+
+func pancakeV3RouterData(route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
+	path, err := v3Path(route)
+	if err != nil {
+		return nil, err
 	}
-	if kind != "uniswap-v3" {
-		return nil, errors.New("unsupported router")
+	return pancakeRouterABI.Pack("exactInput", struct {
+		Path                                 []byte
+		Recipient                            common.Address
+		Deadline, AmountIn, AmountOutMinimum *big.Int
+	}{path, common.HexToAddress(sender), new(big.Int).SetUint64(deadline), amount, minimum})
+}
+
+func uniswapRouter02Data(route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
+	path, err := v3Path(route)
+	if err != nil {
+		return nil, err
 	}
 	inner, err := uniRouterABI.Pack("exactInput", struct {
 		Path                       []byte

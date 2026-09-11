@@ -73,11 +73,10 @@ func (executorReader) Code(context.Context, common.Address, common.Hash) ([]byte
 }
 
 type executorSimulation struct {
-	simulationFake
-	call func(*quotev1.UnsignedTransaction, []*quotev1.QuotedAllocation, *big.Int, *big.Int)
+	call func(*quotev1.UnsignedTransaction, SimulationChecks, *big.Int, *big.Int)
 }
 
-func (s executorSimulation) SimulateAllocations(_ context.Context, tx *quotev1.UnsignedTransaction, a []*quotev1.QuotedAllocation, routers map[string]string, _ rpc.Snapshot, amount, minimum *big.Int) (string, error) {
+func (s executorSimulation) Simulate(_ context.Context, tx *quotev1.UnsignedTransaction, a SimulationChecks, _ rpc.Snapshot, amount, minimum *big.Int) (string, error) {
 	s.call(tx, a, amount, minimum)
 	return "251", nil
 }
@@ -137,20 +136,29 @@ func executorFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, *
 		quotes++
 		return append(append(append(uintWord(output), uintWord(123)...), uintWord(1)...), uintWord(100)...), nil
 	}}, canonical: func(context.Context, rpc.Snapshot) error { return nil }}}
-	h := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "11155111", Client: read, Config: config.Chain{ExecutionEnabled: true, Executor: &config.Executor{Address: executorAddress, UniswapDeployment: "uni", PancakeDeployment: "pan"}, Deployments: map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Router: router, Factory: router, Quoter: router}, "pan": {Kind: "pancake-v3", Router: pancakeAddress, Factory: pancakeAddress, Quoter: pancakeAddress}}}}}, Simulator: executorSimulation{call: func(tx *quotev1.UnsignedTransaction, a []*quotev1.QuotedAllocation, amount, minimum *big.Int) {
-		if tx.To != executorAddress || amount.String() != "101" || minimum.String() != "250" || len(a) != 2 || a[0].Route.AmountOutAtomic != "79" || a[1].Route.AmountOutAtomic != "173" {
+	h := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "11155111", Client: read, Config: config.Chain{ExecutionEnabled: true, Executor: &config.Executor{Address: executorAddress, UniswapDeployment: "uni", PancakeDeployment: "pan"}, Deployments: map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Router: router, Factory: router, Quoter: router}, "pan": {Kind: "pancake-v3", Router: pancakeAddress, Factory: pancakeAddress, Quoter: pancakeAddress}}}}}, Simulator: executorSimulation{call: func(tx *quotev1.UnsignedTransaction, a SimulationChecks, amount, minimum *big.Int) {
+		if tx.To != executorAddress || amount.String() != "101" || minimum.String() != "250" || len(a.ClearAllowances) != 3 || a.Input != (BalanceProbe{tokenA, wallet}) || a.Output != (BalanceProbe{tokenC, wallet}) {
 			t.Fatal("simulation plan differs from exact quote")
 		}
 	}}}
 	h.Store.saveQuote(&quotev1.QuoteRequest{Chain: "test", ChainId: "11155111", TokenIn: tokenA, TokenOut: tokenC, AmountInAtomic: "101"}, &quotev1.QuoteFinal{QuoteId: "q", Routes: []*quotev1.RouteQuote{uni, pan}, Block: &quotev1.BlockContext{Number: "112230", Hash: blockHash}}, time.Now())
-	return h, &quotev1.PrepareExecutionRequest{QuoteId: "q", Sender: wallet, SlippageBps: 75, Allocations: []*quotev1.RouteAllocation{{RouteId: uni.RouteId, AmountInAtomic: "37"}, {RouteId: pan.RouteId, AmountInAtomic: "64"}}}, &allowance, &quotes
+	return configuredHandler(h), &quotev1.PrepareExecutionRequest{QuoteId: "q", Sender: wallet, SlippageBps: 75, Allocations: []*quotev1.RouteAllocation{{RouteId: uni.RouteId, AmountInAtomic: "37"}, {RouteId: pan.RouteId, AmountInAtomic: "64"}}}, &allowance, &quotes
+}
+
+func TestUnavailableSecondQuoterDoesNotQuoteFirstAllocation(t *testing.T) {
+	h, r, _, calls := executorFixture(t)
+	chain := h.Chains["test"]
+	delete(chain.Quoters, "pan")
+	if _, err := quoteAllocations(context.Background(), chain, h.Store.quotes["q"], r.Allocations); err == nil || *calls != 0 {
+		t.Fatal("unavailable second quoter reached first allocation RPC", err, *calls)
+	}
 }
 
 func TestExecutorPreparationExactQuotesAggregateRoundingAndImmutableRecheck(t *testing.T) {
 	h, r, _, quotes := executorFixture(t)
 	original := proto.CloneOf(h.Store.quotes["q"].final)
 	p := prepare(t, h, r)
-	if p.Status != quotev1.PreparationStatus_PREPARATION_STATUS_READY || p.Route != nil || p.AmountOutMinimumAtomic != "250" || *quotes != 3 {
+	if p.Status != quotev1.PreparationStatus_PREPARATION_STATUS_READY || p.Route != nil || p.AmountOutMinimumAtomic != "250" || *quotes != 3 || p.Allocations[0].Route.AmountOutAtomic != "79" || p.Allocations[1].Route.AmountOutAtomic != "173" {
 		t.Fatalf("unexpected preparation: %v", p)
 	}
 	if p.Allocations[0].Route.Block.Number != "112230" || !proto.Equal(p.Allocations[0].Route.Block, p.Allocations[1].Route.Block) || p.Allocations[0].Route.NetworkCostOutAtomic != nil {
@@ -214,10 +222,7 @@ func TestExecutorPreparationRejectsWrongRouterLinkAndMissingSimulator(t *testing
 	for _, missingSimulator := range []bool{false, true} {
 		h, r, _, _ := executorFixture(t)
 		if missingSimulator {
-			h.Simulator = simulationFake(func(context.Context, *quotev1.UnsignedTransaction, *quotev1.RouteQuote, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
-				t.Fatal("executor used direct-router simulation")
-				return "", nil
-			})
+			h.Simulator = nil
 		} else {
 			chain := h.Chains["test"]
 			reader := chain.Client.(executorReader)

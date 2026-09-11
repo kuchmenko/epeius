@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
@@ -15,6 +17,85 @@ import (
 )
 
 var executorABI = contractabi.Executor
+
+type fixedExecutorPreparation struct{ chain Chain }
+
+func (s fixedExecutorPreparation) Select(ctx context.Context, saved storedQuote, r *quotev1.PrepareExecutionRequest, _ *quotev1.RouteQuote) (executionSelection, string) {
+	allocations, err := quoteAllocations(ctx, s.chain, saved, r.Allocations)
+	if err != nil {
+		if errors.Is(err, errExecutorRoute) {
+			return executionSelection{}, "Selected route is not supported by the configured executor."
+		}
+		if errors.Is(err, errAllocationTotal) {
+			return executionSelection{}, "Allocation inputs must sum to the quoted input amount."
+		}
+		return executionSelection{}, "executor allocations could not be quoted"
+	}
+	output := new(big.Int)
+	for _, allocation := range allocations {
+		amount, _ := new(big.Int).SetString(allocation.Route.AmountOutAtomic, 10)
+		output.Add(output, amount)
+	}
+	if output.BitLen() > 256 {
+		return executionSelection{}, "invalid aggregate output"
+	}
+	return executionSelection{allocations: allocations, output: output}, ""
+}
+
+func (s fixedExecutorPreparation) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
+	if p.AmountOutMinimumAtomic == "0" {
+		return executionPlan{}, "invalid aggregate output"
+	}
+	deadline, _ := strconv.ParseUint(p.DeadlineUnix, 10, 64)
+	data, err := executorData(s.chain.Config, p, deadline)
+	if err != nil {
+		return executionPlan{}, "executor plan could not be encoded"
+	}
+	e := *s.chain.Config.Executor
+	// Capture only the immutable linkage values used for future verification.
+	configSnapshot := config.Chain{Executor: &e, Deployments: map[string]config.Deployment{
+		e.UniswapDeployment: s.chain.Config.Deployments[e.UniswapDeployment],
+		e.PancakeDeployment: s.chain.Config.Deployments[e.PancakeDeployment],
+	}}
+	tx := &quotev1.UnsignedTransaction{ChainId: s.chain.ChainID, To: common.HexToAddress(e.Address).Hex(), From: p.Recipient, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "3000000"}
+	routers := map[string]string{}
+	for _, a := range p.Allocations {
+		routers[a.Route.DeploymentId] = configSnapshot.Deployments[a.Route.DeploymentId].Router
+	}
+	checks := executorChecks(tx, p.Allocations, routers)
+	return executionPlan{transaction: tx, spender: tx.To, checks: checks, verify: func(ctx context.Context, reader Reader, hash common.Hash) string {
+		if verifyExecutor(ctx, reader, configSnapshot, hash) != nil {
+			return "executor verification failed"
+		}
+		return ""
+	}}, ""
+}
+
+func executorChecks(tx *quotev1.UnsignedTransaction, allocations []*quotev1.QuotedAllocation, routers map[string]string) SimulationChecks {
+	first := allocations[0].Route.Legs
+	checks := SimulationChecks{Input: BalanceProbe{first[0].TokenIn, tx.From}, Output: BalanceProbe{first[len(first)-1].TokenOut, tx.From}}
+	probes := []BalanceProbe{checks.Input, checks.Output}
+	add := func(token, owner string) {
+		for _, existing := range probes {
+			if strings.EqualFold(existing.Token, token) && strings.EqualFold(existing.Owner, owner) {
+				return
+			}
+		}
+		probes = append(probes, BalanceProbe{token, owner})
+	}
+	for _, a := range allocations {
+		for _, leg := range a.Route.Legs {
+			checks.ClearAllowances = append(checks.ClearAllowances, AllowanceProbe{leg.TokenIn, tx.To, routers[a.Route.DeploymentId]})
+			for _, token := range []string{leg.TokenIn, leg.TokenOut} {
+				for _, owner := range []string{tx.From, tx.To, routers[a.Route.DeploymentId]} {
+					add(token, owner)
+				}
+			}
+		}
+	}
+	checks.Preserve = probes[2:]
+	return checks
+}
 
 // executorVenue resolves exact deployment membership, not just protocol kind.
 func executorVenue(chain config.Chain, route *quotev1.RouteQuote) (uint8, error) {
@@ -71,9 +152,6 @@ func quoteAllocations(ctx context.Context, chain Chain, saved storedQuote, reque
 	}
 	for _, a := range result {
 		quoter := chain.Quoters[a.Route.DeploymentId]
-		if quoter == nil {
-			return nil, errExecutorRoute
-		}
 		amount, _ := new(big.Int).SetString(a.AmountInAtomic, 10)
 		a.Route, err = quoter.Requote(ctx, a.Route, amount, saved.final.Block)
 		if err != nil {
@@ -108,7 +186,7 @@ func admitAllocations(chain Chain, saved storedQuote, requested []*quotev1.Route
 				break
 			}
 		}
-		if route == nil || chain.DeploymentErrors[route.DeploymentId] != "" || len(route.Legs) < 1 || len(route.Legs) > 2 {
+		if route == nil || chain.Quoters[route.DeploymentId] == nil || chain.DeploymentErrors[route.DeploymentId] != "" || len(route.Legs) < 1 || len(route.Legs) > 2 {
 			return nil, errExecutorRoute
 		}
 		venue, err := executorVenue(chain.Config, route)
