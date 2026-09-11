@@ -110,10 +110,10 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		return connect.NewResponse(&quotev1.PrepareExecutionResponse{Status: status, Message: message}), nil
 	}
 	if r.PreparationId != "" {
-		if r.QuoteId != "" || r.RouteId != "" || r.Sender != "" || r.SlippageBps != 0 {
+		if r.QuoteId != "" || r.RouteId != "" || r.Sender != "" || r.SlippageBps != 0 || len(r.Allocations) != 0 {
 			return invalid()
 		}
-	} else if r.QuoteId == "" || r.RouteId == "" || !address.MatchString(r.Sender) || common.HexToAddress(r.Sender) == (common.Address{}) || r.SlippageBps >= 10000 {
+	} else if r.QuoteId == "" || (r.RouteId == "") == (len(r.Allocations) == 0) || len(r.Allocations) > 2 || !address.MatchString(r.Sender) || common.HexToAddress(r.Sender) == (common.Address{}) || r.SlippageBps >= 10000 {
 		return invalid()
 	}
 	if h.Store == nil {
@@ -150,35 +150,64 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		if err := reader.Canonical(ctx, rpc.Snapshot{BlockNumber: saved.final.Block.Number, BlockHash: saved.final.Block.Hash}); err != nil {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote block is no longer canonical")
 		}
-		var route *quotev1.RouteQuote
-		for _, candidate := range saved.final.Routes {
-			if candidate.RouteId == r.RouteId {
-				route = proto.Clone(candidate).(*quotev1.RouteQuote)
-				break
+		if len(r.Allocations) > 0 {
+			allocations, err := quoteAllocations(ctx, chain, saved, r.Allocations)
+			if err != nil {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor allocations could not be quoted")
 			}
+			output := new(big.Int)
+			for _, allocation := range allocations {
+				amount, _ := new(big.Int).SetString(allocation.Route.AmountOutAtomic, 10)
+				output.Add(output, amount)
+			}
+			minimum := new(big.Int).Div(new(big.Int).Mul(output, big.NewInt(int64(10000-r.SlippageBps))), big.NewInt(10000))
+			if minimum.Sign() == 0 || output.BitLen() > 256 {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "invalid aggregate output")
+			}
+			deadline := snapshot.Timestamp + 120
+			sender := common.HexToAddress(r.Sender).Hex()
+			response := &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: saved.request.AmountInAtomic, TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Allocations: allocations}
+			data, err := executorData(response, deadline)
+			if err != nil {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor plan could not be encoded")
+			}
+			p = preparation{chain: key, expires: now.Add(retention), response: response, transaction: &quotev1.UnsignedTransaction{ChainId: chain.ChainID, To: common.HexToAddress(chain.Config.Executor.Address).Hex(), From: sender, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "3000000"}}
+		} else {
+			var route *quotev1.RouteQuote
+			for _, candidate := range saved.final.Routes {
+				if candidate.RouteId == r.RouteId {
+					route = proto.Clone(candidate).(*quotev1.RouteQuote)
+					break
+				}
+			}
+			if route == nil {
+				return invalid()
+			}
+			deployment, ok := chain.Config.Deployments[route.DeploymentId]
+			if !ok {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "deployment unavailable")
+			}
+			amount, _ := new(big.Int).SetString(saved.request.AmountInAtomic, 10)
+			output, _ := new(big.Int).SetString(route.AmountOutAtomic, 10)
+			minimum := new(big.Int).Div(new(big.Int).Mul(output, big.NewInt(int64(10000-r.SlippageBps))), big.NewInt(10000))
+			if minimum.Sign() == 0 {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "minimum output must be positive")
+			}
+			deadline := snapshot.Timestamp + 120
+			sender := common.HexToAddress(r.Sender).Hex()
+			data, err := swapData(deployment.Kind, route, sender, amount, minimum, deadline)
+			if err != nil {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "unsupported route")
+			}
+			p = preparation{chain: key, expires: now.Add(retention), transaction: &quotev1.UnsignedTransaction{ChainId: chain.ChainID, To: common.HexToAddress(deployment.Router).Hex(), From: sender, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1500000"}, response: &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: amount.String(), TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Route: route}}
 		}
-		if route == nil {
-			return invalid()
-		}
-		deployment, ok := chain.Config.Deployments[route.DeploymentId]
-		if !ok {
-			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "deployment unavailable")
-		}
-		amount, _ := new(big.Int).SetString(saved.request.AmountInAtomic, 10)
-		output, _ := new(big.Int).SetString(route.AmountOutAtomic, 10)
-		minimum := new(big.Int).Div(new(big.Int).Mul(output, big.NewInt(int64(10000-r.SlippageBps))), big.NewInt(10000))
-		if minimum.Sign() == 0 {
-			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "minimum output must be positive")
-		}
-		deadline := snapshot.Timestamp + 120
-		sender := common.HexToAddress(r.Sender).Hex()
-		data, err := swapData(deployment.Kind, route, sender, amount, minimum, deadline)
-		if err != nil {
-			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "unsupported route")
-		}
-		p = preparation{chain: key, expires: now.Add(retention), transaction: &quotev1.UnsignedTransaction{ChainId: chain.ChainID, To: common.HexToAddress(deployment.Router).Hex(), From: sender, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1500000"}, response: &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: amount.String(), TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Route: route}}
 	}
 	response := proto.Clone(p.response).(*quotev1.PrepareExecutionResponse)
+	if len(response.Allocations) > 0 {
+		if err := verifyExecutor(ctx, reader, chain.Config, common.HexToHash(snapshot.BlockHash)); err != nil {
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor verification failed")
+		}
+	}
 	deadline, _ := strconv.ParseUint(response.DeadlineUnix, 10, 64)
 	if !time.Now().Before(p.expires) || snapshot.Timestamp >= deadline {
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "preparation expired")
@@ -225,7 +254,22 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 	if p.approval {
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "approval changed; request a fresh quote")
 	}
-	output, err := h.Simulator.Simulate(ctx, p.transaction, response.Route, snapshot, amount, minimum)
+	var output string
+	if len(response.Allocations) > 0 {
+		simulator, ok := h.Simulator.(interface {
+			SimulateAllocations(context.Context, *quotev1.UnsignedTransaction, []*quotev1.QuotedAllocation, map[string]string, rpc.Snapshot, *big.Int, *big.Int) (string, error)
+		})
+		if !ok {
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "executor simulation unavailable")
+		}
+		routers := map[string]string{}
+		for _, a := range response.Allocations {
+			routers[a.Route.DeploymentId] = chain.Config.Deployments[a.Route.DeploymentId].Router
+		}
+		output, err = simulator.SimulateAllocations(ctx, p.transaction, response.Allocations, routers, snapshot, amount, minimum)
+	} else {
+		output, err = h.Simulator.Simulate(ctx, p.transaction, response.Route, snapshot, amount, minimum)
+	}
 	if err != nil {
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "swap simulation could not prove safe execution")
 	}

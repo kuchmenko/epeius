@@ -922,6 +922,9 @@ type PrepareExecutionRequest struct {
 	SlippageBps uint32                 `protobuf:"varint,4,opt,name=slippage_bps,json=slippageBps,proto3" json:"slippage_bps,omitempty"`
 	// Recheck immutable terms. When present, all other fields must be empty.
 	PreparationId string `protobuf:"bytes,5,opt,name=preparation_id,json=preparationId,proto3" json:"preparation_id,omitempty"`
+	// Executor plan, mutually exclusive with route_id. Inputs must sum to the
+	// original quote input. Each selected path is quoted at its exact input.
+	Allocations   []*RouteAllocation `protobuf:"bytes,6,rep,name=allocations,proto3" json:"allocations,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -991,6 +994,117 @@ func (x *PrepareExecutionRequest) GetPreparationId() string {
 	return ""
 }
 
+func (x *PrepareExecutionRequest) GetAllocations() []*RouteAllocation {
+	if x != nil {
+		return x.Allocations
+	}
+	return nil
+}
+
+type RouteAllocation struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RouteId        string                 `protobuf:"bytes,1,opt,name=route_id,json=routeId,proto3" json:"route_id,omitempty"`
+	AmountInAtomic string                 `protobuf:"bytes,2,opt,name=amount_in_atomic,json=amountInAtomic,proto3" json:"amount_in_atomic,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RouteAllocation) Reset() {
+	*x = RouteAllocation{}
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteAllocation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteAllocation) ProtoMessage() {}
+
+func (x *RouteAllocation) ProtoReflect() protoreflect.Message {
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteAllocation.ProtoReflect.Descriptor instead.
+func (*RouteAllocation) Descriptor() ([]byte, []int) {
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RouteAllocation) GetRouteId() string {
+	if x != nil {
+		return x.RouteId
+	}
+	return ""
+}
+
+func (x *RouteAllocation) GetAmountInAtomic() string {
+	if x != nil {
+		return x.AmountInAtomic
+	}
+	return ""
+}
+
+type QuotedAllocation struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	AmountInAtomic string                 `protobuf:"bytes,1,opt,name=amount_in_atomic,json=amountInAtomic,proto3" json:"amount_in_atomic,omitempty"`
+	Route          *RouteQuote            `protobuf:"bytes,2,opt,name=route,proto3" json:"route,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *QuotedAllocation) Reset() {
+	*x = QuotedAllocation{}
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuotedAllocation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuotedAllocation) ProtoMessage() {}
+
+func (x *QuotedAllocation) ProtoReflect() protoreflect.Message {
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuotedAllocation.ProtoReflect.Descriptor instead.
+func (*QuotedAllocation) Descriptor() ([]byte, []int) {
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *QuotedAllocation) GetAmountInAtomic() string {
+	if x != nil {
+		return x.AmountInAtomic
+	}
+	return ""
+}
+
+func (x *QuotedAllocation) GetRoute() *RouteQuote {
+	if x != nil {
+		return x.Route
+	}
+	return nil
+}
+
 type UnsignedTransaction struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ChainId       string                 `protobuf:"bytes,1,opt,name=chain_id,json=chainId,proto3" json:"chain_id,omitempty"`
@@ -1005,7 +1119,7 @@ type UnsignedTransaction struct {
 
 func (x *UnsignedTransaction) Reset() {
 	*x = UnsignedTransaction{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[12]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1017,7 +1131,7 @@ func (x *UnsignedTransaction) String() string {
 func (*UnsignedTransaction) ProtoMessage() {}
 
 func (x *UnsignedTransaction) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[12]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1030,7 +1144,7 @@ func (x *UnsignedTransaction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsignedTransaction.ProtoReflect.Descriptor instead.
 func (*UnsignedTransaction) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{12}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *UnsignedTransaction) GetChainId() string {
@@ -1095,13 +1209,16 @@ type PrepareExecutionResponse struct {
 	ApprovalSpender          string               `protobuf:"bytes,14,opt,name=approval_spender,json=approvalSpender,proto3" json:"approval_spender,omitempty"`
 	SimulatedAmountOutAtomic string               `protobuf:"bytes,15,opt,name=simulated_amount_out_atomic,json=simulatedAmountOutAtomic,proto3" json:"simulated_amount_out_atomic,omitempty"`
 	Route                    *RouteQuote          `protobuf:"bytes,16,opt,name=route,proto3" json:"route,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// Present only for executor preparation; route is then absent. All allocation
+	// quotes share one block. Slippage applies after summing their exact outputs.
+	Allocations   []*QuotedAllocation `protobuf:"bytes,17,rep,name=allocations,proto3" json:"allocations,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PrepareExecutionResponse) Reset() {
 	*x = PrepareExecutionResponse{}
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[13]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1113,7 +1230,7 @@ func (x *PrepareExecutionResponse) String() string {
 func (*PrepareExecutionResponse) ProtoMessage() {}
 
 func (x *PrepareExecutionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_epeius_quote_v1_quote_proto_msgTypes[13]
+	mi := &file_epeius_quote_v1_quote_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1126,7 +1243,7 @@ func (x *PrepareExecutionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareExecutionResponse.ProtoReflect.Descriptor instead.
 func (*PrepareExecutionResponse) Descriptor() ([]byte, []int) {
-	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{13}
+	return file_epeius_quote_v1_quote_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PrepareExecutionResponse) GetStatus() PreparationStatus {
@@ -1241,6 +1358,13 @@ func (x *PrepareExecutionResponse) GetRoute() *RouteQuote {
 	return nil
 }
 
+func (x *PrepareExecutionResponse) GetAllocations() []*QuotedAllocation {
+	if x != nil {
+		return x.Allocations
+	}
+	return nil
+}
+
 var File_epeius_quote_v1_quote_proto protoreflect.FileDescriptor
 
 const file_epeius_quote_v1_quote_proto_rawDesc = "" +
@@ -1314,20 +1438,27 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\x05quote\x18\x01 \x01(\v2\x1b.epeius.quote.v1.RouteQuoteH\x00R\x05quote\x126\n" +
 	"\x05error\x18\x02 \x01(\v2\x1e.epeius.quote.v1.ProviderErrorH\x00R\x05error\x123\n" +
 	"\x05final\x18\x03 \x01(\v2\x1b.epeius.quote.v1.QuoteFinalH\x00R\x05finalB\a\n" +
-	"\x05event\"\xb1\x01\n" +
+	"\x05event\"\xf5\x01\n" +
 	"\x17PrepareExecutionRequest\x12\x19\n" +
 	"\bquote_id\x18\x01 \x01(\tR\aquoteId\x12\x19\n" +
 	"\broute_id\x18\x02 \x01(\tR\arouteId\x12\x16\n" +
 	"\x06sender\x18\x03 \x01(\tR\x06sender\x12!\n" +
 	"\fslippage_bps\x18\x04 \x01(\rR\vslippageBps\x12%\n" +
-	"\x0epreparation_id\x18\x05 \x01(\tR\rpreparationId\"\xa8\x01\n" +
+	"\x0epreparation_id\x18\x05 \x01(\tR\rpreparationId\x12B\n" +
+	"\vallocations\x18\x06 \x03(\v2 .epeius.quote.v1.RouteAllocationR\vallocations\"V\n" +
+	"\x0fRouteAllocation\x12\x19\n" +
+	"\broute_id\x18\x01 \x01(\tR\arouteId\x12(\n" +
+	"\x10amount_in_atomic\x18\x02 \x01(\tR\x0eamountInAtomic\"o\n" +
+	"\x10QuotedAllocation\x12(\n" +
+	"\x10amount_in_atomic\x18\x01 \x01(\tR\x0eamountInAtomic\x121\n" +
+	"\x05route\x18\x02 \x01(\v2\x1b.epeius.quote.v1.RouteQuoteR\x05route\"\xa8\x01\n" +
 	"\x13UnsignedTransaction\x12\x19\n" +
 	"\bchain_id\x18\x01 \x01(\tR\achainId\x12\x0e\n" +
 	"\x02to\x18\x02 \x01(\tR\x02to\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\tR\x04data\x12!\n" +
 	"\fvalue_atomic\x18\x04 \x01(\tR\vvalueAtomic\x12\x12\n" +
 	"\x04from\x18\x05 \x01(\tR\x04from\x12\x1b\n" +
-	"\tgas_limit\x18\x06 \x01(\tR\bgasLimit\"\xa7\x06\n" +
+	"\tgas_limit\x18\x06 \x01(\tR\bgasLimit\"\xec\x06\n" +
 	"\x18PrepareExecutionResponse\x12:\n" +
 	"\x06status\x18\x01 \x01(\x0e2\".epeius.quote.v1.PreparationStatusR\x06status\x12F\n" +
 	"\vtransaction\x18\x02 \x01(\v2$.epeius.quote.v1.UnsignedTransactionR\vtransaction\x12\x18\n" +
@@ -1345,7 +1476,8 @@ const file_epeius_quote_v1_quote_proto_rawDesc = "" +
 	"\x14approval_transaction\x18\r \x01(\v2$.epeius.quote.v1.UnsignedTransactionR\x13approvalTransaction\x12)\n" +
 	"\x10approval_spender\x18\x0e \x01(\tR\x0fapprovalSpender\x12=\n" +
 	"\x1bsimulated_amount_out_atomic\x18\x0f \x01(\tR\x18simulatedAmountOutAtomic\x121\n" +
-	"\x05route\x18\x10 \x01(\v2\x1b.epeius.quote.v1.RouteQuoteR\x05route*\xc9\x01\n" +
+	"\x05route\x18\x10 \x01(\v2\x1b.epeius.quote.v1.RouteQuoteR\x05route\x12C\n" +
+	"\vallocations\x18\x11 \x03(\v2!.epeius.quote.v1.QuotedAllocationR\vallocations*\xc9\x01\n" +
 	"\x11PreparationStatus\x12\"\n" +
 	"\x1ePREPARATION_STATUS_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18PREPARATION_STATUS_READY\x10\x01\x12(\n" +
@@ -1371,7 +1503,7 @@ func file_epeius_quote_v1_quote_proto_rawDescGZIP() []byte {
 }
 
 var file_epeius_quote_v1_quote_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_epeius_quote_v1_quote_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_epeius_quote_v1_quote_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_epeius_quote_v1_quote_proto_goTypes = []any{
 	(PreparationStatus)(0),           // 0: epeius.quote.v1.PreparationStatus
 	(*GetStatusRequest)(nil),         // 1: epeius.quote.v1.GetStatusRequest
@@ -1386,8 +1518,10 @@ var file_epeius_quote_v1_quote_proto_goTypes = []any{
 	(*QuoteFinal)(nil),               // 10: epeius.quote.v1.QuoteFinal
 	(*QuoteEvent)(nil),               // 11: epeius.quote.v1.QuoteEvent
 	(*PrepareExecutionRequest)(nil),  // 12: epeius.quote.v1.PrepareExecutionRequest
-	(*UnsignedTransaction)(nil),      // 13: epeius.quote.v1.UnsignedTransaction
-	(*PrepareExecutionResponse)(nil), // 14: epeius.quote.v1.PrepareExecutionResponse
+	(*RouteAllocation)(nil),          // 13: epeius.quote.v1.RouteAllocation
+	(*QuotedAllocation)(nil),         // 14: epeius.quote.v1.QuotedAllocation
+	(*UnsignedTransaction)(nil),      // 15: epeius.quote.v1.UnsignedTransaction
+	(*PrepareExecutionResponse)(nil), // 16: epeius.quote.v1.PrepareExecutionResponse
 }
 var file_epeius_quote_v1_quote_proto_depIdxs = []int32{
 	2,  // 0: epeius.quote.v1.ChainStatus.tokens:type_name -> epeius.quote.v1.Token
@@ -1401,24 +1535,27 @@ var file_epeius_quote_v1_quote_proto_depIdxs = []int32{
 	8,  // 8: epeius.quote.v1.QuoteEvent.quote:type_name -> epeius.quote.v1.RouteQuote
 	9,  // 9: epeius.quote.v1.QuoteEvent.error:type_name -> epeius.quote.v1.ProviderError
 	10, // 10: epeius.quote.v1.QuoteEvent.final:type_name -> epeius.quote.v1.QuoteFinal
-	0,  // 11: epeius.quote.v1.PrepareExecutionResponse.status:type_name -> epeius.quote.v1.PreparationStatus
-	13, // 12: epeius.quote.v1.PrepareExecutionResponse.transaction:type_name -> epeius.quote.v1.UnsignedTransaction
-	6,  // 13: epeius.quote.v1.PrepareExecutionResponse.simulation_block:type_name -> epeius.quote.v1.BlockContext
-	13, // 14: epeius.quote.v1.PrepareExecutionResponse.approval_transaction:type_name -> epeius.quote.v1.UnsignedTransaction
-	8,  // 15: epeius.quote.v1.PrepareExecutionResponse.route:type_name -> epeius.quote.v1.RouteQuote
-	1,  // 16: epeius.quote.v1.QuoteService.GetStatus:input_type -> epeius.quote.v1.GetStatusRequest
-	5,  // 17: epeius.quote.v1.QuoteService.GetQuote:input_type -> epeius.quote.v1.QuoteRequest
-	5,  // 18: epeius.quote.v1.QuoteService.StreamQuote:input_type -> epeius.quote.v1.QuoteRequest
-	12, // 19: epeius.quote.v1.QuoteService.PrepareExecution:input_type -> epeius.quote.v1.PrepareExecutionRequest
-	4,  // 20: epeius.quote.v1.QuoteService.GetStatus:output_type -> epeius.quote.v1.GetStatusResponse
-	10, // 21: epeius.quote.v1.QuoteService.GetQuote:output_type -> epeius.quote.v1.QuoteFinal
-	11, // 22: epeius.quote.v1.QuoteService.StreamQuote:output_type -> epeius.quote.v1.QuoteEvent
-	14, // 23: epeius.quote.v1.QuoteService.PrepareExecution:output_type -> epeius.quote.v1.PrepareExecutionResponse
-	20, // [20:24] is the sub-list for method output_type
-	16, // [16:20] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	13, // 11: epeius.quote.v1.PrepareExecutionRequest.allocations:type_name -> epeius.quote.v1.RouteAllocation
+	8,  // 12: epeius.quote.v1.QuotedAllocation.route:type_name -> epeius.quote.v1.RouteQuote
+	0,  // 13: epeius.quote.v1.PrepareExecutionResponse.status:type_name -> epeius.quote.v1.PreparationStatus
+	15, // 14: epeius.quote.v1.PrepareExecutionResponse.transaction:type_name -> epeius.quote.v1.UnsignedTransaction
+	6,  // 15: epeius.quote.v1.PrepareExecutionResponse.simulation_block:type_name -> epeius.quote.v1.BlockContext
+	15, // 16: epeius.quote.v1.PrepareExecutionResponse.approval_transaction:type_name -> epeius.quote.v1.UnsignedTransaction
+	8,  // 17: epeius.quote.v1.PrepareExecutionResponse.route:type_name -> epeius.quote.v1.RouteQuote
+	14, // 18: epeius.quote.v1.PrepareExecutionResponse.allocations:type_name -> epeius.quote.v1.QuotedAllocation
+	1,  // 19: epeius.quote.v1.QuoteService.GetStatus:input_type -> epeius.quote.v1.GetStatusRequest
+	5,  // 20: epeius.quote.v1.QuoteService.GetQuote:input_type -> epeius.quote.v1.QuoteRequest
+	5,  // 21: epeius.quote.v1.QuoteService.StreamQuote:input_type -> epeius.quote.v1.QuoteRequest
+	12, // 22: epeius.quote.v1.QuoteService.PrepareExecution:input_type -> epeius.quote.v1.PrepareExecutionRequest
+	4,  // 23: epeius.quote.v1.QuoteService.GetStatus:output_type -> epeius.quote.v1.GetStatusResponse
+	10, // 24: epeius.quote.v1.QuoteService.GetQuote:output_type -> epeius.quote.v1.QuoteFinal
+	11, // 25: epeius.quote.v1.QuoteService.StreamQuote:output_type -> epeius.quote.v1.QuoteEvent
+	16, // 26: epeius.quote.v1.QuoteService.PrepareExecution:output_type -> epeius.quote.v1.PrepareExecutionResponse
+	23, // [23:27] is the sub-list for method output_type
+	19, // [19:23] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_epeius_quote_v1_quote_proto_init() }
@@ -1444,7 +1581,7 @@ func file_epeius_quote_v1_quote_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_epeius_quote_v1_quote_proto_rawDesc), len(file_epeius_quote_v1_quote_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

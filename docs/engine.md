@@ -80,7 +80,7 @@ The engine pins one canonical block hash and searches every configured deploymen
 
 Configured token and deployment addresses are normalized to prefixed EVM addresses during loading. Status advertises quote support only with at least two configured tokens and a usable deployment.
 
-RPCs must support EIP-1898 block-hash calls. There is no fallback to latest state. Gas pricing, economic ranking, split routes, Slipstream execution, custom executors, databases, and indexing are outside the current engine.
+RPCs must support EIP-1898 block-hash calls. There is no fallback to latest state. `bestRouteId` recommends the greatest gross atomic output among returned routes, with stable candidate-order ties; it is neither gas-adjusted nor globally optimal on partial searches. Explicit executor preparation re-quotes one or two caller-chosen allocations at exact inputs and the original block; see [executor configuration](execution.md#configured-executor). Gas pricing, allocation optimization, Slipstream execution, databases, and indexing remain outside the current engine.
 
 ## Troubleshooting
 

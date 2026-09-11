@@ -109,6 +109,19 @@ message PrepareExecutionRequest {
   uint32 slippage_bps = 4;
   // Recheck immutable terms. When present, all other fields must be empty.
   string preparation_id = 5;
+  // Executor plan, mutually exclusive with route_id. Inputs must sum to the
+  // original quote input. Each selected path is quoted at its exact input.
+  repeated RouteAllocation allocations = 6;
+}
+
+message RouteAllocation {
+  string route_id = 1;
+  string amount_in_atomic = 2;
+}
+
+message QuotedAllocation {
+  string amount_in_atomic = 1;
+  RouteQuote route = 2;
 }
 
 enum PreparationStatus {
@@ -147,4 +160,7 @@ message PrepareExecutionResponse {
   string approval_spender = 14;
   string simulated_amount_out_atomic = 15;
   RouteQuote route = 16;
+  // Present only for executor preparation; route is then absent. All allocation
+  // quotes share one block. Slippage applies after summing their exact outputs.
+  repeated QuotedAllocation allocations = 17;
 }

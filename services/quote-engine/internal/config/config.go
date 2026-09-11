@@ -37,6 +37,13 @@ type Chain struct {
 	ExecutionEnabled bool                  `toml:"execution_enabled"`
 	Tokens           []Token               `toml:"tokens"`
 	Deployments      map[string]Deployment `toml:"deployments"`
+	Executor         *Executor             `toml:"executor"`
+}
+
+type Executor struct {
+	Address           string `toml:"address"`
+	UniswapDeployment string `toml:"uniswap_deployment"`
+	PancakeDeployment string `toml:"pancake_deployment"`
 }
 
 type Token struct {
@@ -124,6 +131,13 @@ func (c Config) validate() error {
 		}
 		if chain.ExecutionEnabled && (len(chain.Tokens) < 2 || len(chain.Deployments) == 0) {
 			return errors.New("execution needs at least two tokens and a deployment")
+		}
+		if e := chain.Executor; e != nil {
+			uni, uniOK := chain.Deployments[e.UniswapDeployment]
+			pancake, pancakeOK := chain.Deployments[e.PancakeDeployment]
+			if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !uniOK || !pancakeOK || uni.Kind != "uniswap-v3" || pancake.Kind != "pancake-v3" || common.HexToAddress(uni.Router) == common.HexToAddress(pancake.Router) {
+				return errors.New("executor needs a nonzero address and distinct configured Uniswap and Pancake routers")
+			}
 		}
 		seen := map[common.Address]bool{}
 		for _, token := range chain.Tokens {

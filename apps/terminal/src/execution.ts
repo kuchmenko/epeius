@@ -25,6 +25,11 @@ const normalizeLocalAddress = (value: string) => {
 
 export type TrustedExecution = {
   tokens: string[];
+  executor?: {
+    address: string;
+    uniswapDeployment: string;
+    pancakeDeployment: string;
+  };
   deployments: Record<
     string,
     { kind: "uniswap-v3" | "pancake-v3"; router: string; fees: number[] }
@@ -74,6 +79,21 @@ export function expectedSwapData(
   return `0x5ae401dc${word(BigInt(p.deadlineUnix))}${word(64n)}${word(1n)}${word(32n)}${word(BigInt(inner.length / 2))}${inner.padEnd(Math.ceil(inner.length / 64) * 64, "0")}`;
 }
 
+export function expectedExecutorData(p: PrepareExecutionResponse) {
+  const bodies = p.allocations.map((allocation) => {
+    if (!allocation.route) throw new Error("Missing allocation route.");
+    const route = allocation.route;
+    return `${word(route.provider === "uniswap-v3" ? 0n : 1n)}${word(BigInt(allocation.amountInAtomic))}${word(96n)}${word(BigInt(route.legs.length))}${route.legs.map((leg) => `${addressWord(leg.tokenOut)}${word(BigInt(leg.selector.value ?? 0))}`).join("")}`;
+  });
+  let offset = BigInt(bodies.length * 32);
+  const offsets = bodies.map((body) => {
+    const current = word(offset);
+    offset += BigInt(body.length / 2);
+    return current;
+  });
+  return `0x19b5e3d5${addressWord(p.tokenIn)}${addressWord(p.tokenOut)}${word(BigInt(p.amountInAtomic))}${word(BigInt(p.amountOutMinimumAtomic))}${word(BigInt(p.deadlineUnix))}${word(192n)}${word(BigInt(bodies.length))}${offsets.join("")}${bodies.join("")}`;
+}
+
 export type Receipt = {
   transactionHash: string;
   status: string;
@@ -92,6 +112,7 @@ export function verifyReceipt(
   receipt: Receipt,
   hash: string,
   prepared: PrepareExecutionResponse,
+  trusted?: TrustedExecution,
 ) {
   if (!same(receipt.transactionHash, hash))
     return {
@@ -132,12 +153,43 @@ export function verifyReceipt(
     const input = -delta(prepared.tokenIn, prepared.recipient);
     const output = delta(prepared.tokenOut, prepared.recipient);
     const router = prepared.transaction?.to;
-    if (!router || !prepared.route?.legs.length)
+    const routes = prepared.allocations.length
+      ? prepared.allocations.map((a) => a.route)
+      : [prepared.route];
+    if (!router || routes.some((route) => !route?.legs.length))
       throw new Error("Route evidence missing.");
-    const intermediates = prepared.route.legs
-      .slice(0, -1)
-      .map((leg) => leg.tokenOut);
-    const residue = intermediates.some((token) => delta(token, router) !== 0n);
+    const intermediates = [
+      ...new Set(
+        routes.flatMap(
+          (route) => route?.legs.slice(0, -1).map((leg) => leg.tokenOut) ?? [],
+        ),
+      ),
+    ];
+    const balances: Record<string, string> = {};
+    if (prepared.allocations.length) {
+      for (const route of routes) {
+        const venueRouter =
+          route && trusted?.deployments[route.deploymentId]?.router;
+        if (!route || !venueRouter)
+          throw new Error("Configured router evidence missing.");
+        for (const token of [
+          route.legs[0].tokenIn,
+          ...route.legs.map((leg) => leg.tokenOut),
+        ]) {
+          for (const owner of [router, venueRouter, prepared.recipient]) {
+            if (
+              same(owner, prepared.recipient) &&
+              (same(token, prepared.tokenIn) || same(token, prepared.tokenOut))
+            )
+              continue;
+            balances[`${token}:${owner}`] = delta(token, owner).toString();
+          }
+        }
+      }
+    }
+    const residue =
+      intermediates.some((token) => delta(token, router) !== 0n) ||
+      Object.values(balances).some((value) => value !== "0");
     return {
       outcome:
         input === BigInt(prepared.amountInAtomic) &&
@@ -150,6 +202,9 @@ export function verifyReceipt(
       routerIntermediateDeltas: Object.fromEntries(
         intermediates.map((token) => [token, delta(token, router).toString()]),
       ),
+      ...(prepared.allocations.length
+        ? { touchedTokenOwnerDeltas: balances }
+        : {}),
       reason:
         "Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted.",
     };
@@ -220,55 +275,108 @@ export function validatePreparation(
     !/^[1-9][0-9]*$/.test(p.amountOutMinimumAtomic)
   )
     throw new Error("Invalid swap amount or token terms.");
-  if (!p.route) throw new Error("Invalid route terms.");
-  const quotedOutput = uint256Decimal(
-    p.route.amountOutAtomic,
-    "Route quoted output",
+  const executor = p.allocations.length > 0;
+  if (executor === !!p.route || p.allocations.length > 2)
+    throw new Error("Provide either a direct route or executor allocations.");
+  const routes = executor ? p.allocations.map((a) => a.route) : [p.route];
+  if (routes.some((route) => !route)) throw new Error("Missing route terms.");
+  let quotedOutput = 0n;
+  const configuredTokens = new Set(
+    trusted.tokens.map((token) => token.toLowerCase()),
   );
-  if (quotedOutput <= 0n)
-    throw new Error("Route quoted output must be positive.");
+  const venues = new Set<string>();
+  for (const route of routes) {
+    if (!route) throw new Error("Missing route terms.");
+    const output = uint256Decimal(route.amountOutAtomic, "Route quoted output");
+    if (output <= 0n) throw new Error("Route quoted output must be positive.");
+    quotedOutput += output;
+    if (
+      !route.legs.length ||
+      route.legs.length > 2 ||
+      !same(route.legs[0].tokenIn, p.tokenIn) ||
+      !same(route.legs[route.legs.length - 1].tokenOut, p.tokenOut) ||
+      (route.legs.length === 2 &&
+        !same(route.legs[0].tokenOut, route.legs[1].tokenIn))
+    )
+      throw new Error("Invalid route terms.");
+    const deployment = trusted.deployments[route.deploymentId];
+    if (
+      !deployment ||
+      route.provider !== deployment.kind ||
+      !address.test(deployment.router) ||
+      !route.legs.every(
+        (leg) =>
+          leg.selector.case === "feePips" &&
+          Number.isInteger(leg.selector.value) &&
+          leg.selector.value >= 0 &&
+          leg.selector.value < 1_000_000 &&
+          deployment.fees.includes(leg.selector.value) &&
+          configuredTokens.has(leg.tokenIn.toLowerCase()) &&
+          configuredTokens.has(leg.tokenOut.toLowerCase()),
+      )
+    )
+      throw new Error(
+        "Route is not allowed by local token and deployment config.",
+      );
+    if (executor) {
+      const expectedId =
+        route.provider === "uniswap-v3"
+          ? trusted.executor?.uniswapDeployment
+          : trusted.executor?.pancakeDeployment;
+      const tokens = [
+        route.legs[0].tokenIn,
+        ...route.legs.map((leg) => leg.tokenOut),
+      ].map((token) => token.toLowerCase());
+      if (
+        !trusted.executor ||
+        !address.test(trusted.executor.address) ||
+        route.deploymentId !== expectedId ||
+        venues.has(route.provider) ||
+        new Set(tokens).size !== tokens.length
+      )
+        throw new Error(
+          "Executor routes must use configured distinct venues without cycles.",
+        );
+      venues.add(route.provider);
+      const block = p.allocations[0].route?.block;
+      if (
+        !route.block ||
+        !block ||
+        !hashPattern.test(block.hash) ||
+        !/^[0-9]+$/.test(block.number) ||
+        route.block.number !== block.number ||
+        !same(route.block.hash, block.hash)
+      )
+        throw new Error("Allocation quotes must share one block.");
+    }
+  }
+  if (
+    executor &&
+    p.allocations.reduce((total, a) => {
+      const amount = uint256Decimal(a.amountInAtomic, "Allocation input");
+      if (amount <= 0n) throw new Error("Allocation inputs must be positive.");
+      return total + amount;
+    }, 0n) !== amountIn
+  )
+    throw new Error("Allocation inputs must sum to the total input.");
+  if (quotedOutput >= uint256Limit)
+    throw new Error("Aggregate output must fit uint256.");
   const requestedMinimum =
     (quotedOutput * BigInt(10000 - slippageBps)) / 10000n;
   if (minimum !== requestedMinimum)
     throw new Error(
       "Prepared slippage minimum does not match saved route quote.",
     );
-  if (
-    !p.route.legs.length ||
-    p.route.legs.length > 2 ||
-    !same(p.route.legs[0].tokenIn, p.tokenIn) ||
-    !same(p.route.legs[p.route.legs.length - 1].tokenOut, p.tokenOut) ||
-    (p.route.legs.length === 2 &&
-      !same(p.route.legs[0].tokenOut, p.route.legs[1].tokenIn))
-  )
-    throw new Error("Invalid route terms.");
-  const deployment = trusted.deployments[p.route.deploymentId];
-  const configuredTokens = new Set(
-    trusted.tokens.map((token) => token.toLowerCase()),
-  );
-  if (
-    !deployment ||
-    p.route.provider !== deployment.kind ||
-    !address.test(deployment.router) ||
-    !p.route.legs.every(
-      (leg) =>
-        leg.selector.case === "feePips" &&
-        Number.isInteger(leg.selector.value) &&
-        leg.selector.value >= 0 &&
-        leg.selector.value < 1_000_000 &&
-        deployment.fees.includes(leg.selector.value) &&
-        configuredTokens.has(leg.tokenIn.toLowerCase()) &&
-        configuredTokens.has(leg.tokenOut.toLowerCase()),
-    )
-  )
-    throw new Error(
-      "Route is not allowed by local token and deployment config.",
-    );
+  const deployment = p.route
+    ? trusted.deployments[p.route.deploymentId]
+    : undefined;
+  const spender = executor ? trusted.executor?.address : deployment?.router;
+  if (!spender) throw new Error("Missing configured spender.");
   if (approval) {
     const expected = `0x095ea7b3${p.approvalSpender.slice(2).toLowerCase().padStart(64, "0")}${word(amountIn)}`;
     if (
       !address.test(p.approvalSpender) ||
-      !same(p.approvalSpender, deployment.router) ||
+      !same(p.approvalSpender, spender) ||
       !same(tx.to, p.tokenIn) ||
       !same(tx.data, expected) ||
       p.transaction
@@ -276,11 +384,12 @@ export function validatePreparation(
       throw new Error(
         "Approval must authorize only the displayed input amount and spender.",
       );
-  } else if (
-    !same(tx.to, deployment.router) ||
-    !same(tx.data, expectedSwapData(p, deployment.kind))
-  ) {
-    throw new Error("Swap transaction does not match locally encoded route.");
+  } else {
+    const expected = deployment
+      ? expectedSwapData(p, deployment.kind)
+      : expectedExecutorData(p);
+    if (!same(tx.to, spender) || !same(tx.data, expected))
+      throw new Error("Swap transaction does not match locally encoded route.");
   }
   return tx;
 }
@@ -399,7 +508,7 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     const receipt = await io.receipt(hash);
     const verification =
       kind === "swap"
-        ? verifyReceipt(receipt, hash, prepared)
+        ? verifyReceipt(receipt, hash, prepared, io.trusted)
         : {
             outcome:
               same(receipt.transactionHash, hash) && receipt.status === "0x1"
@@ -433,6 +542,36 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
   }
 }
 
+export function parseAllocations(value: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("--allocations must be a JSON array.");
+  }
+  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 2)
+    throw new Error("Provide one or two allocations.");
+  return parsed.map((item: unknown) => {
+    if (!item || typeof item !== "object")
+      throw new Error("Invalid allocation.");
+    const a = item as Record<string, unknown>;
+    if (
+      Object.keys(a).some(
+        (key) => key !== "routeId" && key !== "amountInAtomic",
+      ) ||
+      typeof a.routeId !== "string" ||
+      !a.routeId ||
+      typeof a.amountInAtomic !== "string" ||
+      !/^[1-9][0-9]*$/.test(a.amountInAtomic) ||
+      uint256Decimal(a.amountInAtomic, "Allocation input") <= 0n
+    )
+      throw new Error(
+        "Allocations need routeId and positive uint256 amountInAtomic.",
+      );
+    return { routeId: a.routeId, amountInAtomic: a.amountInAtomic };
+  });
+}
+
 export async function executionCommand(
   command: string,
   values: Record<string, string | undefined>,
@@ -454,11 +593,14 @@ export async function executionCommand(
     !values.keystore ||
     !values["password-file"] ||
     !values["quote-id"] ||
-    !values["route-id"]
+    !!values["route-id"] === !!values.allocations
   )
     throw new Error(
-      "Provide --keystore, --password-file, --quote-id and --route-id.",
+      "Provide --keystore, --password-file, --quote-id and either --route-id or --allocations.",
     );
+  const allocations = values.allocations
+    ? parseAllocations(values.allocations)
+    : [];
   const slippage = values["slippage-bps"] ?? "50";
   if (!/^\d+$/.test(slippage) || Number(slippage) >= 10000)
     throw new Error("--slippage-bps must be 0 through 9999.");
@@ -474,6 +616,11 @@ export async function executionCommand(
         chain_id?: number;
         rpc_url_env?: string;
         execution_enabled?: boolean;
+        executor?: {
+          address?: string;
+          uniswap_deployment?: string;
+          pancake_deployment?: string;
+        };
         tokens?: Array<{ address?: string }>;
         deployments?: Record<
           string,
@@ -520,6 +667,33 @@ export async function executionCommand(
       kind: deployment.kind,
       router: normalizeLocalAddress(deployment.router),
       fees: deployment.fees,
+    };
+  }
+  if (allocations.length) {
+    const e = localChain.executor;
+    const uni =
+      e?.uniswap_deployment && trusted.deployments[e.uniswap_deployment];
+    const pan =
+      e?.pancake_deployment && trusted.deployments[e.pancake_deployment];
+    if (
+      !e?.address ||
+      !e.uniswap_deployment ||
+      !e.pancake_deployment ||
+      !localAddress.test(e.address) ||
+      BigInt(normalizeLocalAddress(e.address)) === 0n ||
+      !uni ||
+      !pan ||
+      uni.kind !== "uniswap-v3" ||
+      pan.kind !== "pancake-v3" ||
+      same(uni.router, pan.router)
+    )
+      throw new Error(
+        "Local executor needs an address and distinct Uniswap/Pancake deployments.",
+      );
+    trusted.executor = {
+      address: normalizeLocalAddress(e.address),
+      uniswapDeployment: e.uniswap_deployment,
+      pancakeDeployment: e.pancake_deployment,
     };
   }
   if (remoteChainId !== expectedChainId)
@@ -600,6 +774,7 @@ export async function executionCommand(
             : {
                 quoteId: values["quote-id"],
                 routeId: values["route-id"],
+                allocations,
                 sender: signer,
                 slippageBps: Number(slippage),
               },
@@ -607,6 +782,17 @@ export async function executionCommand(
         );
         if (response.route && response.route.routeId !== values["route-id"])
           throw new Error("Engine returned a different route. Nothing sent.");
+        if (
+          response.allocations.length !== allocations.length ||
+          response.allocations.some(
+            (a, i) =>
+              a.route?.routeId !== allocations[i].routeId ||
+              a.amountInAtomic !== allocations[i].amountInAtomic,
+          )
+        )
+          throw new Error(
+            "Engine returned different allocations. Nothing sent.",
+          );
         if (
           trade &&
           (!response.route ||

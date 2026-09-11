@@ -37,4 +37,4 @@ Start at the [documentation index](docs/README.md):
 - [Development tooling](docs/development.md)
 - [ConnectRPC protocol](docs/protocol.md)
 
-Read the execution contract before sending transactions. A successful simulation or receipt does not guarantee full input consumption; this milestone checks actual amounts but has no custom on-chain executor. Base Sepolia remains the verified and default test setup, not proof that a newly configured network or provider supports safe live execution.
+Read the execution contract before sending transactions. Direct-router `trade` retains its partial-input limitation. Explicit `prepare`/`execute --allocations` supports the exact-input executor with one or two caller-chosen allocations; it requires a verified deployment and TOML configuration. [Base Sepolia acceptance](docs/base-sepolia-acceptance.md) records the tested deployment, exact Tenderly simulations and live transactions. This is not proof that a newly configured network or provider supports safe live execution.

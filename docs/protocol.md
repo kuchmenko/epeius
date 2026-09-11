@@ -41,7 +41,9 @@ All calls at quote time use one canonical EIP-1898 block hash. There is no fallb
 
 ## Execution preparation
 
-Initial `PrepareExecutionRequest` supplies quote ID, route ID, sender, and slippage basis points. A recheck supplies only `preparationId`. Current sender and recipient are the same wallet.
+Initial `PrepareExecutionRequest` supplies quote ID, sender, slippage basis points, and either `routeId` for direct execution or `allocations` for the configured executor. Each `RouteAllocation` names a stored `routeId` and positive `amountInAtomic`; one or two entries must sum exactly to the original quote input, with distinct venues when there are two. A recheck supplies only `preparationId`. Current sender and recipient are the same wallet.
+
+Executor responses use `allocations` of `QuotedAllocation`, each containing its exact input and freshly re-quoted route at the original shared block; legacy `route` is absent. Outputs are never scaled. Sum the allocation outputs before calculating the single slippage floor. Allocation order, amounts, full routes, and transaction bytes are immutable preparation terms. Old clients must not treat an executor response as a direct-router response.
 
 Statuses:
 
