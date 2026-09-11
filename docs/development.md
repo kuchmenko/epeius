@@ -10,7 +10,7 @@ bun run setup
 bun run generate
 ```
 
-`setup` installs pinned Go generators and Staticcheck in `.tools/bin`, then downloads Go modules. No global protocol generator is needed. `generate` updates checked-in Go and TypeScript bindings from `proto/epeius/quote/v1/quote.proto`. Edit the proto, not generated files.
+`setup` installs pinned Go generators and Staticcheck in `.tools/bin` and downloads Go modules. No global protocol generator is needed. `generate` updates checked-in Go and TypeScript bindings from `proto/epeius/quote/v1/quote.proto`, plus contract ABI projections from `contracts/abi`. Edit the canonical inputs, not generated files. [ABI provenance and update instructions](../contracts/abi/README.md) describe the pinned router versions, upstream licenses, hashes, and independent encoding checks. Generation reads local files only; it never downloads an ABI or accepts one from the engine.
 
 Testnet tooling has a separate lockfile and dependency directory:
 
@@ -32,7 +32,7 @@ forge test --root contracts
 ```
 
 - `check` runs Biome, TypeScript checks, Go vet, Staticcheck for the first-party quote engine, Go race tests, Bun tests, and builds. Staticcheck inherits its default checks except ST1005 because fixed outward simulation messages are sentence-style protocol text. Generated Go remains covered by formatting, vet, race, and generated-file drift checks, not Staticcheck. Run `bun run setup` first so the pinned Staticcheck binary is available. It also requires Foundry 1.5.0: the mocked seed preflight test uses `cast` for local ABI encoding and hashing, without signing or network submission.
-- `check:generated` regenerates bindings in a temporary directory and compares them with checked-in files.
+- `check:generated` regenerates protobuf bindings in a temporary directory and compares them with checked-in files. It also checks canonical ABI hashes and compares deterministic TypeScript projections and Go embedded mirrors. `check` includes the same ABI drift check.
 - `smoke` uses root TOML endpoint and an already running engine. It requires every engine chain to be connected and checks positive Base WETH/USDC quotes in both directions. It is read-only and does not stop the engine.
 - `forge test` runs local executor and harness tests, including authentic Uniswap/Pancake partial-input behavior. Use `forge test --root contracts --fuzz-runs 10000` for the larger valid-allocation fuzz run. Run `forge fmt --check contracts/src/Executor.sol contracts/test/Executor.t.sol contracts/test/ExecutorRouters.t.sol` to check the maintained Solidity sources. Neither command deploys to Base Sepolia.
 
@@ -50,6 +50,7 @@ For execution review, run the CLI with local Connect/RPC fixtures and a stub Cas
 | --- | --- | --- |
 | `dist/epeius-engine` | engine build | Local Go executable; rebuilt by `bun run engine` |
 | `generated/go/`, `generated/ts/` | `bun run generate` | Checked-in protocol bindings; `check:generated` detects drift |
+| `generated/abi/`, `services/quote-engine/internal/contractabi/` | `bun scripts/abi.ts` or `bun run generate` | Typed TS ABIs and embedded geth ABIs generated from `contracts/abi`; never edit mirrors |
 | `.tools/bin/` | `bun run setup` | Ignored pinned Go tools |
 | stdout/stderr | check and smoke commands | Child output is inherited or summarized; nonzero exit means a check failed |
 | `contracts/out/`, `contracts/cache/` | Forge build/tests | Ignored compiler artifacts and cache |
@@ -84,3 +85,13 @@ docs/                             Unified documentation
 `ExecutionResult` distinguishes `preview`, `canceled`, `approval-confirmed`, `swap-verified`, `failed`, and `unknown`. Known submitted outcomes keep their transaction hash. Pre-send validation errors still reach the CLI error path. Preview and verified approval/swap map to exit 0; cancellation, failure, and unknown map to exit 1. A trade is complete only after a verified swap, not after approval. `ExecutionEvent` types the existing machine payloads without changing their wire fields.
 
 `config.ts` owns TOML parsing and conditional normalization for the terminal and E2E runner. `wallet-cast.ts` owns credentials, account discovery, and Cast submission; `chain.ts` owns read-only RPC and canonical receipt polling. `format.ts` renders human review with checked token metadata. No wallet registry, generic plugin layer, JavaScript private keys, WalletConnect, or account-abstraction implementation is present.
+
+## Extension rules
+
+Keep Ethereum mechanics in viem on the Bun/TypeScript side and go-ethereum on the Go side. Application code still defines strict input admission, canonical receipt acceptance, exact economic deltas, immutable terms and no-resend policy. A convenience SDK action is not a reason to change those contracts: use lower-level SDK calls when its defaults differ. Cast remains the encrypted signer adapter; Tenderly remains a separate vendor API.
+
+Adding a compatible EVM network normally adds configuration and capability verification. Adding a deployment of an existing protocol normally adds its trusted configuration. A new protocol implementation owns its candidate generation, quote/requote, deployment checks, transaction encoding and route admission; common scheduling, ranking, preparation lifecycle and consent should not acquire another protocol switch. The terminal selects its own trusted implementation and validates calldata independently of the engine.
+
+Protocol kind, deployment ID and executor venue are separate identities. The existing executor's two immutable slots do not grow when another deployment of the same kind is configured. Another executor version needs its own implementation and verified contract; it must not widen the old membership checks.
+
+Extension does not mean every unknown feature fits the current wire model. Mixed-protocol hops, native assets, exact-output swaps, automatic split selection and multiple transactions need explicit product/model decisions. The current one-deployment route, exact-input ERC20 policy and fixed executor limits remain in force. Test-only alternate implementations should prove extension without shipping a new protocol or relaxing independent trust checks.
