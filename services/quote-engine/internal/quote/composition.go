@@ -14,6 +14,9 @@ func ConfigureChain(chain Chain) Chain {
 				encode = pancakeV3RouterData
 			}
 			chain.Preparers[id] = v3RouterPreparation{id: id, kind: deployment.Kind, target: deployment.Router, chainID: chain.ChainID, encode: encode}
+		case "aerodrome-slipstream":
+			chain.Quoters[id] = slipstreamQuoter{reader: chain.Client, id: id, deployment: deployment, tokens: chain.Config.Tokens}
+			chain.Preparers[id] = v3RouterPreparation{id: id, kind: deployment.Kind, target: deployment.Router, chainID: chain.ChainID, encode: slipstreamRouterData, verify: slipstreamDiscountCheck(deployment)}
 		}
 	}
 	chain.AllocationPreparer = fixedExecutorPreparation{chain: chain}

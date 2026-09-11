@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { erc20Abi, toEventSelector, toFunctionSelector } from "viem";
 import {
+  aerodromeSlipstreamFactoryAbi,
+  aerodromeSlipstreamQuoterV2Abi,
+  aerodromeSlipstreamRouterAbi,
   erc20Abi as canonicalERC20,
   pancakeV3RouterAbi,
   uniswapRouter02Abi,
@@ -79,4 +82,42 @@ test("router versions retain their distinct reviewed exactInput selectors", () =
   // Existing Cast/Go vectors use these different tuple layouts.
   expect(toFunctionSelector(uni)).toBe("0xb858183f");
   expect(toFunctionSelector(pancake)).toBe("0xc04b8d59");
+});
+
+test("Slipstream ABIs retain signed spacing and Initial tuple order", () => {
+  const pool = aerodromeSlipstreamFactoryAbi.find(
+    (item) => item.type === "function" && item.name === "getPool",
+  );
+  const quote = aerodromeSlipstreamQuoterV2Abi.find(
+    (item) => item.type === "function" && item.name === "quoteExactInputSingle",
+  );
+  const swap = aerodromeSlipstreamRouterAbi.find(
+    (item) => item.type === "function" && item.name === "exactInput",
+  );
+  if (
+    pool?.type !== "function" ||
+    quote?.type !== "function" ||
+    swap?.type !== "function"
+  )
+    throw new Error("Missing Slipstream function");
+  expect(pool.inputs.map((input) => input.type)).toEqual([
+    "address",
+    "address",
+    "int24",
+  ]);
+  expect(quote.inputs[0].components?.map((input) => input.type)).toEqual([
+    "address",
+    "address",
+    "uint256",
+    "int24",
+    "uint160",
+  ]);
+  expect(swap.inputs[0].components?.map((input) => input.type)).toEqual([
+    "bytes",
+    "address",
+    "uint256",
+    "uint256",
+    "uint256",
+  ]);
+  expect(toFunctionSelector(swap)).toBe("0xc04b8d59");
 });

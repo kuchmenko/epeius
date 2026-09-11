@@ -15,6 +15,7 @@ import (
 type v3RouterPreparation struct {
 	id, kind, target, chainID string
 	encode                    func(*quotev1.RouteQuote, string, *big.Int, *big.Int, uint64) ([]byte, error)
+	verify                    func(string) func(context.Context, Reader, common.Hash) string
 }
 
 func (s v3RouterPreparation) Select(_ context.Context, _ storedQuote, _ *quotev1.PrepareExecutionRequest, route *quotev1.RouteQuote) (executionSelection, string) {
@@ -37,7 +38,11 @@ func (s v3RouterPreparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 		return executionPlan{}, "unsupported route"
 	}
 	tx := &quotev1.UnsignedTransaction{ChainId: s.chainID, To: common.HexToAddress(s.target).Hex(), From: p.Recipient, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1500000"}
-	return executionPlan{transaction: tx, spender: tx.To, checks: directChecks(p.Route, tx)}, ""
+	plan := executionPlan{transaction: tx, spender: tx.To, checks: directChecks(p.Route, tx)}
+	if s.verify != nil {
+		plan.verify = s.verify(p.Recipient)
+	}
+	return plan, ""
 }
 
 func directChecks(route *quotev1.RouteQuote, tx *quotev1.UnsignedTransaction) SimulationChecks {

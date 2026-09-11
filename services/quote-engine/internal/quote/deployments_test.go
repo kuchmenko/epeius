@@ -92,6 +92,42 @@ func TestStartupDeploymentLinksAndIsolation(t *testing.T) {
 	}
 }
 
+func TestSlipstreamStartupRequiresOneLinkedGeneration(t *testing.T) {
+	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	quoter := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	routerAddress := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	module := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	deployment := config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex(), Router: routerAddress.Hex(), TickSpacings: []int32{100}}
+	for _, mixed := range []bool{false, true} {
+		name := "linked"
+		if mixed {
+			name = "mixed router generation"
+		}
+		t.Run(name, func(t *testing.T) {
+			reader := codeFake{code: func(context.Context, common.Address, common.Hash) ([]byte, error) { return []byte{1}, nil }, readerFake: readerFake{call: func(_ context.Context, target common.Address, data []byte, _ common.Hash) ([]byte, error) {
+				is := func(signature string) bool { return bytes.Equal(data, crypto.Keccak256([]byte(signature))[:4]) }
+				switch {
+				case (target == quoter || target == routerAddress) && is("factory()"):
+					if mixed && target == routerAddress {
+						return poolResponse(common.HexToAddress(tokenC)), nil
+					}
+					return poolResponse(factory), nil
+				case target == factory && is("swapFeeModule()"):
+					return poolResponse(module), nil
+				case target == module && is("factory()"):
+					return poolResponse(factory), nil
+				default:
+					return nil, errors.New("unexpected getter")
+				}
+			}}}
+			err := verifyDeployment(context.Background(), reader, deployment, common.HexToHash(blockHash))
+			if mixed && err == nil || !mixed && err != nil {
+				t.Fatalf("mixed=%v error=%v", mixed, err)
+			}
+		})
+	}
+}
+
 func TestConfiguredMultiHopCrossProductsAndProviderIsolation(t *testing.T) {
 	uni := config.Deployment{Kind: "uniswap-v3", Factory: tokenA, Quoter: tokenB, Fees: []uint32{3000, 500}}
 	pancake := config.Deployment{Kind: "pancake-v3", Factory: wallet, Quoter: router, Fees: []uint32{2500, 500}}

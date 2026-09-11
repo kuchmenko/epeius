@@ -147,6 +147,38 @@ fees = [500, 2500]
 	}
 }
 
+func TestSlipstreamInitialConfigUsesOnlySignedTickSpacings(t *testing.T) {
+	text := validConfig + `[chains.base.deployments.slipstream]
+kind = "aerodrome-slipstream"
+factory = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
+quoter = "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0"
+router = "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5"
+tick_spacings = [-8388608, -1, 1, 100, 8388607]
+`
+	got, err := loadText(t, text)
+	if err != nil || len(got.Chains["base"].Deployments["slipstream"].TickSpacings) != 5 {
+		t.Fatalf("Slipstream config rejected: %+v %v", got, err)
+	}
+	for _, replacement := range []string{
+		"tick_spacings = []",
+		"tick_spacings = [100, 100]",
+		"tick_spacings = [-8388609]",
+		"tick_spacings = [8388608]",
+		"tick_spacings = [100]\nfees = [500]",
+	} {
+		changed := strings.Replace(text, "tick_spacings = [-8388608, -1, 1, 100, 8388607]", replacement, 1)
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatalf("accepted %s", replacement)
+		}
+	}
+	if _, err := loadText(t, strings.Replace(text, "chain_id = 8453", "chain_id = 8454", 1)); err == nil {
+		t.Fatal("accepted Slipstream Initial outside Base")
+	}
+	if _, err := loadText(t, strings.Replace(text, "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0", "0x3d4C22254F86f64B7eC90ab8F7aeC1FBFD271c6C", 1)); err == nil {
+		t.Fatal("accepted mixed Slipstream generation")
+	}
+}
+
 func TestLoadNormalizesPrefixlessConfiguredAddresses(t *testing.T) {
 	const prefixed = "0x1111111111111111111111111111111111111111"
 	text := validConfig + `[[chains.test-net.tokens]]

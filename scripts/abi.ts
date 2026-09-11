@@ -7,6 +7,11 @@ const root = resolve(import.meta.dir, "..");
 const goDirectory = "services/quote-engine/internal/contractabi";
 const tsDirectory = "generated/abi";
 const goNames = new Set([
+  "AerodromeSlipstreamDynamicFeeModule",
+  "AerodromeSlipstreamFactory",
+  "AerodromeSlipstreamFeeModule",
+  "AerodromeSlipstreamQuoterV2",
+  "AerodromeSlipstreamRouter",
   "ERC20",
   "Executor",
   "UniswapRouter02",

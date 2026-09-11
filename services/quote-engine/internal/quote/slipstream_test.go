@@ -1,0 +1,137 @@
+package quote
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"math/big"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+)
+
+func TestSlipstreamQuotesTwoHopsSequentially(t *testing.T) {
+	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	quoter := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	firstPool := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	secondPool := common.HexToAddress("0x5555555555555555555555555555555555555555")
+	tokens := []common.Address{common.HexToAddress(tokenA), common.HexToAddress(tokenB), common.HexToAddress(tokenC)}
+	quoteCall := 0
+	reader := readerFake{call: func(_ context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
+		if hash != common.HexToHash(blockHash) {
+			t.Fatal("call was not pinned")
+		}
+		if to == factory {
+			if new(big.Int).SetBytes(data[68:100]).Int64() != 100 {
+				t.Fatal("spacing changed in pool lookup")
+			}
+			if common.BytesToAddress(data[4:36]) == tokens[0] {
+				return poolResponse(firstPool), nil
+			}
+			return poolResponse(secondPool), nil
+		}
+		if to != quoter {
+			return nil, errors.New("wrong quoter")
+		}
+		quoteCall++
+		amount := new(big.Int).SetBytes(data[68:100]).Uint64()
+		if quoteCall == 1 && amount != 17 || quoteCall == 2 && amount != 31 {
+			t.Fatalf("hop %d input = %d", quoteCall, amount)
+		}
+		if quoteCall == 1 {
+			return quoteResponse(31), nil
+		}
+		return quoteResponse(47), nil
+	}}
+	q := slipstreamQuoter{reader: reader, deployment: config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex()}}
+	legs, output, err := q.quote(context.Background(), tokens, []int32{100, 100}, big.NewInt(17), common.HexToHash(blockHash))
+	if err != nil || output.Uint64() != 47 || len(legs) != 2 || legs[0].Pool != firstPool.Hex() || legs[1].Pool != secondPool.Hex() || legs[0].GetTickSpacing() != 100 || legs[0].GetFeePips() != 0 {
+		t.Fatalf("legs=%+v output=%v err=%v", legs, output, err)
+	}
+}
+
+func TestSlipstreamRouterCalldataUsesSignedPathAndExactTuple(t *testing.T) {
+	route := &quotev1.RouteQuote{Legs: []*quotev1.RouteLeg{
+		{TokenIn: tokenA, TokenOut: tokenB, Selector: &quotev1.RouteLeg_TickSpacing{TickSpacing: -1}},
+		{TokenIn: tokenB, TokenOut: tokenC, Selector: &quotev1.RouteLeg_TickSpacing{TickSpacing: 100}},
+	}}
+	data, err := slipstreamRouterData(route, wallet, big.NewInt(17), big.NewInt(11), 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data[:4], crypto.Keccak256([]byte("exactInput((bytes,address,uint256,uint256,uint256))"))[:4]) {
+		t.Fatal("wrong exactInput selector")
+	}
+	tuple := data[36:]
+	if common.BytesToAddress(tuple[32:64]) != common.HexToAddress(wallet) || new(big.Int).SetBytes(tuple[64:96]).Uint64() != 123 || new(big.Int).SetBytes(tuple[96:128]).Uint64() != 17 || new(big.Int).SetBytes(tuple[128:160]).Uint64() != 11 {
+		t.Fatal("router terms changed")
+	}
+	offset := new(big.Int).SetBytes(tuple[:32]).Int64()
+	length := new(big.Int).SetBytes(tuple[offset : offset+32]).Int64()
+	expected := append(common.HexToAddress(tokenA).Bytes(), 0xff, 0xff, 0xff)
+	expected = append(expected, common.HexToAddress(tokenB).Bytes()...)
+	expected = append(expected, 0, 0, 100)
+	expected = append(expected, common.HexToAddress(tokenC).Bytes()...)
+	if !bytes.Equal(tuple[offset+32:offset+32+length], expected) {
+		t.Fatalf("path=%x", tuple[offset+32:offset+32+length])
+	}
+	for _, spacing := range []int32{-8388609, 8388608} {
+		route.Legs[0].Selector = &quotev1.RouteLeg_TickSpacing{TickSpacing: spacing}
+		if _, err := slipstreamPath(route); err == nil {
+			t.Fatalf("accepted spacing %d", spacing)
+		}
+	}
+}
+
+func TestSlipstreamDiscountCheckFailsClosedAndRejectsDiscount(t *testing.T) {
+	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	module := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	hash := common.HexToHash(blockHash)
+	deployment := config.Deployment{Factory: factory.Hex()}
+	for _, test := range []struct {
+		name        string
+		discount    uint64
+		wrongLink   bool
+		missingCode bool
+		want        string
+	}{
+		{"undiscounted", 0, false, false, ""},
+		{"discounted", 1, false, false, "Signer has a Slipstream tx.origin fee discount"},
+		{"wrong module factory", 0, true, false, "Slipstream fee discount check failed"},
+		{"missing module code", 0, false, true, "Slipstream fee discount check failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := codeFake{code: func(_ context.Context, target common.Address, gotHash common.Hash) ([]byte, error) {
+				if target != module || gotHash != hash || test.missingCode {
+					return nil, nil
+				}
+				return []byte{1}, nil
+			}, readerFake: readerFake{call: func(_ context.Context, target common.Address, data []byte, gotHash common.Hash) ([]byte, error) {
+				if gotHash != hash {
+					t.Fatal("discount check was not pinned")
+				}
+				signature := func(value string) bool { return bytes.Equal(data[:4], crypto.Keccak256([]byte(value))[:4]) }
+				switch {
+				case target == factory && signature("swapFeeModule()"):
+					return poolResponse(module), nil
+				case target == module && signature("factory()"):
+					if test.wrongLink {
+						return poolResponse(common.HexToAddress(tokenC)), nil
+					}
+					return poolResponse(factory), nil
+				case target == module && signature("discounted(address)"):
+					return uintWord(test.discount), nil
+				default:
+					return nil, errors.New("unexpected call")
+				}
+			}}}
+			got := slipstreamDiscountCheck(deployment)(wallet)(context.Background(), reader, hash)
+			if got != test.want {
+				t.Fatalf("message=%q", got)
+			}
+		})
+	}
+}

@@ -81,7 +81,7 @@ export function v3Review(route: RouteQuote) {
 
 export function directV3Terms(
   p: PrepareExecutionResponse,
-  deployment: V3Deployment,
+  deployment: Pick<V3Deployment, "router">,
   data: string,
 ): SwapTerms {
   if (!p.route) throw new Error("Invalid route terms.");

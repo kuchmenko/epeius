@@ -135,7 +135,12 @@ export async function readSettings(path: string) {
         }>;
         deployments?: Record<
           string,
-          { kind?: string; router?: string; fees?: number[] }
+          {
+            kind?: string;
+            router?: string;
+            fees?: number[];
+            tick_spacings?: number[];
+          }
         >;
       }
     >;
