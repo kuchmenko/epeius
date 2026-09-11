@@ -1,3 +1,4 @@
+import { formatUnits } from "viem";
 import {
   type ChainStatus,
   PreparationStatus,
@@ -8,10 +9,7 @@ import {
 
 export function formatAtomic(value: string, decimals: number) {
   if (decimals === 0) return value;
-  const padded = value.padStart(decimals + 1, "0");
-  const whole = padded.slice(0, -decimals);
-  const fraction = padded.slice(-decimals).replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : whole;
+  return formatUnits(BigInt(value), decimals);
 }
 
 function amount(token: Token, atomic: string) {

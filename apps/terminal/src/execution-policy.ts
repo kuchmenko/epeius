@@ -1,17 +1,38 @@
 import { toJsonString } from "@bufbuild/protobuf";
-import { type Address, encodeFunctionData, parseAbi } from "viem";
+import {
+  type Address,
+  decodeEventLog,
+  encodeAbiParameters,
+  encodeEventTopics,
+  encodeFunctionData,
+  encodePacked,
+  erc20Abi,
+  type Hex,
+  isAddress,
+  isHash,
+  isHex,
+  maxUint256,
+  size,
+} from "viem";
+import {
+  executorAbi as executorABI,
+  pancakeV3RouterAbi as pancakeABI,
+  uniswapRouter02Abi as uniswapABI,
+} from "../../../generated/abi";
 import {
   PreparationStatus,
   type PrepareExecutionResponse,
   PrepareExecutionResponseSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 
-const address = /^0x[0-9a-fA-F]{40}$/;
-const hashPattern = /^0x[0-9a-fA-F]{64}$/;
-const transfer =
-  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-const uint256Limit = 1n << 256n;
-const uint256MaxDecimal = (uint256Limit - 1n).toString();
+const address = {
+  test: (value: string) => isAddress(value, { strict: false }),
+};
+const hashPattern = {
+  test: (value: string) => value.length === 66 && isHash(value),
+};
+const transfer = encodeEventTopics({ abi: erc20Abi, eventName: "Transfer" })[0];
+const uint256MaxDecimal = maxUint256.toString();
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 export type TrustedExecution = {
@@ -26,21 +47,6 @@ export type TrustedExecution = {
     { kind: "uniswap-v3" | "pancake-v3"; router: string; fees: number[] }
   >;
 };
-
-// Reviewed router layouts differ in deadline placement. Never use an engine-supplied ABI.
-const uniswapABI = parseAbi([
-  "function exactInput((bytes path, address recipient, uint256 amountIn, uint256 amountOutMinimum) params) payable returns (uint256)",
-  "function multicall(uint256 deadline, bytes[] data) payable returns (bytes[])",
-]);
-const pancakeABI = parseAbi([
-  "function exactInput((bytes path, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum) params) payable returns (uint256)",
-]);
-const executorABI = parseAbi([
-  "function execute(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut, uint256 deadline, (uint8 venue, uint256 amountIn, (address tokenOut, uint24 fee)[] hops)[] allocations) returns (uint256)",
-]);
-const approvalABI = parseAbi([
-  "function approve(address spender, uint256 amount) returns (bool)",
-]);
 
 export const uint256Decimal = (value: string, label: string) => {
   const normalized = value.replace(/^0+(?=\d)/, "");
@@ -61,12 +67,13 @@ export function expectedSwapData(
   if (!p.route) throw new Error("Invalid route terms.");
   if (p.route.legs.some((leg) => leg.selector.case !== "feePips"))
     throw new Error("Invalid route terms.");
-  const path = `0x${p.route.legs
-    .map(
-      (leg) =>
-        `${leg.tokenIn.slice(2).toLowerCase()}${leg.selector.value?.toString(16).padStart(6, "0")}`,
-    )
-    .join("")}${p.route.legs.at(-1)?.tokenOut.slice(2).toLowerCase()}` as const;
+  const path = encodePacked(
+    [...p.route.legs.flatMap(() => ["address", "uint24"]), "address"],
+    [
+      ...p.route.legs.flatMap((leg) => [leg.tokenIn, leg.selector.value]),
+      p.route.legs.at(-1)?.tokenOut as Address,
+    ],
+  );
   const params = {
     path,
     recipient: p.recipient.toLowerCase() as Address,
@@ -158,21 +165,34 @@ export function verifyReceipt(
       if (!same(log.transactionHash, hash) || log.removed)
         throw new Error("Invalid receipt log identity.");
       if (!same(log.topics[0] ?? "", transfer)) continue;
+      if (!address.test(log.address))
+        throw new Error("Nonstandard Transfer log.");
+      const { args } = decodeEventLog({
+        abi: erc20Abi,
+        eventName: "Transfer",
+        strict: true,
+        topics: log.topics as [Hex, ...Hex[]],
+        data: log.data as Hex,
+      });
+      const topics = encodeEventTopics({
+        abi: erc20Abi,
+        eventName: "Transfer",
+        args: { from: args.from, to: args.to },
+      });
+      const data = encodeAbiParameters([{ type: "uint256" }], [args.value]);
+      // SDK decoding alone accepts extra words and nonzero address padding.
       if (
-        !address.test(log.address) ||
-        log.topics.length !== 3 ||
-        !/^0x[0-9a-fA-F]{64}$/.test(log.data) ||
-        !log.topics
-          .slice(1)
-          .every((topic) => /^0x0{24}[0-9a-fA-F]{40}$/.test(topic))
+        topics.length !== log.topics.length ||
+        topics.some((topic, i) => !same(String(topic), log.topics[i])) ||
+        !same(data, log.data)
       )
         throw new Error("Nonstandard Transfer log.");
-      const value = BigInt(log.data);
-      for (const [topic, sign] of [
-        [log.topics[1], -1n],
-        [log.topics[2], 1n],
+      const value = args.value;
+      for (const [owner, sign] of [
+        [args.from, -1n],
+        [args.to, 1n],
       ] as const) {
-        const key = `${log.address.toLowerCase()}:0x${topic.slice(-40).toLowerCase()}`;
+        const key = `${log.address.toLowerCase()}:${owner.toLowerCase()}`;
         deltas.set(key, (deltas.get(key) ?? 0n) + sign * value);
       }
     }
@@ -300,7 +320,9 @@ export function validatePreparation(
     );
   if (
     !address.test(tx.to) ||
-    !/^0x(?:[0-9a-fA-F]{2})+$/.test(tx.data) ||
+    !isHex(tx.data, { strict: true }) ||
+    tx.data.length % 2 !== 0 ||
+    size(tx.data) === 0 ||
     tx.valueAtomic !== "0" ||
     !/^[1-9][0-9]*$/.test(tx.gasLimit)
   )
@@ -409,7 +431,7 @@ export function validatePreparation(
     }, 0n) !== amountIn
   )
     throw new Error("Allocation inputs must sum to the total input.");
-  if (quotedOutput >= uint256Limit)
+  if (quotedOutput > maxUint256)
     throw new Error("Aggregate output must fit uint256.");
   const requestedMinimum =
     (quotedOutput * BigInt(10000 - slippageBps)) / 10000n;
@@ -424,7 +446,7 @@ export function validatePreparation(
   if (!spender) throw new Error("Missing configured spender.");
   if (approval) {
     const expected = encodeFunctionData({
-      abi: approvalABI,
+      abi: erc20Abi,
       functionName: "approve",
       args: [spender.toLowerCase() as Address, amountIn],
     });

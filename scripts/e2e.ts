@@ -1,6 +1,7 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { isAddress, isHash } from "viem";
 import { quoteClient } from "../apps/terminal/src/client";
 import { readConfig, readSettings } from "../apps/terminal/src/config";
 import { decimalToAtomic, resolveToken } from "../apps/terminal/src/tokens";
@@ -47,7 +48,8 @@ export async function recordExecution(
   if (
     (await exited) !== 0 ||
     pending.trim() ||
-    !/^0x[0-9a-fA-F]{64}$/.test(last?.transactionHash ?? "") ||
+    last?.transactionHash?.length !== 66 ||
+    !isHash(last.transactionHash) ||
     last?.verification?.outcome !==
       (kind === "swap" ? "passed" : "receipt_success")
   )
@@ -126,7 +128,7 @@ async function main(args: string[]) {
     stderr: "ignore",
   });
   const sender = (await new Response(derive.stdout).text()).trim();
-  if ((await derive.exited) !== 0 || !/^0x[0-9a-fA-F]{40}$/.test(sender))
+  if ((await derive.exited) !== 0 || !isAddress(sender, { strict: false }))
     throw new Error("Could not open local keystore.");
   const reportPath = resolve(
     values.report ?? `.testnet/e2e-${Date.now()}.jsonl`,

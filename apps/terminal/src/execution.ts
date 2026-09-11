@@ -1,4 +1,5 @@
 import { type JsonValue, toJsonString } from "@bufbuild/protobuf";
+import { hexToBigInt, isHash, isHex } from "viem";
 import {
   PreparationStatus,
   type PrepareExecutionResponse,
@@ -13,7 +14,6 @@ import {
   verifyReceipt,
 } from "./execution-policy";
 
-const hashPattern = /^0x[0-9a-fA-F]{64}$/;
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 export type ExecutionResult =
@@ -80,8 +80,9 @@ export async function executePrepared(
   const rpcMatchesExpectedChain = async () => {
     const chainId = await io.chainId();
     return (
-      /^0x[0-9a-f]+$/.test(chainId) &&
-      BigInt(chainId).toString() === io.expectedChainId
+      isHex(chainId, { strict: true }) &&
+      chainId.length > 2 &&
+      hexToBigInt(chainId).toString() === io.expectedChainId
     );
   };
   if (!(await rpcMatchesExpectedChain()))
@@ -135,7 +136,8 @@ export async function executePrepared(
   let hash: string;
   try {
     hash = (await io.send(tx)).trim();
-    if (!hashPattern.test(hash)) throw new Error("Invalid transaction hash.");
+    if (hash.length !== 66 || !isHash(hash))
+      throw new Error("Invalid transaction hash.");
   } catch {
     io.report({
       transactionHash: null,
