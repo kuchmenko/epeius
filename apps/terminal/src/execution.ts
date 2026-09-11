@@ -8,43 +8,71 @@ import {
 import {
   assertPreparationCurrent,
   assertPreparationUnchanged,
+  ExecutionAction,
   type ExecutionPlan,
   type TrustedExecution,
   validatePreparation,
 } from "./execution-policy";
-import { type Receipt, type SwapVerification, verifyReceipt } from "./receipt";
+import {
+  type Receipt,
+  type SwapVerification,
+  VerificationOutcome,
+  verifyReceipt,
+} from "./receipt";
+
+export { ExecutionAction } from "./execution-policy";
+export { VerificationOutcome } from "./receipt";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-export type ExecutionAction = ExecutionPlan["action"];
 export type Verification =
   | {
-      action: "approval";
-      evidence: { outcome: "receipt_success" | "failed" | "unavailable" };
+      action: typeof ExecutionAction.Approval;
+      evidence: {
+        outcome:
+          | typeof VerificationOutcome.ReceiptSuccess
+          | typeof VerificationOutcome.Failed
+          | typeof VerificationOutcome.Unavailable;
+      };
     }
-  | { action: "swap"; evidence: SwapVerification };
-export type VerificationOutcome =
-  | Verification["evidence"]["outcome"]
-  | "pending";
+  | { action: typeof ExecutionAction.Swap; evidence: SwapVerification };
+
+export const ExecutionOutcome = {
+  Preview: "preview",
+  Canceled: "canceled",
+  ApprovalConfirmed: "approval-confirmed",
+  SwapVerified: "swap-verified",
+  Failed: "failed",
+  Unknown: "unknown",
+} as const;
+
+const Submission = {
+  Submitted: "submitted",
+  Unknown: "unknown",
+  PendingOrUnknown: "pending_or_unknown",
+} as const;
 
 export type ExecutionResult =
-  | { kind: "preview" | "canceled" }
+  | { kind: typeof ExecutionOutcome.Preview | typeof ExecutionOutcome.Canceled }
   | {
-      kind: "approval-confirmed" | "swap-verified" | "failed";
+      kind:
+        | typeof ExecutionOutcome.ApprovalConfirmed
+        | typeof ExecutionOutcome.SwapVerified
+        | typeof ExecutionOutcome.Failed;
       transactionHash: string;
     }
-  | { kind: "unknown"; transactionHash: string | null };
+  | { kind: typeof ExecutionOutcome.Unknown; transactionHash: string | null };
 export type ExecutionOutcome = ExecutionResult["kind"];
 
 // Existing JSONL payloads; the internal result discriminator is not serialized.
 export type ExecutionEvent =
   | { preparation: JsonValue; sent: false }
-  | { sent: false; outcome: "canceled" }
+  | { sent: false; outcome: typeof ExecutionOutcome.Canceled }
   | {
       transactionHash: string;
-      submission: "submitted";
+      submission: typeof Submission.Submitted;
       kind: ExecutionAction;
-      verification: { outcome: Extract<VerificationOutcome, "pending"> };
+      verification: { outcome: typeof VerificationOutcome.Pending };
     }
   | {
       transactionHash: string;
@@ -53,14 +81,14 @@ export type ExecutionEvent =
     }
   | {
       transactionHash: null;
-      submission: "unknown";
-      verification: { outcome: "unavailable" };
+      submission: typeof Submission.Unknown;
+      verification: { outcome: typeof VerificationOutcome.Unavailable };
       message: string;
     }
   | {
       transactionHash: string;
-      submission: "pending_or_unknown";
-      verification: { outcome: "unavailable" };
+      submission: typeof Submission.PendingOrUnknown;
+      verification: { outcome: typeof VerificationOutcome.Unavailable };
       message: string;
     };
 
@@ -89,28 +117,28 @@ function verifiedResult(
   transactionHash: string,
 ): ExecutionResult {
   switch (verification.action) {
-    case "approval": {
+    case ExecutionAction.Approval: {
       const outcome = verification.evidence.outcome;
       switch (outcome) {
-        case "receipt_success":
-          return { kind: "approval-confirmed", transactionHash };
-        case "failed":
-          return { kind: "failed", transactionHash };
-        case "unavailable":
-          return { kind: "unknown", transactionHash };
+        case VerificationOutcome.ReceiptSuccess:
+          return { kind: ExecutionOutcome.ApprovalConfirmed, transactionHash };
+        case VerificationOutcome.Failed:
+          return { kind: ExecutionOutcome.Failed, transactionHash };
+        case VerificationOutcome.Unavailable:
+          return { kind: ExecutionOutcome.Unknown, transactionHash };
         default:
           return impossible(outcome);
       }
     }
-    case "swap": {
+    case ExecutionAction.Swap: {
       const outcome = verification.evidence.outcome;
       switch (outcome) {
-        case "passed":
-          return { kind: "swap-verified", transactionHash };
-        case "failed":
-          return { kind: "failed", transactionHash };
-        case "unavailable":
-          return { kind: "unknown", transactionHash };
+        case VerificationOutcome.Passed:
+          return { kind: ExecutionOutcome.SwapVerified, transactionHash };
+        case VerificationOutcome.Failed:
+          return { kind: ExecutionOutcome.Failed, transactionHash };
+        case VerificationOutcome.Unavailable:
+          return { kind: ExecutionOutcome.Unknown, transactionHash };
         default:
           return impossible(outcome);
       }
@@ -152,16 +180,16 @@ export async function executePrepared(
   const kind = plan.action;
   if (preview || io.reportPreparation)
     io.report({ preparation: JSON.parse(snapshot), sent: false });
-  if (io.swapOnly && kind === "approval")
+  if (io.swapOnly && kind === ExecutionAction.Approval)
     throw new Error(
       "Approval is still required. Start a new trade; nothing retried.",
     );
   if (preview) {
-    return { kind: "preview" };
+    return { kind: ExecutionOutcome.Preview };
   }
   if (!(await io.confirm(kind, prepared, structuredClone(plan)))) {
-    io.report({ sent: false, outcome: "canceled" });
-    return { kind: "canceled" };
+    io.report({ sent: false, outcome: ExecutionOutcome.Canceled });
+    return { kind: ExecutionOutcome.Canceled };
   }
   const checked = await io.prepare(prepared.preparationId);
   assertPreparationCurrent(checked);
@@ -178,36 +206,39 @@ export async function executePrepared(
   } catch {
     io.report({
       transactionHash: null,
-      submission: "unknown",
-      verification: { outcome: "unavailable" },
+      submission: Submission.Unknown,
+      verification: { outcome: VerificationOutcome.Unavailable },
       message:
         "Send attempt may have reached the network. Inspect wallet transactions; do not automatically resend.",
     });
-    return { kind: "unknown", transactionHash: null };
+    return { kind: ExecutionOutcome.Unknown, transactionHash: null };
   }
   io.report({
     transactionHash: hash,
-    submission: "submitted",
+    submission: Submission.Submitted,
     kind,
-    verification: { outcome: "pending" },
+    verification: { outcome: VerificationOutcome.Pending },
   });
   try {
     const receipt = await io.receipt(hash);
     let verification: Verification;
     switch (plan.action) {
-      case "swap":
+      case ExecutionAction.Swap:
         verification = {
-          action: "swap",
+          action: ExecutionAction.Swap,
           evidence: verifyReceipt(receipt, hash, plan.receipt),
         };
         break;
-      case "approval":
+      case ExecutionAction.Approval:
         if (!same(receipt.transactionHash, hash))
           throw new Error("Receipt transaction hash mismatch.");
         verification = {
-          action: "approval",
+          action: ExecutionAction.Approval,
           evidence: {
-            outcome: receipt.status === "0x1" ? "receipt_success" : "failed",
+            outcome:
+              receipt.status === "0x1"
+                ? VerificationOutcome.ReceiptSuccess
+                : VerificationOutcome.Failed,
           },
         };
         break;
@@ -217,7 +248,7 @@ export async function executePrepared(
     io.report({
       transactionHash: hash,
       verification: verification.evidence,
-      ...(kind === "approval"
+      ...(kind === ExecutionAction.Approval
         ? {
             nextAction:
               "Rerun quote, then execute with the new quote and selected route. Approval never executes the old quote.",
@@ -228,10 +259,10 @@ export async function executePrepared(
   } catch {
     io.report({
       transactionHash: hash,
-      submission: "pending_or_unknown",
-      verification: { outcome: "unavailable" },
+      submission: Submission.PendingOrUnknown,
+      verification: { outcome: VerificationOutcome.Unavailable },
       message: "Receipt unavailable. Do not resend automatically.",
     });
-    return { kind: "unknown", transactionHash: hash };
+    return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
   }
 }

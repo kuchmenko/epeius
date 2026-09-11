@@ -7,6 +7,16 @@ import {
   isAddress,
 } from "viem";
 
+export const VerificationOutcome = {
+  Pending: "pending",
+  ReceiptSuccess: "receipt_success",
+  Passed: "passed",
+  Failed: "failed",
+  Unavailable: "unavailable",
+} as const;
+export type VerificationOutcome =
+  (typeof VerificationOutcome)[keyof typeof VerificationOutcome];
+
 export type Receipt = {
   transactionHash: string;
   status: string;
@@ -35,9 +45,16 @@ const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const transfer = encodeEventTopics({ abi: erc20Abi, eventName: "Transfer" })[0];
 
 export type SwapVerification =
-  | { outcome: "unavailable" | "failed"; reason: string }
   | {
-      outcome: "passed" | "failed";
+      outcome:
+        | typeof VerificationOutcome.Unavailable
+        | typeof VerificationOutcome.Failed;
+      reason: string;
+    }
+  | {
+      outcome:
+        | typeof VerificationOutcome.Passed
+        | typeof VerificationOutcome.Failed;
       inputSpentAtomic: string;
       outputReceivedAtomic: string;
       routerIntermediateDeltas: Record<string, string>;
@@ -52,12 +69,12 @@ export function verifyReceipt(
 ): SwapVerification {
   if (!same(receipt.transactionHash, hash))
     return {
-      outcome: "unavailable",
+      outcome: VerificationOutcome.Unavailable,
       reason: "Receipt transaction hash mismatch.",
     };
   if (receipt.status !== "0x1")
     return {
-      outcome: "failed",
+      outcome: VerificationOutcome.Failed,
       reason: "Transaction reverted or receipt status is not successful.",
     };
   try {
@@ -120,8 +137,8 @@ export function verifyReceipt(
         input === BigInt(obligations.amountInAtomic) &&
         output >= BigInt(obligations.amountOutMinimumAtomic) &&
         !residue
-          ? "passed"
-          : "failed",
+          ? VerificationOutcome.Passed
+          : VerificationOutcome.Failed,
       inputSpentAtomic: input.toString(),
       outputReceivedAtomic: output.toString(),
       routerIntermediateDeltas: intermediate,
@@ -131,7 +148,7 @@ export function verifyReceipt(
     };
   } catch {
     return {
-      outcome: "unavailable",
+      outcome: VerificationOutcome.Unavailable,
       reason: "Receipt cannot establish standard ERC20 transfer invariants.",
     };
   }

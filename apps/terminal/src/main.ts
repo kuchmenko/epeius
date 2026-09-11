@@ -10,7 +10,7 @@ import {
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
-import type { ExecutionResult } from "./execution";
+import { ExecutionOutcome, type ExecutionResult } from "./execution";
 import { connectExecution, executionCommand } from "./execution-command";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import {
@@ -25,13 +25,13 @@ import { runTrade } from "./trade";
 export function executionExitCode(result: ExecutionResult) {
   const outcome = result.kind;
   switch (outcome) {
-    case "preview":
-    case "approval-confirmed":
-    case "swap-verified":
+    case ExecutionOutcome.Preview:
+    case ExecutionOutcome.ApprovalConfirmed:
+    case ExecutionOutcome.SwapVerified:
       return 0;
-    case "canceled":
-    case "failed":
-    case "unknown":
+    case ExecutionOutcome.Canceled:
+    case ExecutionOutcome.Failed:
+    case ExecutionOutcome.Unknown:
       return 1;
     default: {
       const unhandled: never = outcome;

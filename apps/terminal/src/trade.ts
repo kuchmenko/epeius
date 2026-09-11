@@ -4,7 +4,7 @@ import {
   QuoteFinalSchema,
   type RouteQuote,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
-import type { ExecutionResult } from "./execution";
+import { ExecutionOutcome, type ExecutionResult } from "./execution";
 
 export type TradeIO = {
   quote: () => Promise<QuoteFinal>;
@@ -46,7 +46,7 @@ export async function runTrade(
       },
     });
     const result = await io.execute(quote, route, afterApproval);
-    if (result.kind !== "approval-confirmed") return result;
+    if (result.kind !== ExecutionOutcome.ApprovalConfirmed) return result;
     if (afterApproval)
       throw new Error(
         "Approval is still required. Start a new trade; nothing retried.",

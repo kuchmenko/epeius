@@ -16,6 +16,13 @@ import {
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import type { ReceiptObligations } from "./receipt";
 
+export const ExecutionAction = {
+  Approval: "approval",
+  Swap: "swap",
+} as const;
+export type ExecutionAction =
+  (typeof ExecutionAction)[keyof typeof ExecutionAction];
+
 export type SwapTerms = {
   target: string;
   spender: string;
@@ -39,7 +46,10 @@ export type ExecutionPlan = {
   transaction: UnsignedTransaction;
   spender: string;
   routeDetails: string[][];
-} & ({ action: "approval" } | { action: "swap"; receipt: ReceiptObligations });
+} & (
+  | { action: typeof ExecutionAction.Approval }
+  | { action: typeof ExecutionAction.Swap; receipt: ReceiptObligations }
+);
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
@@ -177,7 +187,7 @@ export function validatePreparation(
         "Approval must authorize only the displayed input amount and spender.",
       );
     return {
-      action: "approval",
+      action: ExecutionAction.Approval,
       transaction: tx,
       spender: terms.spender,
       routeDetails: terms.routeDetails,
@@ -186,7 +196,7 @@ export function validatePreparation(
   if (!same(tx.to, terms.target) || !same(tx.data, terms.data))
     throw new Error("Swap transaction does not match locally encoded route.");
   return {
-    action: "swap",
+    action: ExecutionAction.Swap,
     transaction: tx,
     spender: terms.spender,
     routeDetails: terms.routeDetails,
