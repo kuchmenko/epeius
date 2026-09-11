@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"strconv"
 	"sync"
@@ -174,7 +175,7 @@ func TestPreparationRecheckPreservesEveryTransactionTerm(t *testing.T) {
 	}
 	*timestamp = 1777777120
 	expired := prepare(t, h, &quotev1.PrepareExecutionRequest{PreparationId: first.PreparationId})
-	if expired.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || expired.Transaction != nil || *count != 2 {
+	if expired.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || expired.Transaction != nil || expired.ApprovalTransaction != nil || expired.Message != "Quote or preparation expired; request a fresh quote." || *count != 2 {
 		t.Fatal("deadline boundary executed")
 	}
 }
@@ -213,7 +214,7 @@ func TestApprovalNeverUsesVirtualAllowanceOrUpgradesOldPreparation(t *testing.T)
 	h, r, allowance, _, count := executionFixture(t)
 	*allowance = 7
 	first := prepare(t, h, r)
-	if first.Status != quotev1.PreparationStatus_PREPARATION_STATUS_APPROVAL_REQUIRED || first.Transaction != nil || first.ApprovalTransaction == nil || first.PreparationId == "" || *count != 0 {
+	if first.Status != quotev1.PreparationStatus_PREPARATION_STATUS_APPROVAL_REQUIRED || first.Transaction != nil || first.ApprovalTransaction == nil || first.PreparationId == "" || first.Message != "Approve the required amount, then request a fresh quote." || *count != 0 {
 		t.Fatalf("%+v", first)
 	}
 	data, _ := hexutil.Decode(first.ApprovalTransaction.Data)
@@ -229,7 +230,7 @@ func TestApprovalNeverUsesVirtualAllowanceOrUpgradesOldPreparation(t *testing.T)
 	}
 	*allowance = 123456789
 	next = prepare(t, h, &quotev1.PrepareExecutionRequest{PreparationId: first.PreparationId})
-	if next.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || *count != 0 {
+	if next.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || next.Message != "Approval state changed; request a fresh quote." || next.Transaction != nil || next.ApprovalTransaction != nil || *count != 0 {
 		t.Fatal("old approval preparation became executable")
 	}
 	if prepare(t, h, r).Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED {
@@ -301,5 +302,185 @@ func TestQuoteStoreClonesBoundsAndConcurrentAccess(t *testing.T) {
 	s.prune(time.Now().Add(retention))
 	if len(s.quotes) != 0 {
 		t.Fatal("expired quotes retained")
+	}
+}
+
+func TestStoreLookupAndApprovalAreDetachedAndAtomic(t *testing.T) {
+	s := NewStore()
+	now := time.Now()
+	s.saveQuote(&quotev1.QuoteRequest{AmountInAtomic: "37"}, &quotev1.QuoteFinal{QuoteId: "q", Routes: []*quotev1.RouteQuote{testRoute()}}, now)
+	p := preparation{response: &quotev1.PrepareExecutionResponse{PreparationId: "p", Route: testRoute()}, transaction: &quotev1.UnsignedTransaction{Data: "0x1234"}, expires: now.Add(retention)}
+	s.savePreparation(p)
+	p.transaction.Data = "changed after save"
+	p.response.Route.Legs[0].Pool = "changed after save"
+	q, found, loaded, recheck := s.lookup("q", "p", now)
+	if !found || !recheck || q.approvals != nil || loaded.transaction.Data != "0x1234" || loaded.response.Route.Legs[0].Pool != tokenA {
+		t.Fatal("Store did not detach saved terms")
+	}
+	q.request.AmountInAtomic = "64"
+	q.final.Routes[0].Legs[0].Pool = "changed after lookup"
+	loaded.transaction.Data = "changed after lookup"
+	loaded.response.Route.Legs[0].Pool = "changed after lookup"
+	q, _, loaded, _ = s.lookup("q", "p", now)
+	if q.request.AmountInAtomic != "37" || q.final.Routes[0].Legs[0].Pool != tokenA || loaded.transaction.Data != "0x1234" || loaded.response.Route.Legs[0].Pool != tokenA {
+		t.Fatal("lookup exposed stored terms")
+	}
+	var wait sync.WaitGroup
+	previous := make(chan bool, 32)
+	for range 32 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			wasRequired, found := s.markApproval("q", "wallet+spender", true, now)
+			if !found {
+				t.Error("live quote disappeared")
+			}
+			previous <- wasRequired
+			s.lookup("q", "p", now)
+		}()
+	}
+	wait.Wait()
+	close(previous)
+	first := 0
+	for wasRequired := range previous {
+		if !wasRequired {
+			first++
+		}
+	}
+	if first != 1 {
+		t.Fatalf("approval observation was not atomic: %d first writers", first)
+	}
+	if wasRequired, found := s.markApproval("q", "wallet+spender", false, now); !found || !wasRequired {
+		t.Fatal("approval history lost when allowance became sufficient")
+	}
+	if _, found, _, recheck := s.lookup("q", "p", now.Add(retention-time.Nanosecond)); !found || !recheck {
+		t.Fatal("terms expired before retention boundary")
+	}
+	if _, found, _, recheck := s.lookup("q", "p", now.Add(retention)); found || recheck {
+		t.Fatal("terms survived retention boundary")
+	}
+	if _, found := s.markApproval("q", "wallet+spender", true, now.Add(retention)); found {
+		t.Fatal("approval marking resurrected expired quote")
+	}
+}
+
+type rejectedSimulation struct {
+	simulationFake
+	err error
+}
+
+func (s rejectedSimulation) SimulateAllocations(context.Context, *quotev1.UnsignedTransaction, []*quotev1.QuotedAllocation, map[string]string, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
+	return "", s.err
+}
+
+func TestSimulationMessagesAreSafeAndNeverReturnTransactions(t *testing.T) {
+	for _, test := range []struct {
+		err     error
+		message string
+	}{
+		{errSimulationNotConfigured, "Simulation is not configured. Check the engine's Tenderly settings."},
+		{errSimulationUnavailable, "Simulation service is unavailable; execution was not prepared."},
+		{errSimulationTimeout, "Simulation timed out; execution was not prepared."},
+		{errSimulationEvidence, "Simulation evidence is incomplete or does not match the requested call and block."},
+		{errSimulationInputAmount, "Simulation did not consume the exact input amount."},
+		{errSimulationMinimumOutput, "Simulation output is below the minimum."},
+		{errSimulationProtectedBalance, "Simulation changed a balance that must be preserved."},
+		{errSimulationAllowance, "Simulation left an executor-to-router allowance uncleared."},
+		{errors.New("https://secret.example X-Access-Key=secret body=secret"), "swap simulation could not prove safe execution"},
+		{errors.New("Simulation timed out; execution was not prepared."), "swap simulation could not prove safe execution"},
+	} {
+		for _, executor := range []bool{false, true} {
+			for _, recheck := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/executor=%t/recheck=%t", test.message, executor, recheck), func(t *testing.T) {
+					h, r, _, _, _ := executionFixture(t)
+					if executor {
+						h, r, _, _ = executorFixture(t)
+					}
+					if recheck {
+						ready := prepare(t, h, r)
+						if ready.Status != quotev1.PreparationStatus_PREPARATION_STATUS_READY {
+							t.Fatal("test requires ready preparation")
+						}
+						r = &quotev1.PrepareExecutionRequest{PreparationId: ready.PreparationId}
+					}
+					wrapped := fmt.Errorf("https://secret.example X-Access-Key=secret body=secret: %w", test.err)
+					h.Simulator = rejectedSimulation{err: wrapped, simulationFake: func(context.Context, *quotev1.UnsignedTransaction, *quotev1.RouteQuote, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
+						return "", wrapped
+					}}
+					got := prepare(t, h, r)
+					if got.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED || got.Message != test.message || got.Transaction != nil || got.ApprovalTransaction != nil {
+						t.Fatalf("unsafe simulation response: %v", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCanonicalFailureDoesNotClaimReorg(t *testing.T) {
+	for _, stage := range []string{"quote", "simulation", "approval check"} {
+		t.Run(stage, func(t *testing.T) {
+			h, r, allowance, _, _ := executionFixture(t)
+			if stage == "approval check" {
+				*allowance = 0
+			}
+			chain := h.Chains["test"]
+			reader := chain.Client.(executionFake)
+			reader.canonical = func(_ context.Context, s rpc.Snapshot) error {
+				if (stage == "quote") == (s.BlockNumber == "112230") {
+					return errors.New("https://secret.example RPC unavailable")
+				}
+				return nil
+			}
+			chain.Client = reader
+			h.Chains["test"] = chain
+			got := prepare(t, h, r)
+			if got.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || got.Message != "The "+stage+" block could not be confirmed; request a fresh quote." || got.Transaction != nil || got.ApprovalTransaction != nil {
+				t.Fatalf("canonical failure misdiagnosed: %v", got)
+			}
+		})
+	}
+}
+
+func TestAllocationDiagnosticsPreserveStatusAndCallOrder(t *testing.T) {
+	for _, total := range []bool{false, true} {
+		h, r, _, calls := executorFixture(t)
+		message := "Selected route is not supported by the configured executor."
+		if total {
+			r.Allocations[1].AmountInAtomic = "65"
+			message = "Allocation inputs must sum to the quoted input amount."
+		} else {
+			r.Allocations[1].RouteId = "unknown"
+		}
+		got := prepare(t, h, r)
+		if got.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED || got.Message != message || got.Transaction != nil || got.ApprovalTransaction != nil || *calls != 0 {
+			t.Fatalf("allocation contract changed: %v", got)
+		}
+	}
+	h, r, _, _, _ := executionFixture(t)
+	r.RouteId = "unknown"
+	got, err := h.PrepareExecution(context.Background(), connect.NewRequest(r))
+	if got != nil || connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatal("direct unknown route lost InvalidArgument")
+	}
+}
+
+func TestPreparationStoreEvictsEarliestExpiry(t *testing.T) {
+	s := NewStore()
+	now := time.Now()
+	for i := range storeLimit + 1 {
+		s.savePreparation(preparation{response: &quotev1.PrepareExecutionResponse{PreparationId: strconv.Itoa(i)}, transaction: &quotev1.UnsignedTransaction{Data: "0xab"}, expires: now.Add(retention + time.Duration(i)*time.Second)})
+	}
+	if len(s.preparations) != storeLimit {
+		t.Fatal("preparation limit changed")
+	}
+	if _, _, _, found := s.lookup("", "0", now); found {
+		t.Fatal("oldest preparation not evicted")
+	}
+	if _, _, _, found := s.lookup("", "1", now); !found {
+		t.Fatal("newer preparation evicted")
+	}
+	if _, _, _, found := s.lookup("", strconv.Itoa(storeLimit), now); !found {
+		t.Fatal("latest preparation not saved")
 	}
 }

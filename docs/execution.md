@@ -18,6 +18,8 @@ Before confirmation and again before submission, the terminal checks the route a
 
 An informational quote does not need a wallet and does not authorize execution. A preparation binds one selected quote to the sender, recipient, amount, route, minimum output, deadline, and unsigned transaction. The sender and recipient are the same wallet in this milestone.
 
+`trade` discovers the local account and validates its execution context before requesting its first executable trade quote. `prepare` and `execute` establish that context before preparation. This ordering does not add a sender to the quote protocol or make informational commands require a wallet.
+
 Rechecking a preparation can update the simulation result, but cannot silently change the transaction's conditions. Changing the route, minimum output, or deadline requires a new preparation and confirmation. Preparations are held in memory; restarting the engine invalidates their identifiers.
 
 The terminal verifies the minimum against the requested `--slippage-bps`: `floor(quotedOutput * (10000 - slippageBps) / 10000)`. The basis is the saved route output for direct execution or summed exact-allocation outputs for the executor, not a refreshed simulation estimate. The minimum must remain positive. All encoded amounts and deadlines must fit `uint256`. These checks establish consistency with the displayed quote, not an independent fair-market price: the engine still supplies the quoted output.
@@ -30,7 +32,9 @@ Uniswap SwapRouter02's V3 swap tuples do not include a deadline. Its trusted `mu
 
 If the wallet's allowance is insufficient, the engine reports `APPROVAL_REQUIRED`. A simulated approval followed by a swap is a preview, not proof that the real wallet is ready to swap.
 
-The user confirms the approval separately. After its receipt, obtain a fresh quote and a fresh swap preparation, then confirm that swap separately. A successful approval is not rolled back if the later swap fails. Do not silently substitute a different route after approval.
+Application consent, wallet authorization to sign and send, and ERC-20 approval are separate actions. The user confirms the approval separately. After its canonical successful receipt, obtain a fresh quote and a fresh swap preparation, then confirm that swap separately. A successful approval is not rolled back if the later swap fails. In `trade`, automatic selection uses the fresh recommendation; manual selection keeps the requested route ID or stops. Both require new swap consent. Explicit executor allocations are never refreshed automatically.
+
+The terminal presents the action, complete addresses, exact decimal and atomic amounts, route and allocation details, deadline, expiry, and simulation block on stderr before asking for consent. An approval review is approval-only, not a swap promise. Machine JSONL stays on stdout with complete transaction bytes. Cast is the only wallet implementation: it opens the local keystore and makes one send attempt. JavaScript never receives the private key.
 
 ## What simulation proves
 
@@ -44,6 +48,8 @@ Simulate alternative routes separately from the same starting block. A sequentia
 
 Simulation does not guarantee future success. Other transactions can change pool state before inclusion. RPC or simulator failure must not silently bypass the pre-send check.
 
+Known simulation failures use fixed engine messages that distinguish missing configuration, unavailable service, timeout, incomplete evidence, and failed amount, balance, or allowance checks. Unknown upstream failures remain generic; engine preparation diagnostics do not include upstream URLs, headers, response bodies, or request echoes. Rejected and requote responses contain neither swap nor approval transactions. An inability to confirm a canonical block requires a fresh quote; it does not prove a reorg or an on-chain loss.
+
 ## Direct-router limitation: partial input consumption
 
 `amountOutMinimum` constrains the output, not full input consumption. A V3 pool can reach its limiting price before consuming all requested input. If the output still satisfies the minimum, the router call can succeed.
@@ -55,6 +61,8 @@ The direct-router path checks consumption before submission through simulation a
 The terminal must distinguish a confirmed successful receipt from a trade whose amounts passed verification. Neither a successful receipt nor the final output balance alone proves full input and intermediate-token consumption. Existing router balances must not be counted as this trade's output or residue.
 
 Base RPC can return a preliminary receipt with `status = 1` and an all-zero `blockHash` before the block is sealed. That is not confirmed execution. Wait for a nonzero block hash that matches the canonical block at the receipt's block number before checking amounts or using newly deployed contracts. This check is not a claim of L1 finality; later reorgs remain possible.
+
+The receipt waiter follows only the original submitted hash; it does not accept a replacement transaction. The hash event is emitted before waiting. Failure after wallet handoff can leave the result unknown, including when no hash was returned. The terminal never resends automatically. A canonical successful swap receipt must also pass exact-transaction token-delta verification; malformed or removed logs cannot establish success.
 
 ## Configured executor
 

@@ -9,7 +9,7 @@ import {
   type QuoteRequest,
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
-import { readConfig, validateEngineUrl } from "./config";
+import { readConfig, readExecutionConfig, validateEngineUrl } from "./config";
 import { decimalToAtomic, parseAtomic, resolveToken } from "./tokens";
 
 const token = (symbol: string, address: string, decimals: number) => ({
@@ -71,6 +71,37 @@ test("config reads chain token metadata and sanitizes parse errors", async () =>
     });
     await Bun.write(path, "secret = '");
     await expect(readConfig(path)).rejects.not.toThrow("secret");
+  } finally {
+    await rm(directory, { recursive: true });
+  }
+});
+
+test("execution config rereads independently and validates executor only for allocations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "epeius-config-"));
+  const path = join(directory, "config.toml");
+  const header = `[terminal]\ndefault_chain='test'\nengine_url='http://127.0.0.1:1'\nsearch_budget_ms=1\n[chains.test]\nchain_id=1\nrpc_url_env='RPC'\n`;
+  try {
+    await Bun.write(path, `${header}execution_enabled=false\n`);
+    expect((await readConfig(path)).defaultChain).toBe("test");
+    await expect(readExecutionConfig(path, "test", false)).rejects.toThrow(
+      "explicitly enable",
+    );
+    await Bun.write(
+      path,
+      `${header}execution_enabled=true\n[chains.test.deployments.uni]\nkind='uniswap-v3'\nrouter='0X${"A".repeat(40)}'\nfees=[0,999999]\n`,
+    );
+    expect(await readExecutionConfig(path, "test", false)).toMatchObject({
+      expectedChainId: "1",
+      rpcUrlEnv: "RPC",
+      trusted: {
+        deployments: {
+          uni: { router: `0x${"a".repeat(40)}`, fees: [0, 999999] },
+        },
+      },
+    });
+    await expect(readExecutionConfig(path, "test", true)).rejects.toThrow(
+      "Local executor needs",
+    );
   } finally {
     await rm(directory, { recursive: true });
   }

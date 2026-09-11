@@ -1,4 +1,11 @@
 import { resolve } from "node:path";
+import type { TrustedExecution } from "./execution-policy";
+
+const localAddress = /^(?:0x|0X)?[0-9a-fA-F]{40}$/;
+const normalizeLocalAddress = (value: string) => {
+  if (!localAddress.test(value)) throw new Error("Invalid local address.");
+  return `0x${value.replace(/^0x/i, "").toLowerCase()}`;
+};
 
 export type TerminalConfig = {
   path: string;
@@ -48,7 +55,7 @@ export async function readConfig(
   const absolutePath = resolve(path);
   let parsed: unknown;
   try {
-    parsed = Bun.TOML.parse(await Bun.file(absolutePath).text());
+    parsed = await readSettings(absolutePath);
   } catch {
     throw new Error(`Unable to read or parse config file ${absolutePath}.`);
   }
@@ -103,3 +110,108 @@ export async function readConfig(
 }
 
 export { MAX_BUDGET };
+
+// Readers choose their own validation needs and read moments; no cached snapshot.
+export async function readSettings(path: string) {
+  return Bun.TOML.parse(await Bun.file(path).text()) as {
+    terminal?: { default_chain?: string };
+    chains?: Record<
+      string,
+      {
+        chain_id?: number;
+        rpc_url_env?: string;
+        execution_enabled?: boolean;
+        executor?: {
+          address?: string;
+          uniswap_deployment?: string;
+          pancake_deployment?: string;
+        };
+        tokens?: Array<{
+          address?: string;
+          symbol?: string;
+          decimals?: number;
+        }>;
+        deployments?: Record<
+          string,
+          { kind?: string; router?: string; fees?: number[] }
+        >;
+      }
+    >;
+  };
+}
+
+export async function readExecutionConfig(
+  configPath: string,
+  chain: string,
+  allocations: boolean,
+) {
+  const config = await readSettings(configPath);
+  const localChain = config.chains?.[chain];
+  if (
+    !localChain ||
+    !Number.isSafeInteger(localChain.chain_id) ||
+    (localChain.chain_id ?? 0) <= 0 ||
+    localChain.execution_enabled !== true ||
+    typeof localChain.rpc_url_env !== "string" ||
+    !localChain.rpc_url_env.trim()
+  )
+    throw new Error(
+      "Local chain must set a safe positive chain_id, explicitly enable execution, and set rpc_url_env.",
+    );
+  const expectedChainId = String(localChain.chain_id);
+  const trusted: TrustedExecution = { tokens: [], deployments: {} };
+  for (const token of localChain.tokens ?? []) {
+    if (!token.address)
+      throw new Error("Local execution tokens must have valid addresses.");
+    try {
+      trusted.tokens.push(normalizeLocalAddress(token.address));
+    } catch {
+      throw new Error("Local execution tokens must have valid addresses.");
+    }
+  }
+  for (const [id, deployment] of Object.entries(localChain.deployments ?? {})) {
+    if (
+      (deployment.kind !== "uniswap-v3" && deployment.kind !== "pancake-v3") ||
+      !deployment.router ||
+      !localAddress.test(deployment.router) ||
+      !Array.isArray(deployment.fees) ||
+      !deployment.fees.every(
+        (fee) => Number.isInteger(fee) && fee >= 0 && fee < 1_000_000,
+      )
+    )
+      throw new Error("Local execution deployment is invalid.");
+    trusted.deployments[id] = {
+      kind: deployment.kind,
+      router: normalizeLocalAddress(deployment.router),
+      fees: deployment.fees,
+    };
+  }
+  if (allocations) {
+    const e = localChain.executor;
+    const uni =
+      e?.uniswap_deployment && trusted.deployments[e.uniswap_deployment];
+    const pan =
+      e?.pancake_deployment && trusted.deployments[e.pancake_deployment];
+    if (
+      !e?.address ||
+      !e.uniswap_deployment ||
+      !e.pancake_deployment ||
+      !localAddress.test(e.address) ||
+      BigInt(normalizeLocalAddress(e.address)) === 0n ||
+      !uni ||
+      !pan ||
+      uni.kind !== "uniswap-v3" ||
+      pan.kind !== "pancake-v3" ||
+      uni.router.toLowerCase() === pan.router.toLowerCase()
+    )
+      throw new Error(
+        "Local executor needs an address and distinct Uniswap/Pancake deployments.",
+      );
+    trusted.executor = {
+      address: normalizeLocalAddress(e.address),
+      uniswapDeployment: e.uniswap_deployment,
+      pancakeDeployment: e.pancake_deployment,
+    };
+  }
+  return { expectedChainId, rpcUrlEnv: localChain.rpc_url_env, trusted };
+}

@@ -3,11 +3,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create } from "@bufbuild/protobuf";
+import { executePrepared } from "../apps/terminal/src/execution";
 import {
-  executePrepared,
   expectedSwapData,
   type Receipt,
-} from "../apps/terminal/src/execution";
+} from "../apps/terminal/src/execution-policy";
+import { executionExitCode } from "../apps/terminal/src/main";
 import { runTrade, type TradeIO } from "../apps/terminal/src/trade";
 import {
   BlockContextSchema,
@@ -331,8 +332,7 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
           },
         }).transaction;
       }
-      let approvalVerified = false;
-      const code = await executePrepared({
+      return executePrepared({
         signer: sender,
         expectedChainId: "84532",
         slippageBps: 50,
@@ -386,12 +386,8 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
         },
         reportPreparation: true,
         swapOnly: afterApproval,
-        onApprovalVerified: () => {
-          approvalVerified = true;
-        },
         report,
       });
-      return { code, approvalVerified };
     },
   };
   return { io, events, calls };
@@ -400,7 +396,9 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
 test("selected-route integration reselects fresh engine winner, but keeps manual route", async () => {
   for (const manual of [false, true]) {
     const f = selectedTradeFixture();
-    const code = await runTrade(f.io, manual ? "uni-direct" : undefined);
+    const code = executionExitCode(
+      await runTrade(f.io, manual ? "uni-direct" : undefined),
+    );
     expect(code).toBe(0);
     const routeId = manual ? "uni-direct" : "cake-direct";
     expect(f.calls).toEqual([
@@ -541,7 +539,7 @@ test("selected-route integration reselects fresh engine winner, but keeps manual
 
 test("selected-route integration cannot use approval confirmation to send fresh swap", async () => {
   const f = selectedTradeFixture(false);
-  expect(await runTrade(f.io)).toBe(1);
+  expect(await runTrade(f.io)).toEqual({ kind: "canceled" });
   expect(f.calls.filter((call) => call.startsWith("send:"))).toEqual([
     `send:0x${"2".repeat(40)}`,
   ]);

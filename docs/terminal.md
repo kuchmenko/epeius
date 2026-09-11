@@ -27,6 +27,8 @@ Commands:
 
 Use `--config PATH` to select TOML. `--engine-url URL` overrides its endpoint for remote terminal commands. `--chain KEY` selects a chain; otherwise `terminal.default_chain` is used. Every quote sends both chain key and ID, and the engine rejects a mismatch.
 
+Read-only commands load terminal settings and token metadata without requiring valid execution settings, a wallet, or Tenderly. Execution configuration is checked for the selected chain when execution is requested; executor configuration is required only for allocations. Configuration is not cached or hot-reloaded.
+
 ## Tokens and amounts
 
 Symbols are case-insensitive and resolve only among the selected chain's configured tokens. Unknown or ambiguous symbols fail. `ETH` is not an alias for `WETH`; an address does not bypass pair restrictions.
@@ -83,6 +85,8 @@ bun run terminal -- execute --chain base-sepolia --config .testnet/runtime.toml 
 1. A submitted hash with `submission: "submitted"` and `verification.outcome: "pending"`.
 2. A separate receipt verification event, or a pending/unknown event if verification cannot finish.
 
+Human review uses token metadata checked against local TOML. It shows approval-only or swap action, chain ID, full account/recipient/token/target/spender addresses, decimal and atomic amounts, route/deployment/hops/fees, allocation inputs and total when present, UTC and Unix deadline, preparation expiry, and simulation block. It does not replace the full transaction bytes in machine output. Reject/requote status is checked before route or allocation matching, so an engine refusal is not reported as a changed route. Human reasons escape terminal controls; the terminal does not maintain an English-message whitelist. Raw Protobuf JSON preserves engine envelope text, so arbitrary hostile engine output is not promised to be redacted.
+
 For a verified, TOML-configured executor, replace `--route-id` with `--allocations '[{"routeId":"UNI_ROUTE","amountInAtomic":"37"},{"routeId":"PANCAKE_ROUTE","amountInAtomic":"64"}]'`. This example requires an original quote of 101 atomic units. One or two explicit allocations are supported; two must use different venues. See [executor preparation and evidence](execution.md#configured-executor) for admission, exact re-quotes, aggregate slippage, approval spender, and remaining live checks. `trade` remains a single direct-router route; it does not choose allocations or use the executor.
 
 For swaps, `verification.outcome: "passed"` means the canonical successful receipt's exact-transaction ERC20 Transfer logs show full wallet input consumption, output at least the configured minimum, and no net intermediate-token residue in the router. `receipt_success` is used for approval receipts; it does not make the old quote executable. Obtain a fresh quote after approval.
@@ -93,6 +97,8 @@ Interactive execution requires typing `approval` or `swap`. Deliberate nonintera
 
 Keep keystores and password files outside Git. Private keys are never accepted as command arguments. The checked-in root TOML disables execution on every chain. Base Sepolia is the verified and default test setup; configuring another network or provider does not prove capability or simulation support. Starting the engine never writes to a network.
 
+Cast is the only implemented wallet integration. WalletConnect, embedded wallets, and account abstraction are not implemented. Read-only RPC and canonical receipt polling remain separate from Cast; polling follows the original hash, without replacement tracking or resend.
+
 ## Integrated trade
 
 ```bash
@@ -102,6 +108,8 @@ bun run terminal -- trade --chain base-sepolia --config .testnet/runtime.toml \
 ```
 
 `trade` accepts the same token, amount, search-budget, chain, and engine-URL options as `quote`, plus execution credentials and slippage. It selects `bestRouteId` by default. Pass `--route-id ID` to override with any returned route, including a nonwinner. Missing selection fails; the terminal never silently falls back to another candidate. Token admission and metadata checks against local TOML happen before requesting quotes. Preparation must match the original token pair, exact input, and full selected route, in addition to the independent local calldata/config checks used by `execute`.
+
+Unlike informational `quote`, `trade` opens the local account and validates execution context before the first quote request. Missing credentials or an invalid execution context therefore stop the trade before quote search. The quote request still contains no sender field.
 
 An approval has its own confirmation and canonical receipt check. After success, `trade` requests exactly one fresh quote and preparation. Automatic selection uses the fresh engine recommendation, which may change venue or path. Manual `--route-id` stays fixed and fails if absent. Fresh terms are shown and require a new interactive `swap` confirmation. Initial `--confirm-approval yes` or `--confirm-swap yes` never authorizes this post-approval swap; noninteractive execution cancels at that point. If the fresh route needs another approval, the flow stops before signing it. Start a new trade explicitly; no automatic approval loop or resend occurs.
 

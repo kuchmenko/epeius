@@ -9,7 +9,8 @@ import {
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
-import { executionCommand } from "./execution";
+import type { ExecutionResult } from "./execution";
+import { connectExecution, executionCommand } from "./execution-command";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import {
   chainFromStatus,
@@ -19,6 +20,14 @@ import {
   trustChainTokens,
 } from "./tokens";
 import { runTrade } from "./trade";
+
+export function executionExitCode(result: ExecutionResult) {
+  return ["preview", "approval-confirmed", "swap-verified"].includes(
+    result.kind,
+  )
+    ? 0
+    : 1;
+}
 
 const help = `Epeius — EVM quote terminal
 
@@ -205,21 +214,24 @@ export async function main(rawArgs: string[]) {
           : config.engineUrl,
       );
       const status = await client.getStatus({}, { signal: abort.signal });
-      const chain = chainFromStatus(
+      let chain = chainFromStatus(
         status.chains,
         values.chain ?? config.defaultChain,
       );
-      trustChainTokens(chain, config.chains[chain.key]);
+      chain = trustChainTokens(chain, config.chains[chain.key]);
       if (!chain.executionEnabled || !chain.connected)
         throw new Error("Engine must enable execution on the connected chain.");
-      return await executionCommand(
-        command,
-        values,
-        config.path,
-        chain.key,
-        chain.chainId,
-        client,
-        abort.signal,
+      return executionExitCode(
+        await executionCommand(
+          command,
+          values,
+          config.path,
+          chain.key,
+          chain.chainId,
+          client,
+          abort.signal,
+          chain.tokens,
+        ),
       );
     }
     if (command === "chains" && args.length === 0)
@@ -345,39 +357,55 @@ export async function main(rawArgs: string[]) {
         throw new Error("Provide --keystore and --password-file.");
       if (!chain.executionEnabled)
         throw new Error("Engine must enable execution on the connected chain.");
-      return await runTrade(
-        {
-          quote: getQuote,
-          report: (result) => console.log(JSON.stringify(result)),
-          execute: async (quote, route, afterApproval) => {
-            let approvalVerified = false;
-            const code = await executionCommand(
-              "trade",
-              {
-                ...values,
-                "quote-id": quote.quoteId,
-                "route-id": route.routeId,
-              },
-              config.path,
-              chain.key,
-              chain.chainId,
-              client,
-              abort.signal,
-              {
-                route,
-                amountInAtomic,
-                tokenIn: tokenIn.address,
-                tokenOut: tokenOut.address,
-                afterApproval,
-                onApprovalVerified: () => {
-                  approvalVerified = true;
+      // Establish executable account/network before asking for the first trade quote.
+      // Execution still rereads config and discovers the account at its original read point.
+      const context = await connectExecution(
+        values,
+        config.path,
+        chain.key,
+        chain.chainId,
+        abort.signal,
+      );
+      const rpcChainId = await context.rpc.chainId();
+      if (
+        !/^0x[0-9a-f]+$/.test(rpcChainId) ||
+        BigInt(rpcChainId).toString() !== context.expectedChainId
+      )
+        throw new Error(
+          `RPC network must match configured chain ID ${context.expectedChainId}.`,
+        );
+      return executionExitCode(
+        await runTrade(
+          {
+            quote: getQuote,
+            report: (result) => console.log(JSON.stringify(result)),
+            execute: async (quote, route, afterApproval) => {
+              return executionCommand(
+                "trade",
+                {
+                  ...values,
+                  "quote-id": quote.quoteId,
+                  "route-id": route.routeId,
                 },
-              },
-            );
-            return { code, approvalVerified };
+                config.path,
+                chain.key,
+                chain.chainId,
+                client,
+                abort.signal,
+                chain.tokens,
+                {
+                  signer: context.signer,
+                  route,
+                  amountInAtomic,
+                  tokenIn: tokenIn.address,
+                  tokenOut: tokenOut.address,
+                  afterApproval,
+                },
+              );
+            },
           },
-        },
-        values["route-id"],
+          values["route-id"],
+        ),
       );
     }
     const quote = await getQuote();

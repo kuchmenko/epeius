@@ -9,20 +9,20 @@ import {
   GetStatusResponseSchema,
   PreparationStatus,
   PrepareExecutionRequestSchema,
+  type PrepareExecutionResponse,
   PrepareExecutionResponseSchema,
   QuotedAllocationSchema,
   QuoteFinalSchema,
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import { type ExecutionIO, executePrepared } from "./execution";
 import {
-  type ExecutionIO,
-  executePrepared,
   expectedExecutorData,
   expectedSwapData,
   type Receipt,
   validatePreparation,
   verifyReceipt,
-} from "./execution";
+} from "./execution-policy";
 
 const addr = (digit: string) => `0x${digit.repeat(40)}`;
 const sender = addr("1"),
@@ -49,6 +49,8 @@ function prepared() {
     deadlineUnix: "4102444800",
     amountInAtomic: "101",
     amountOutMinimumAtomic: "197",
+    simulatedAmountOutAtomic: "199",
+    simulationBlock: { number: "124", hash: `0x${"b".repeat(64)}` },
     tokenIn: input,
     tokenOut: output,
     recipient: sender,
@@ -144,11 +146,44 @@ function fixture() {
   return { io, p, sent, requests, reports, confirmations };
 }
 
+test("submitted JSONL keys and order precede receipt observation", async () => {
+  const f = fixture();
+  f.io.reportPreparation = true;
+  f.io.receipt = async () => {
+    expect(f.reports).toHaveLength(2);
+    expect(Object.keys(f.reports[0] as object)).toEqual([
+      "preparation",
+      "sent",
+    ]);
+    expect(Object.keys(f.reports[1] as object)).toEqual([
+      "transactionHash",
+      "submission",
+      "kind",
+      "verification",
+    ]);
+    expect(f.reports[1]).toEqual({
+      transactionHash: hash,
+      submission: "submitted",
+      kind: "swap",
+      verification: { outcome: "pending" },
+    });
+    return receipt();
+  };
+  await executePrepared(f.io);
+  expect(Object.keys(f.reports[2] as object)).toEqual([
+    "transactionHash",
+    "verification",
+  ]);
+  expect(f.sent).toHaveLength(1);
+});
+
 test("preview and canceled confirmation never send or recheck", async () => {
   for (const preview of [true, false]) {
     const f = fixture();
     f.io.confirm = async () => false;
-    expect(await executePrepared(f.io, preview)).toBe(preview ? 0 : 1);
+    expect(await executePrepared(f.io, preview)).toEqual({
+      kind: preview ? "preview" : "canceled",
+    });
     expect(f.sent).toHaveLength(0);
     expect(f.requests).toEqual([undefined]);
   }
@@ -156,7 +191,10 @@ test("preview and canceled confirmation never send or recheck", async () => {
 
 test("swap rechecks by preparation ID and reports hash separately from verification", async () => {
   const f = fixture();
-  expect(await executePrepared(f.io)).toBe(0);
+  expect(await executePrepared(f.io)).toEqual({
+    kind: "swap-verified",
+    transactionHash: hash,
+  });
   expect(f.requests).toEqual([undefined, "p1"]);
   expect(f.confirmations).toEqual(["swap"]);
   expect(f.sent).toHaveLength(1);
@@ -296,10 +334,6 @@ test("expired, rejected, and requote preparations fail closed", async () => {
 
 test("approval confirms separately, sends only exact approval and requires fresh quote", async () => {
   const f = fixture();
-  let approved = 0;
-  f.io.onApprovalVerified = () => {
-    approved++;
-  };
   f.io.reportPreparation = true;
   f.p.status = PreparationStatus.APPROVAL_REQUIRED;
   f.p.approvalSpender = router;
@@ -327,8 +361,10 @@ test("approval confirms separately, sends only exact approval and requires fresh
   f.io.swapOnly = false;
   f.requests.length = 0;
   f.reports.length = 0;
-  expect(await executePrepared(f.io)).toBe(0);
-  expect(approved).toBe(1);
+  expect(await executePrepared(f.io)).toEqual({
+    kind: "approval-confirmed",
+    transactionHash: hash,
+  });
   expect(f.reports[0]).toMatchObject({
     preparation: {
       preparationId: "p1",
@@ -343,8 +379,10 @@ test("approval confirms separately, sends only exact approval and requires fresh
     nextAction: expect.stringContaining("Rerun quote"),
   });
   f.io.receipt = async () => ({ ...receipt(), status: "0x0" });
-  expect(await executePrepared(f.io)).toBe(1);
-  expect(approved).toBe(1);
+  expect(await executePrepared(f.io)).toEqual({
+    kind: "failed",
+    transactionHash: hash,
+  });
   f.p.approvalTransaction.data = `0x095ea7b3${router.slice(2).padStart(64, "0")}${"f".repeat(64)}`;
   expect(() =>
     validatePreparation(f.p, sender, expectedChainId, 50, trusted),
@@ -482,7 +520,10 @@ test("recheck cannot refresh saved route quote basis", async () => {
     if (id) p.simulatedAmountOutAtomic = "1000000";
     return p;
   };
-  expect(await executePrepared(f.io)).toBe(0);
+  expect(await executePrepared(f.io)).toEqual({
+    kind: "swap-verified",
+    transactionHash: hash,
+  });
   expect(f.sent).toHaveLength(1);
 
   const changed = fixture();
@@ -567,6 +608,43 @@ test("swap calldata matches independent router ABI fixtures", () => {
   }
 });
 
+test("fee boundaries match independent Cast calldata and local admission", () => {
+  // Offline cast calldata exactInput((bytes,address,uint256,uint256)), then
+  // multicall(uint256,bytes[]): path IN / fee / OUT, sender, 101, 197, 4102444800.
+  for (const [fee, digest] of [
+    [0, "65a69c9134116b0c7be7482bc220c4ac2de0d3f477ab9da7dd7024ab69b39664"],
+    [
+      999999,
+      "11e0deb064daa3eb436e0e30df24af833f8ae442a79f659ecf84cecb64b6ec5a",
+    ],
+  ] as const) {
+    const p = prepared();
+    assert(p.route && p.transaction);
+    p.route.legs = [
+      {
+        ...p.route.legs[0],
+        tokenOut: output,
+        selector: { case: "feePips", value: fee },
+      },
+    ];
+    p.transaction.data = expectedSwapData(p, "uniswap-v3");
+    expect(
+      createHash("sha256")
+        .update(Buffer.from(p.transaction.data.slice(2), "hex"))
+        .digest("hex"),
+    ).toBe(digest);
+    const config = structuredClone(trusted);
+    config.deployments.uni.fees = [fee, 1000000];
+    expect(validatePreparation(p, sender, expectedChainId, 50, config)).toBe(
+      p.transaction,
+    );
+    p.route.legs[0].selector = { case: "feePips", value: 1000000 };
+    expect(() =>
+      validatePreparation(p, sender, expectedChainId, 50, config),
+    ).toThrow("not allowed");
+  }
+});
+
 test("rejects altered target, calldata, path, amount, deadline, recipient and approval spender", () => {
   const mutations: Array<(p: ReturnType<typeof prepared>) => void> = [
     (p) => {
@@ -639,13 +717,56 @@ test("send or receipt timeout reports unknown or pending and never retries", asy
         calls++;
         throw new Error("timeout");
       };
-    expect(await executePrepared(f.io)).toBe(1);
+    expect(await executePrepared(f.io)).toMatchObject({ kind: "unknown" });
     expect(calls).toBe(1);
     expect(f.reports.at(-1)).toMatchObject({
       submission: stage === "send" ? "unknown" : "pending_or_unknown",
       verification: { outcome: "unavailable" },
     });
   }
+});
+
+test("review mutation prevents send; invalid submission hash remains unknown without receipt or retry", async () => {
+  const mutated = fixture();
+  mutated.io.confirm = async (_kind, p) => {
+    assert(p.transaction);
+    p.transaction.data = "0xdead";
+    return true;
+  };
+  await expect(executePrepared(mutated.io)).rejects.toThrow(
+    "changed after confirmation",
+  );
+  expect(mutated.sent).toHaveLength(0);
+  const invalid = fixture();
+  let sends = 0;
+  let receipts = 0;
+  invalid.io.send = async () => {
+    sends++;
+    return "invalid hash";
+  };
+  invalid.io.receipt = async () => {
+    receipts++;
+    return receipt();
+  };
+  expect(await executePrepared(invalid.io)).toEqual({
+    kind: "unknown",
+    transactionHash: null,
+  });
+  expect(sends).toBe(1);
+  expect(receipts).toBe(0);
+});
+
+test("receipt identity and removed logs cannot establish token deltas", () => {
+  const r = receipt();
+  expect(
+    verifyReceipt(
+      { ...r, transactionHash: `0x${"b".repeat(64)}` },
+      hash,
+      prepared(),
+    ).outcome,
+  ).toBe("unavailable");
+  r.logs[0].removed = true;
+  expect(verifyReceipt(r, hash, prepared()).outcome).toBe("unavailable");
 });
 
 test("receipt success alone cannot pass; partial input, low output, and intermediate residue fail", () => {
@@ -700,14 +821,16 @@ test("actual CLI gates cast sends, preserves terms, and keeps RPC secrets out of
   const directory = await mkdtemp(join(tmpdir(), "epeius-execute-"));
   const callsPath = join(directory, "calls.jsonl");
   const castPath = join(directory, "cast");
+  const accountPath = join(directory, "account.txt");
+  await Bun.write(accountPath, sender);
   // Stub cast only; the real CLI, Connect client, and HTTP RPC paths run.
   await Bun.write(
     castPath,
     `#!${process.execPath}
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args, rpc: process.env.ETH_RPC_URL, privateKey: process.env.ETH_PRIVATE_KEY}) + '\\n');
-console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
+console.log(args[0] === 'wallet' ? readFileSync(${JSON.stringify(accountPath)}, 'utf8') : '${hash}');
 `,
   );
   await chmod(castPath, 0o700);
@@ -719,15 +842,23 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   let quoteCount = 0;
   let tradeApproval = false;
   let alterTradeAmount = false;
+  let rejection: PrepareExecutionResponse | undefined;
+  let changeAccountOnQuote = false;
+  let walletCallsBeforeRun = 0;
+  let informationalQuote = false;
   const blockHash = `0x${"b".repeat(64)}`;
   const blockRequests: unknown[] = [];
   const requests: unknown[] = [];
   const preparationTimeouts: Array<string | null> = [];
+  const trace: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       const path = new URL(request.url).pathname;
+      trace.push(
+        path.includes("QuoteService") ? (path.split("/").at(-1) ?? "") : "rpc",
+      );
       if (path.endsWith("/GetStatus"))
         return new Response(
           toBinary(
@@ -752,6 +883,15 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
           { headers: { "content-type": "application/proto" } },
         );
       if (path.endsWith("/GetQuote")) {
+        if (!informationalQuote) {
+          const walletCalls = (await Bun.file(callsPath).text())
+            .split("\n")
+            .filter((line) => line.includes('"wallet"')).length;
+          expect(walletCalls).toBeGreaterThan(walletCallsBeforeRun);
+          expect(trace).toContain("eth_chainId");
+          trace.push("account-and-chain-established-before-quote");
+        }
+        if (changeAccountOnQuote) await Bun.write(accountPath, router);
         const requestBody = fromBinary(
           QuoteRequestSchema,
           new Uint8Array(await request.arrayBuffer()),
@@ -767,6 +907,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         p.preparationId = `trade-p${quoteCount}`;
         if (tradeApproval && quoteCount === 1) {
           p.status = PreparationStatus.APPROVAL_REQUIRED;
+          p.simulatedAmountOutAtomic = "";
           p.approvalSpender = router;
           assert(p.transaction);
           p.approvalTransaction = {
@@ -799,14 +940,18 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         );
         if (requests.length === 1) await Bun.sleep(5200);
         if (alterTradeAmount) p.amountInAtomic = "102";
-        return new Response(toBinary(PrepareExecutionResponseSchema, p), {
-          headers: { "content-type": "application/proto" },
-        });
+        return new Response(
+          toBinary(PrepareExecutionResponseSchema, rejection ?? p),
+          {
+            headers: { "content-type": "application/proto" },
+          },
+        );
       }
       const body = (await request.json()) as {
         method: string;
         params: unknown[];
       };
+      trace.push(body.method);
       if (body.method === "eth_getBlockByNumber") {
         blockRequests.push(body.params);
         return Response.json({
@@ -844,24 +989,50 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     `[terminal]\ndefault_chain='testnet'\nengine_url='${server.url}'\nsearch_budget_ms=2000\n[chains.testnet]\nchain_id=${expectedChainId}\nexecution_enabled=true\nrpc_url_env='EPEIUS_FIXTURE_RPC'\n[[chains.testnet.tokens]]\naddress='${input.slice(2)}'\nsymbol='IN'\ndecimals=18\n[[chains.testnet.tokens]]\naddress='${middle.slice(2)}'\nsymbol='MID'\ndecimals=6\n[[chains.testnet.tokens]]\naddress='${output.slice(2)}'\nsymbol='OUT'\ndecimals=8\n[chains.testnet.deployments.uni]\nkind='uniswap-v3'\nrouter='${router.slice(2)}'\nfees=[500,3000]\n`,
   );
   const rpc = `${server.url}secret-api-key`;
-  const run = async (args: string[], rpcOverride = rpc) => {
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        "apps/terminal/src/main.ts",
-        ...args,
-        "--config",
-        config,
-        ...(args[0] === "trade"
-          ? ["--in", "IN", "--out", "OUT", "--amount-atomic", "101"]
+  const run = async (
+    args: string[],
+    rpcOverride = rpc,
+    confirmation?: "approval" | "swap",
+  ) => {
+    trace.length = 0;
+    walletCallsBeforeRun = (await Bun.file(callsPath).exists())
+      ? (await Bun.file(callsPath).text())
+          .split("\n")
+          .filter((line) => line.includes('"wallet"')).length
+      : 0;
+    informationalQuote = args[0] === "quote";
+    const command = [
+      process.execPath,
+      "apps/terminal/src/main.ts",
+      ...args,
+      "--config",
+      config,
+      ...(args[0] === "trade" || args[0] === "quote"
+        ? ["--in", "IN", "--out", "OUT", "--amount-atomic", "101"]
+        : args[0] === "status" || args[0] === "tokens"
+          ? []
           : args.includes("--allocations")
             ? ["--quote-id", "q1"]
             : ["--quote-id", "q1", "--route-id", "r1"]),
-        "--keystore",
-        "/fixture/keystore",
-        "--password-file",
-        "/fixture/password",
-      ],
+      ...(["quote", "tokens", "status"].includes(args[0])
+        ? []
+        : [
+            "--keystore",
+            "/fixture/keystore",
+            "--password-file",
+            "/fixture/password",
+          ]),
+    ];
+    const stdoutPath = join(directory, "tty.stdout.jsonl");
+    const child = Bun.spawn(
+      confirmation
+        ? [
+            "script",
+            "-qefc",
+            `${command.map((arg) => `'${arg.replaceAll("'", "'\\''")}'`).join(" ")} > '${stdoutPath}'`,
+            "/dev/null",
+          ]
+        : command,
       {
         cwd: join(import.meta.dir, "../../.."),
         env: {
@@ -870,17 +1041,39 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
           EPEIUS_FIXTURE_RPC: rpcOverride,
           ETH_PRIVATE_KEY: "must-not-reach-cast",
         },
-        stdin: "ignore",
+        stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
       },
     );
+    if (!confirmation) child.stdin.end();
+    let answered = false;
     const [out, err, code] = await Promise.all([
-      new Response(child.stdout).text(),
+      (async () => {
+        let output = "";
+        const decoder = new TextDecoder();
+        for await (const chunk of child.stdout) {
+          const text = decoder.decode(chunk, { stream: true });
+          output += text;
+          trace.push(`stdout:${text.trimEnd()}`);
+          if (
+            confirmation &&
+            !answered &&
+            output.includes("to sign and send this transaction:")
+          ) {
+            answered = true;
+            child.stdin.write(`${confirmation}\n`);
+            child.stdin.end();
+          }
+        }
+        return output + decoder.decode();
+      })(),
       new Response(child.stderr).text(),
       child.exited,
     ]);
-    return { out, err, code };
+    return confirmation
+      ? { out: await Bun.file(stdoutPath).text(), err: out + err, code }
+      : { out, err, code };
   };
   const calls = async () =>
     (await Bun.file(callsPath).text())
@@ -894,6 +1087,19 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
             privateKey?: string;
           },
       );
+  const capture = async (
+    name: string,
+    result: { out: string; err: string; code: number },
+  ) => {
+    const destination = process.env.EPEIUS_TERMINAL_CAPTURE_DIR;
+    if (!destination) return;
+    await Bun.write(join(destination, `${name}.stdout.jsonl`), result.out);
+    await Bun.write(join(destination, `${name}.stderr.txt`), result.err);
+    await Bun.write(
+      join(destination, `${name}.trace.json`),
+      JSON.stringify({ exitCode: result.code, trace }, null, 2),
+    );
+  };
   try {
     const slowPreview = await run(["prepare"]);
     expect(slowPreview.code).toBe(0);
@@ -913,7 +1119,9 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect((await run(["prepare", "--slippage-bps", "10000"])).err).toContain(
       "0 through 9999",
     );
-    expect((await run(["execute"])).out).toContain('"canceled"');
+    const nonTTY = await run(["execute"]);
+    expect(nonTTY.out).toBe('{"sent":false,"outcome":"canceled"}\n');
+    await capture("non-tty", nonTTY);
     expect((await run(["execute", "--confirm-approval", "yes"])).out).toContain(
       '"canceled"',
     );
@@ -921,8 +1129,12 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
       (await calls()).filter((call) => call.args[0] === "send"),
     ).toHaveLength(0);
     const success = await run(["execute", "--confirm-swap", "yes"]);
+    await capture("swap", success);
     expect(success.code).toBe(0);
-    expect(success.out).toContain('"outcome":"passed"');
+    expect(success.out).toBe(
+      `{"transactionHash":"${hash}","submission":"submitted","kind":"swap","verification":{"outcome":"pending"}}\n` +
+        `{"transactionHash":"${hash}","verification":{"outcome":"passed","inputSpentAtomic":"101","outputReceivedAtomic":"199","routerIntermediateDeltas":{"${middle}":"0"},"reason":"Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted."}}\n`,
+    );
     expect(receiptReads).toBe(3);
     expect(blockRequests).toEqual([["0x123", false]]);
     const send = (await calls()).filter((call) => call.args[0] === "send");
@@ -969,6 +1181,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     });
     canonicalMismatch = true;
     const mismatch = await run(["execute", "--confirm-swap", "yes"]);
+    await capture("unknown", mismatch);
     expect(mismatch.code).toBe(1);
     expect(mismatch.out).not.toContain('"outcome":"passed"');
     expect(mismatch.out).toContain('"submission":"pending_or_unknown"');
@@ -1034,6 +1247,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     quoteCount = 0;
     tradeApproval = true;
     const approved = await run(["trade", "--confirm-approval", "yes"]);
+    await capture("approval", approved);
     expect(approved.code).toBe(1);
     expect(quoteCount).toBe(2);
     const approvalEvents = approved.out
@@ -1091,6 +1305,40 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
       "--allocations",
       '[{"routeId":"r1","amountInAtomic":"101"}]',
     ];
+    const executable = p;
+    for (const status of [
+      PreparationStatus.REJECTED,
+      PreparationStatus.REQUOTE_REQUIRED,
+    ]) {
+      rejection = create(PrepareExecutionResponseSchema, {
+        status,
+        message: "quote block unavailable\n\u001b[2J\u009b31m\u202euntrusted",
+      });
+      for (const args of [
+        ["execute", ...allocationArgs],
+        ["execute"],
+        ["trade"],
+      ]) {
+        const blocked = await run([...args, "--confirm-swap", "yes"]);
+        await capture(
+          status === PreparationStatus.REJECTED ? "rejected" : "requote",
+          blocked,
+        );
+        expect(blocked.code).toBe(1);
+        expect(blocked.err).toContain(
+          "quote block unavailable\\n\\u001b[2J\\u009b31m\\u202euntrusted",
+        );
+        expect(blocked.err).not.toContain("different allocations");
+        expect(blocked.err).not.toContain("selected quote");
+        expect(blocked.err).not.toContain("\u001b");
+      }
+    }
+    p = executable;
+    assert(p.transaction);
+    rejection = undefined;
+    expect(
+      (await calls()).filter((call) => call.args[0] === "send"),
+    ).toHaveLength(4);
     const executorPreview = await run(["prepare", ...allocationArgs]);
     expect(executorPreview.code).toBe(0);
     expect(executorPreview.out).toContain('"allocations"');
@@ -1120,8 +1368,84 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect(
       (await calls()).filter((call) => call.args[0] === "send"),
     ).toHaveLength(5);
+    // Two real configured venues and asymmetric allocations exercise the human split review.
+    p.allocations[0].amountInAtomic = "37";
+    assert(p.allocations[0].route);
+    p.allocations[0].route.amountOutAtomic = "79";
+    p.allocations.push(
+      create(QuotedAllocationSchema, {
+        amountInAtomic: "64",
+        route: {
+          ...p.allocations[0].route,
+          routeId: "pan-direct",
+          provider: "pancake-v3",
+          deploymentId: "pan",
+          amountOutAtomic: "119",
+          legs: [
+            {
+              ...p.allocations[0].route.legs[0],
+              tokenIn: input,
+              tokenOut: output,
+              pool,
+              selector: { case: "feePips", value: 0 },
+            },
+          ],
+        },
+      }),
+    );
+    p.transaction.data = expectedExecutorData(p);
+    const split = await run([
+      "execute",
+      "--allocations",
+      '[{"routeId":"r1","amountInAtomic":"37"},{"routeId":"pan-direct","amountInAtomic":"64"}]',
+      "--confirm-swap",
+      "yes",
+    ]);
+    expect(split.code).toBe(0);
+    expect(split.err).toContain("Allocation 2: pan-direct");
+    expect(split.err).toContain("(37 atomic)");
+    expect(split.err).toContain("(64 atomic)");
+    await capture("split", split);
+    p = prepared();
+    const interactive = await run(["execute"], rpc, "swap");
+    expect(interactive.code).toBe(0);
+    expect(interactive.err).toContain(
+      "Type swap to sign and send this transaction:",
+    );
+    expect(interactive.out).toContain('"outcome":"passed"');
+    expect(interactive.out).not.toContain("Type swap");
+    await capture("interactive-swap", interactive);
+    const priorQuotes = quoteCount;
+    const priorCalls = (await calls()).length;
+    await Bun.write(accountPath, "invalid account");
+    const invalidAccount = await run(["trade", "--confirm-swap", "yes"]);
+    expect(invalidAccount.err).toContain("invalid wallet account");
+    expect(quoteCount).toBe(priorQuotes);
+    expect((await calls()).length).toBe(priorCalls + 1);
+    await Bun.write(accountPath, sender);
+    changeAccountOnQuote = true;
+    const changedAccount = await run(["trade", "--confirm-swap", "yes"]);
+    expect(changedAccount.err).toContain("Wallet account changed after quote");
+    expect(trace).not.toContain("PrepareExecution");
+    expect(
+      (await calls()).filter((call) => call.args[0] === "send"),
+    ).toHaveLength(7);
+    changeAccountOnQuote = false;
+    enabled = false;
+    await Bun.write(
+      config,
+      (await Bun.file(config).text()).replace(
+        "execution_enabled=true",
+        "execution_enabled=false",
+      ),
+    );
+    await Bun.write(accountPath, "invalid account");
+    const beforeInfo = (await calls()).length;
+    for (const command of ["status", "tokens", "quote"])
+      expect((await run([command])).code).toBe(0);
+    expect((await calls()).length).toBe(beforeInfo);
   } finally {
     await server.stop(true);
     await rm(directory, { recursive: true });
   }
-}, 15000);
+}, 20000);

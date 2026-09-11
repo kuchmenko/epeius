@@ -38,6 +38,10 @@ forge test --root contracts
 
 CI uses credential-free local RPC and Connect fixtures. Live testnet checks are separate. Passing local or dev checks is not evidence of production behavior.
 
+`check` already includes Go vet/race and the Bun/Go Connect transport test; do not rerun those suites merely under different command names. Build the local harness prerequisites above before claiming the optional dry-deploy fixture passed rather than skipped. ABI regression evidence must remain independent: production terminal encoding uses a pinned ABI library, while Go ABI, Cast, and stored golden vectors check the same bytes. Do not generate expected test vectors with the production terminal encoder. Strict decimal parsing remains separate from ABI encoding.
+
+For execution review, run the CLI with local Connect/RPC fixtures and a stub Cast, capturing stderr and stdout separately. Exercise approval, direct swap, split allocation, rejection, and non-TTY refusal. Check call order, no-send paths, one send, hash-before-wait, and JSONL values in execution evidence; inspect rendered terminal captures for readable full addresses and exact amounts. A screenshot alone does not prove transaction behavior. No live wallet or Tenderly request is needed for these checks.
+
 ## Output locations
 
 | Path or stream | Producer | Interpretation |
@@ -70,3 +74,11 @@ scripts/testnet/                  Isolated Bun harness workspace
 scripts/                          Launch, generation, checks, smoke, and E2E runner
 docs/                             Unified documentation
 ```
+
+## Terminal execution modules
+
+`main.ts` dispatches commands and maps typed results to the existing exit codes. `execution-command.ts` connects config, wallet, RPC, prompts, and JSONL output. `execution.ts` runs preparation, validation, consent, immutable recheck, one handoff, and verification using supplied operations. `execution-policy.ts` independently checks local configuration, amounts, calldata, and receipt deltas. `trade.ts` refreshes only after `approval-confirmed`; it does not infer approval success from an output callback.
+
+`ExecutionResult` distinguishes `preview`, `canceled`, `approval-confirmed`, `swap-verified`, `failed`, and `unknown`. Known submitted outcomes keep their transaction hash. Pre-send validation errors still reach the CLI error path. Preview and verified approval/swap map to exit 0; cancellation, failure, and unknown map to exit 1. A trade is complete only after a verified swap, not after approval. `ExecutionEvent` types the existing machine payloads without changing their wire fields.
+
+`config.ts` owns TOML parsing and conditional normalization for the terminal and E2E runner. `wallet-cast.ts` owns credentials, account discovery, and Cast submission; `chain.ts` owns read-only RPC and canonical receipt polling. `format.ts` renders human review with checked token metadata. No wallet registry, generic plugin layer, JavaScript private keys, WalletConnect, or account-abstraction implementation is present.

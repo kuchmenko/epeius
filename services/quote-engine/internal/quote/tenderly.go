@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -17,6 +18,17 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
+)
+
+var (
+	errSimulationNotConfigured    = errors.New("Simulation is not configured. Check the engine's Tenderly settings.")
+	errSimulationUnavailable      = errors.New("Simulation service is unavailable; execution was not prepared.")
+	errSimulationTimeout          = errors.New("Simulation timed out; execution was not prepared.")
+	errSimulationEvidence         = errors.New("Simulation evidence is incomplete or does not match the requested call and block.")
+	errSimulationInputAmount      = errors.New("Simulation did not consume the exact input amount.")
+	errSimulationMinimumOutput    = errors.New("Simulation output is below the minimum.")
+	errSimulationProtectedBalance = errors.New("Simulation changed a balance that must be preserved.")
+	errSimulationAllowance        = errors.New("Simulation left an executor-to-router allowance uncleared.")
 )
 
 type Tenderly struct {
@@ -125,7 +137,10 @@ func (t *Tenderly) SimulateAllocations(ctx context.Context, tx *quotev1.Unsigned
 func (t *Tenderly) simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, balances, allowances []balanceProbe, snapshot rpc.Snapshot, amount, minimum *big.Int) (string, error) {
 	fail := errors.New("simulation verification failed")
 	slug := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	if t.key == "" || !slug.MatchString(t.account) || !slug.MatchString(t.project) || !positiveInteger.MatchString(tx.ChainId) || tx.ChainId != snapshot.ChainID || tx.ValueAtomic != "0" {
+	if t.key == "" || !slug.MatchString(t.account) || !slug.MatchString(t.project) {
+		return "", errSimulationNotConfigured
+	}
+	if !positiveInteger.MatchString(tx.ChainId) || tx.ChainId != snapshot.ChainID || tx.ValueAtomic != "0" {
 		return "", fail
 	}
 	number, err := strconv.ParseUint(snapshot.BlockNumber, 10, 64)
@@ -181,17 +196,28 @@ func (t *Tenderly) simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 	req.Header.Set("Content-Type", "application/json")
 	response, err := t.client.Do(req)
 	if err != nil {
-		return "", fail
+		var networkError net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+			return "", errSimulationTimeout
+		}
+		return "", errSimulationUnavailable
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", fail
+		return "", errSimulationUnavailable
 	}
 	var body struct {
 		Results []simulationResult `json:"simulation_results"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&body); err != nil || len(body.Results) != len(calls) {
-		return "", fail
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&body); err != nil {
+		var networkError net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+			return "", errSimulationTimeout
+		}
+		return "", errSimulationEvidence
+	}
+	if len(body.Results) != len(calls) {
+		return "", errSimulationEvidence
 	}
 	values := make([]*big.Int, len(calls))
 	for i, item := range body.Results {
@@ -204,12 +230,12 @@ func (t *Tenderly) simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 		timestamp, e2 := hexutil.DecodeUint64(header.Timestamp)
 		trace := item.Transaction.TransactionInfo.CallTrace
 		if item.Simulation.TransactionIndex != -1 || !identityOK(item.Simulation.simulationIdentity) || !identityOK(item.Transaction.simulationIdentity) || e1 != nil || n != number || e2 != nil || timestamp != snapshot.Timestamp || !strings.EqualFold(header.Hash, snapshot.BlockHash) || trace.Error != "" || !strings.EqualFold(trace.From, expected.From) || !strings.EqualFold(trace.To, expected.To) || !strings.EqualFold(trace.Input, expected.Input) {
-			return "", fail
+			return "", errSimulationEvidence
 		}
 		if i != len(probes) {
 			raw, err := hexutil.Decode(trace.Output)
 			if err != nil || len(raw) != 32 {
-				return "", fail
+				return "", errSimulationEvidence
 			}
 			values[i] = new(big.Int).SetBytes(raw)
 		}
@@ -217,17 +243,20 @@ func (t *Tenderly) simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 	after := len(probes) + 1
 	consumed := new(big.Int).Sub(values[0], values[after])
 	output := new(big.Int).Sub(values[after+1], values[1])
-	if consumed.Cmp(amount) != 0 || output.Cmp(minimum) < 0 {
-		return "", fail
+	if consumed.Cmp(amount) != 0 {
+		return "", errSimulationInputAmount
+	}
+	if output.Cmp(minimum) < 0 {
+		return "", errSimulationMinimumOutput
 	}
 	for i := 2; i < len(probes); i++ {
 		if values[after+i].Cmp(values[i]) != 0 {
-			return "", fail
+			return "", errSimulationProtectedBalance
 		}
 	}
 	for i := after + len(probes); i < len(values); i++ {
 		if values[i].Sign() != 0 {
-			return "", fail
+			return "", errSimulationAllowance
 		}
 	}
 	return output.String(), nil

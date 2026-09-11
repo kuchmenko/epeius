@@ -4,6 +4,7 @@ import {
   QuoteFinalSchema,
   type RouteQuote,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import type { ExecutionResult } from "./execution";
 
 export type TradeIO = {
   quote: () => Promise<QuoteFinal>;
@@ -11,11 +12,14 @@ export type TradeIO = {
     quote: QuoteFinal,
     route: RouteQuote,
     afterApproval: boolean,
-  ) => Promise<{ code: number; approvalVerified: boolean }>;
+  ) => Promise<ExecutionResult>;
   report: (result: unknown) => void;
 };
 
-export async function runTrade(io: TradeIO, routeId?: string) {
+export async function runTrade(
+  io: TradeIO,
+  routeId?: string,
+): Promise<ExecutionResult> {
   const source = routeId === undefined ? "engine" : "manual";
   let previousQuoteId: string | undefined;
   for (const afterApproval of [false, true]) {
@@ -42,12 +46,12 @@ export async function runTrade(io: TradeIO, routeId?: string) {
       },
     });
     const result = await io.execute(quote, route, afterApproval);
-    if (result.code !== 0 || !result.approvalVerified) return result.code;
+    if (result.kind !== "approval-confirmed") return result;
     if (afterApproval)
       throw new Error(
         "Approval is still required. Start a new trade; nothing retried.",
       );
     previousQuoteId = quote.quoteId;
   }
-  return 1;
+  throw new Error("Trade did not produce a swap result.");
 }

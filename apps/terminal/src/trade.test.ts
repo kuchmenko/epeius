@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { create } from "@bufbuild/protobuf";
 import { QuoteFinalSchema } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import type { ExecutionResult } from "./execution";
 import { runTrade, type TradeIO } from "./trade";
 
 function fixture() {
@@ -36,7 +37,10 @@ function fixture() {
         route.amountOutAtomic,
         afterApproval,
       ]);
-      return { code: 0, approvalVerified: !afterApproval };
+      return {
+        kind: afterApproval ? "swap-verified" : "approval-confirmed",
+        transactionHash: "hash",
+      };
     },
     report: (result) => reports.push(result),
   };
@@ -46,7 +50,10 @@ function fixture() {
 test("auto refresh reselects engine result; manual nonwinner remains selected", async () => {
   for (const manual of [undefined, "cake"]) {
     const f = fixture();
-    expect(await runTrade(f.io, manual)).toBe(0);
+    expect(await runTrade(f.io, manual)).toEqual({
+      kind: "swap-verified",
+      transactionHash: "hash",
+    });
     expect(f.quoteCount()).toBe(2);
     expect(f.calls).toEqual([
       ["q1", manual ?? "uni", manual ? "100" : "120", false],
@@ -94,13 +101,16 @@ test("fresh quote must have new ID; quote failure never retries", async () => {
 
 test("only successful verified approval refreshes; cancellation and unknown submission stop", async () => {
   for (const result of [
-    { code: 0, approvalVerified: false },
-    { code: 1, approvalVerified: false },
-    { code: 1, approvalVerified: true },
-  ]) {
+    { kind: "preview" },
+    { kind: "swap-verified", transactionHash: "hash" },
+    { kind: "canceled" },
+    { kind: "failed", transactionHash: "hash" },
+    { kind: "unknown", transactionHash: "hash" },
+    { kind: "unknown", transactionHash: null },
+  ] satisfies ExecutionResult[]) {
     const f = fixture();
     f.io.execute = async () => result;
-    expect(await runTrade(f.io)).toBe(result.code);
+    expect(await runTrade(f.io)).toBe(result);
     expect(f.quoteCount()).toBe(1);
   }
 });
