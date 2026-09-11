@@ -314,8 +314,17 @@ test("approval confirms separately, sends only exact approval and requires fresh
   );
   expect(f.sent).toHaveLength(0);
   expect(f.confirmations).toHaveLength(0);
+  expect(f.reports).toHaveLength(1);
+  expect(f.reports[0]).toMatchObject({
+    preparation: {
+      preparationId: "p1",
+      status: "PREPARATION_STATUS_APPROVAL_REQUIRED",
+    },
+    sent: false,
+  });
   f.io.swapOnly = false;
   f.requests.length = 0;
+  f.reports.length = 0;
   expect(await executePrepared(f.io)).toBe(0);
   expect(approved).toBe(1);
   expect(f.reports[0]).toMatchObject({

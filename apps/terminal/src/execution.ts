@@ -329,12 +329,12 @@ export async function executePrepared(io: ExecutionIO, preview = false) {
     prepared.status === PreparationStatus.APPROVAL_REQUIRED
       ? "approval"
       : "swap";
+  if (preview || io.reportPreparation)
+    io.report({ preparation: JSON.parse(snapshot), sent: false });
   if (io.swapOnly && kind === "approval")
     throw new Error(
       "Approval is still required. Start a new trade; nothing retried.",
     );
-  if (preview || io.reportPreparation)
-    io.report({ preparation: JSON.parse(snapshot), sent: false });
   if (preview) {
     return 0;
   }
