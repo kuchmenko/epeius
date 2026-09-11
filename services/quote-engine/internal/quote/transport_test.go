@@ -50,14 +50,14 @@ func TestBunConnectTransport(t *testing.T) {
 		},
 	}
 	mux := http.NewServeMux()
-	path, actual := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4})
+	path, actual := quotev1connect.NewQuoteServiceHandler(configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4}))
 	mux.Handle(path, actual)
 	reader.call = func(ctx context.Context, _ common.Address, _ []byte, _ common.Hash) ([]byte, error) {
 		<-ctx.Done()
 		unaryStopped <- struct{}{}
 		return nil, ctx.Err()
 	}
-	_, slow := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4})
+	_, slow := quotev1connect.NewQuoteServiceHandler(configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4}))
 	mux.Handle("/slow/", http.StripPrefix("/slow", slow))
 	reader.call = func(ctx context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
 		if calldataFee(data) != 100 {
@@ -69,7 +69,7 @@ func TestBunConnectTransport(t *testing.T) {
 		}
 		return quoteResponse(987654321), nil
 	}
-	_, partial := quotev1connect.NewQuoteServiceHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4})
+	_, partial := quotev1connect.NewQuoteServiceHandler(configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4}))
 	mux.Handle("/partial/", http.StripPrefix("/partial", partial))
 	_, fixture := quotev1connect.NewQuoteServiceHandler(streamFixture{stopped: stopped})
 	mux.Handle("/fixture/", http.StripPrefix("/fixture", fixture))

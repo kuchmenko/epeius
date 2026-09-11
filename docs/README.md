@@ -38,6 +38,6 @@ Most commands write normal output to stdout and diagnostics to stderr. Persisten
 | Live E2E runner | `.testnet/e2e-<timestamp>.jsonl` by default | Append-only scenario, quote, preparation, hash, and verification events |
 | Harness preparation | `.testnet/PancakeBootstrap.json`, `.testnet/pancake/`, `contracts/out/`, `contracts/cache/` | Verified dependency checkout and build artifacts |
 | Foundry broadcast tooling | `contracts/broadcast/` when produced by Foundry | Local transaction artifacts; harness recovery authority remains its manifest |
-| Root build | `dist/epeius-engine` and generated bindings | Local executable and checked-in generated Go/TypeScript protocol code |
+| Root build | `dist/epeius-engine` and generated bindings | Ignored local executable and generated Go/TypeScript protocol/ABI code; canonical inputs and Go module manifests stay tracked |
 
 Do not commit `.env`, keystores, password files, `.testnet/`, `node_modules/`, or Foundry outputs. Never treat a pending or unknown send as permission to resend automatically.

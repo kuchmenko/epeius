@@ -7,13 +7,10 @@ import {
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { executePrepared } from "./execution";
 import { parseAllocations } from "./execution-command";
-import {
-  expectedExecutorData,
-  type Receipt,
-  type TrustedExecution,
-  validatePreparation,
-  verifyReceipt,
-} from "./execution-policy";
+import { validatePreparation } from "./execution-policy";
+import { configureExecution } from "./protocols";
+import { expectedExecutorData } from "./protocols/fixed-executor";
+import { type Receipt, verifyReceipt } from "./receipt";
 
 const addr = (digit: string) => `0x${digit.repeat(40)}`;
 const input = addr("1"),
@@ -25,7 +22,7 @@ const input = addr("1"),
   executor = addr("9");
 const blockHash = `0x${"b".repeat(64)}`,
   hash = `0x${"a".repeat(64)}`;
-const trusted: TrustedExecution = {
+const trusted = configureExecution({
   tokens: [input, middle, output],
   executor: {
     address: executor,
@@ -36,7 +33,7 @@ const trusted: TrustedExecution = {
     uni: { kind: "uniswap-v3", router: uni, fees: [500, 3000] },
     pan: { kind: "pancake-v3", router: pan, fees: [0, 2500, 10000] },
   },
-};
+});
 type Vector = {
   tokenIn: string;
   tokenOut: string;
@@ -120,9 +117,9 @@ test("executor encoder matches independent single/two-hop/split golden vectors",
 test("executor local validation sums outputs before rounding and rejects altered plans", () => {
   const p = splitPreparation();
   if (!p.transaction) throw new Error("bad fixture");
-  expect(validatePreparation(p, wallet, "11155111", 75, trusted)).toBe(
-    p.transaction,
-  );
+  expect(
+    validatePreparation(p, wallet, "11155111", 75, trusted).transaction,
+  ).toBe(p.transaction);
   const changes: Array<(p: PrepareExecutionResponse) => void> = [
     (p) => {
       p.amountOutMinimumAtomic = "249";
@@ -169,6 +166,22 @@ test("executor local validation sums outputs before rounding and rejects altered
   }
 });
 
+test("executor membership uses exact deployment ID, not just protocol kind", () => {
+  const p = splitPreparation();
+  if (!p.allocations[0].route) throw new Error("Missing route.");
+  p.allocations[0].route.deploymentId = "another-uniswap";
+  const config = {
+    ...trusted,
+    deployments: {
+      ...trusted.deployments,
+      "another-uniswap": trusted.deployments.uni,
+    },
+  };
+  expect(() => validatePreparation(p, wallet, "11155111", 75, config)).toThrow(
+    "configured distinct venues",
+  );
+});
+
 test("executor approvals authorize only configured executor and exact total", () => {
   const p = splitPreparation();
   p.status = PreparationStatus.APPROVAL_REQUIRED;
@@ -180,9 +193,9 @@ test("executor approvals authorize only configured executor and exact total", ()
   p.approvalTransaction.to = input;
   p.approvalTransaction.data = `0x095ea7b3${executor.slice(2).padStart(64, "0")}${101n.toString(16).padStart(64, "0")}`;
   p.transaction = undefined;
-  expect(validatePreparation(p, wallet, "11155111", 75, trusted)).toBe(
-    p.approvalTransaction,
-  );
+  expect(
+    validatePreparation(p, wallet, "11155111", 75, trusted).transaction,
+  ).toBe(p.approvalTransaction);
   p.approvalSpender = uni;
   expect(() =>
     validatePreparation(p, wallet, "11155111", 75, trusted),
@@ -219,8 +232,15 @@ function receipt(): Receipt {
 
 test("executor receipts reject dust changes at wallet, executor and each venue", () => {
   const p = splitPreparation();
-  expect(verifyReceipt(receipt(), hash, p, trusted).outcome).toBe("passed");
-  expect(verifyReceipt(receipt(), hash, p).outcome).toBe("unavailable");
+  const plan = validatePreparation(p, wallet, "11155111", 75, trusted);
+  if (plan.action !== "swap") throw new Error("Expected swap plan.");
+  expect(verifyReceipt(receipt(), hash, plan.receipt).outcome).toBe("passed");
+  expect(() =>
+    validatePreparation(p, wallet, "11155111", 75, {
+      ...trusted,
+      executor: undefined,
+    }),
+  ).toThrow("not allowed");
   for (const [token, owner] of [
     [input, executor],
     [output, executor],
@@ -242,7 +262,7 @@ test("executor receipts reject dust changes at wallet, executor and each venue",
           1n,
         ),
       );
-      expect(verifyReceipt(r, hash, p, trusted).outcome).toBe("failed");
+      expect(verifyReceipt(r, hash, plan.receipt).outcome).toBe("failed");
     }
   }
 });

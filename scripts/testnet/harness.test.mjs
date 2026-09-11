@@ -4,9 +4,19 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { erc20Abi } from "viem";
+import {
+  pancakeV3PoolAbi,
+  uniswapPeripheryStateAbi,
+  uniswapV3FactoryAbi,
+  uniswapV3PoolAbi,
+} from "../../generated/abi/index.ts";
 import {
   address,
   canonicalReceipt,
+  createAddress,
+  createRpc,
+  decodeResult,
   fixture,
   loadProfile,
   options,
@@ -226,7 +236,7 @@ test("custom profile selects another network and tokens but cannot reuse a misma
   process.env.HARNESS_OTHER_RPC = "https://example.invalid";
   globalThis.fetch = async (_url, request) => {
     methods.push(JSON.parse(request.body).method);
-    return { ok: true, json: async () => ({ result: "0xaa36a7" }) };
+    return Response.json({ result: "0xaa36a7" });
   };
   try {
     const config = resolve(dir, "profile.toml");
@@ -340,6 +350,9 @@ test("seed preflights every pool before estimating an earlier createPool", async
   const previousURL = process.env.HARNESS_ISOLATED_RPC;
   const methods = [];
   let spacingCalls = 0;
+  let valid = false;
+  const estimates = [];
+  const pool = "0x0000000000000000000000000000000000000024";
   process.env.HARNESS_ISOLATED_RPC = "https://isolated.invalid/rpc";
   const word = (value) => `0x${value.replace(/^0x/, "").padStart(64, "0")}`;
   const numberWord = (value) => word(BigInt(value).toString(16));
@@ -360,6 +373,11 @@ test("seed preflights every pool before estimating an earlier createPool", async
     if (method === "eth_chainId") result = "0x14a34";
     else if (method === "eth_getCode") result = "0x6000";
     else if (method === "eth_getTransactionCount") result = "0x0";
+    else if (method === "eth_estimateGas") {
+      assert.ok(valid, "preflight must finish before any estimate");
+      estimates.push(params[0]);
+      result = "0x10000";
+    } else if (method === "eth_gasPrice") result = "0x1";
     else if (method === "eth_call") {
       const { to, data } = params[0];
       const selector = data.slice(0, 10);
@@ -379,11 +397,13 @@ test("seed preflights every pool before estimating an earlier createPool", async
       else if (selector === "0xd5f39488") result = word(pancake.deployer);
       else if (selector === "0x22afcccb") {
         spacingCalls++;
-        result = numberWord(spacingCalls === 1 ? 60 : 0);
-      } else if (selector === "0x1698ee82") result = word("0");
+        result = numberWord(valid || spacingCalls === 1 ? 60 : 0);
+      } else if (selector === "0x1698ee82") result = word(valid ? pool : "0");
+      else if (selector === "0x3850c7bd")
+        result = `0x${"0".repeat(64 * 6)}${"0".repeat(63)}1`;
       else throw new Error(`Unexpected eth_call selector ${selector}`);
     } else throw new Error(`Unexpected method ${method}`);
-    return { ok: true, json: async () => ({ result }) };
+    return Response.json({ result });
   };
   try {
     const config = resolve(dir, "profile.toml");
@@ -413,23 +433,18 @@ test("seed preflights every pool before estimating an earlier createPool", async
     writeFileSync(config, source);
     writeFileSync(manifestPath, JSON.stringify(manifest));
     const before = await Bun.file(manifestPath).text();
-
-    await assert.rejects(
-      run(
-        options([
-          "seed",
-          "--sender",
-          sender,
-          "--recipient",
-          sender,
-          "--config",
-          config,
-          "--manifest",
-          manifestPath,
-        ]),
-      ),
-      /invalid tick spacing/,
-    );
+    const args = options([
+      "seed",
+      "--sender",
+      sender,
+      "--recipient",
+      sender,
+      "--config",
+      config,
+      "--manifest",
+      manifestPath,
+    ]);
+    await assert.rejects(run(args), /invalid tick spacing/);
 
     assert.equal(spacingCalls, 2);
     assert.equal(methods.includes("eth_estimateGas"), false);
@@ -438,6 +453,65 @@ test("seed preflights every pool before estimating an earlier createPool", async
       false,
     );
     assert.equal(await Bun.file(manifestPath).text(), before);
+    valid = true;
+    await run(args);
+    // The profile's 500 fee is wide; 3000 is narrow. For 18/6 decimals,
+    // the aligned center is -276360; widths are 12000 and 120 ticks.
+    const vectors = [
+      [
+        tokens.A.address,
+        "mint(address,uint256)",
+        sender,
+        "1000000000000000000000000",
+      ],
+      [
+        tokens.A.address,
+        "approve(address,uint256)",
+        manifest.seeder,
+        "1000000000000000000000000",
+      ],
+      [tokens.B.address, "mint(address,uint256)", sender, "1000000000000"],
+      [
+        tokens.B.address,
+        "approve(address,uint256)",
+        manifest.seeder,
+        "1000000000000",
+      ],
+      [pool, "initialize(uint160)", String((1n << 96n) / 1000000n)],
+      [
+        manifest.seeder,
+        "seed(address,address,int24,int24,uint128)",
+        uni.factory,
+        pool,
+        "-288360",
+        "-264360",
+        "10000000000000000",
+      ],
+      [pool, "initialize(uint160)", String((1n << 96n) / 1000000n)],
+      [
+        manifest.seeder,
+        "seed(address,address,int24,int24,uint128)",
+        uni.factory,
+        pool,
+        "-276480",
+        "-276240",
+        "10000000000000000",
+      ],
+    ];
+    assert.equal(estimates.length, vectors.length);
+    for (const [index, [to, signature, ...values]] of vectors.entries()) {
+      const oracle = spawnSync("cast", ["calldata", signature, ...values], {
+        encoding: "utf8",
+      });
+      assert.equal(oracle.status, 0, oracle.stderr);
+      assert.deepEqual(estimates[index], {
+        from: sender,
+        to,
+        data: oracle.stdout.trim(),
+      });
+    }
+    assert.equal(await Bun.file(manifestPath).text(), before);
+    assert.ok(methods.every((method) => !/send|sign/i.test(method)));
   } finally {
     globalThis.fetch = previousFetch;
     if (previousURL === undefined) delete process.env.HARNESS_ISOLATED_RPC;
@@ -467,7 +541,7 @@ test("check without a manifest rejects instead of reporting zero pools checked",
           : "0x4200000000000000000000000000000000000006";
       result = `0x${target.slice(2).padStart(64, "0")}`;
     } else throw new Error(`Unexpected method ${method}`);
-    return { ok: true, json: async () => ({ result }) };
+    return Response.json({ result });
   };
   console.log = (...args) => logs.push(args.join(" "));
   try {
@@ -503,7 +577,7 @@ test("configured HTTPS and loopback HTTP remain accepted transport controls", as
   const seen = [];
   globalThis.fetch = async (url) => {
     seen.push(String(url));
-    return { ok: true, json: async () => ({ result: "0x1" }) };
+    return Response.json({ result: "0x1" });
   };
   try {
     for (const url of [
@@ -531,7 +605,7 @@ test("wrong chain stops before any contract, wallet or write request", async () 
   process.env.BASE_SEPOLIA_RPC_URL = "https://example.invalid";
   globalThis.fetch = async (_url, request) => {
     methods.push(JSON.parse(request.body).method);
-    return { ok: true, json: async () => ({ result: "0x2105" }) };
+    return Response.json({ result: "0x2105" });
   };
   try {
     await assert.rejects(
@@ -546,25 +620,158 @@ test("wrong chain stops before any contract, wallet or write request", async () 
   }
 });
 
-const prepared =
-  existsSync(
-    new URL("../../.testnet/PancakeBootstrap.json", import.meta.url),
-  ) &&
-  existsSync(
-    new URL(
-      "../../contracts/out/TestToken.sol/TestToken.json",
-      import.meta.url,
+async function deploymentProfile(dir) {
+  // Synthetic bytecode exercises transaction planning, not EVM deployment.
+  const artifact = resolve(dir, "artifact.json");
+  writeFileSync(artifact, JSON.stringify({ bytecode: "0x6000" }));
+  const config = resolve(dir, "profile.toml");
+  writeFileSync(
+    config,
+    (await Bun.file(defaultProfilePath).text()).replace(
+      /^(token|seeder|pancake_bootstrap|pancake_router|pancake_quoter) = .+$/gm,
+      `$1 = ${JSON.stringify(artifact)}`,
     ),
-  ) &&
-  spawnSync("cast", ["--version"], { stdio: "ignore" }).status === 0;
-(prepared ? test : test.skip)(
-  "full dry deploy estimates every transaction without signing, broadcasting or writing manifest",
-  async () => {
-    const dir = mkdtempSync(resolve(tmpdir(), "epeius-harness-"));
-    const previousFetch = globalThis.fetch;
-    const previousURL = process.env.BASE_SEPOLIA_RPC_URL;
-    process.env.BASE_SEPOLIA_RPC_URL = "https://example.invalid";
-    const methods = [];
+  );
+  return config;
+}
+
+test("full dry deploy estimates every transaction without signing, broadcasting or writing manifest", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-harness-"));
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.BASE_SEPOLIA_RPC_URL;
+  process.env.BASE_SEPOLIA_RPC_URL = "https://example.invalid";
+  const methods = [];
+  const deployments = [];
+  globalThis.fetch = async (_url, request) => {
+    const { method, params } = JSON.parse(request.body);
+    methods.push(method);
+    let result;
+    if (method === "eth_chainId") result = "0x14a34";
+    else if (method === "eth_getCode") result = "0x6000";
+    else if (method === "eth_call") {
+      const target =
+        params[0].data === "0xc45a0155"
+          ? uni.factory
+          : "0x4200000000000000000000000000000000000006";
+      result = `0x${target.slice(2).padStart(64, "0")}`;
+    } else if (method === "eth_getTransactionCount") result = "0x0";
+    else if (method === "eth_estimateGas") {
+      deployments.push(params[0].data);
+      result = "0x100000";
+    } else if (method === "eth_gasPrice") result = "0x1000";
+    else throw new Error(`Unexpected method ${method}`);
+    return Response.json({ result });
+  };
+  try {
+    const path = resolve(dir, "manifest.json");
+    const config = await deploymentProfile(dir);
+    const args = options([
+      "deploy",
+      "--sender",
+      sender,
+      "--manifest",
+      path,
+      "--config",
+      config,
+    ]);
+    const planned = await run(args);
+    assert.equal(methods.filter((m) => m === "eth_estimateGas").length, 7);
+    for (const [index, symbol, decimals] of [
+      [0, "A", 18],
+      [1, "B", 6],
+      [2, "C", 8],
+    ]) {
+      const oracle = spawnSync(
+        "cast",
+        ["abi-encode", "constructor(string,uint8)", symbol, String(decimals)],
+        { encoding: "utf8" },
+      );
+      assert.equal(oracle.status, 0, oracle.stderr);
+      assert.equal(
+        deployments[index],
+        `0x6000${oracle.stdout.trim().slice(2)}`,
+      );
+    }
+    assert.deepEqual(deployments.slice(3, 5), ["0x6000", "0x6000"]);
+    const oracle = spawnSync(
+      "cast",
+      [
+        "abi-encode",
+        "constructor(address,address,address)",
+        planned.pancake.deployer,
+        planned.pancake.factory,
+        "0x4200000000000000000000000000000000000006",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(oracle.status, 0, oracle.stderr);
+    assert.deepEqual(
+      deployments.slice(5),
+      Array(2).fill(`0x6000${oracle.stdout.trim().slice(2)}`),
+    );
+    assert.ok(methods.every((m) => !m.includes("send") && !m.includes("sign")));
+    assert.equal(existsSync(path), false);
+    writeFileSync(path, "{}");
+    await assert.rejects(run(args), /Malformed deployment manifest/);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        chainId: 84532,
+        transactions: {},
+        tokens: {},
+        pancake: {},
+        pools: [],
+        sender: "0x0000000000000000000000000000000000000002",
+        uni,
+      }),
+    );
+    await assert.rejects(run(args), /signer mismatch/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.BASE_SEPOLIA_RPC_URL;
+    else process.env.BASE_SEPOLIA_RPC_URL = previousURL;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("signed bytes and hash are journaled before submission and reused after restart", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-journal-"));
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.BASE_SEPOLIA_RPC_URL;
+  const previousPath = process.env.PATH;
+  const journal = resolve(dir, "manifest.json");
+  const signedLog = resolve(dir, "signed.jsonl");
+  // Synthetic signer output, never a real key or transaction. Hash independently
+  // obtained with `cast keccak 0x010203`.
+  const raw = "0x010203";
+  const hash =
+    "0xf1885eda54b7a053318cd41e2093220dab15d65381b1157a3633a83bfd5c9239";
+  const blockHash = `0x${"a".repeat(64)}`;
+  let mode = "first";
+  const submissions = [];
+  const methods = [];
+  try {
+    const config = await deploymentProfile(dir);
+    const keystore = resolve(dir, "keystore");
+    const password = resolve(dir, "password");
+    writeFileSync(keystore, "{}");
+    writeFileSync(password, "test-only", { mode: 0o600 });
+    writeFileSync(
+      resolve(dir, "cast"),
+      `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args[0] === "wallet" && args[1] === "address") console.log(${JSON.stringify(sender)});
+else if (args[0] === "mktx") {
+  appendFileSync(${JSON.stringify(signedLog)}, JSON.stringify(args) + "\\n");
+  console.log(${JSON.stringify(raw)});
+} else throw new Error("Only encrypted signer operations may use Cast");
+`,
+      { mode: 0o700 },
+    );
+    process.env.PATH = `${dir}:${previousPath}`;
+    process.env.BASE_SEPOLIA_RPC_URL = "https://journal.invalid";
     globalThis.fetch = async (_url, request) => {
       const { method, params } = JSON.parse(request.body);
       methods.push(method);
@@ -577,47 +784,322 @@ const prepared =
             ? uni.factory
             : "0x4200000000000000000000000000000000000006";
         result = `0x${target.slice(2).padStart(64, "0")}`;
-      } else if (method === "eth_getTransactionCount") result = "0x0";
-      else if (method === "eth_estimateGas") result = "0x100000";
-      else if (method === "eth_gasPrice") result = "0x1000";
-      else throw new Error(`Unexpected method ${method}`);
-      return { ok: true, json: async () => ({ result }) };
+      } else if (method === "eth_estimateGas") {
+        if (mode === "observed")
+          return Response.json({
+            error: { code: -32000, message: "stop after resumed receipt" },
+          });
+        result = "0x65";
+      } else if (method === "eth_gasPrice") result = "0x7";
+      else if (method === "eth_getBalance") result = "0x69e";
+      else if (method === "eth_getTransactionCount") {
+        result =
+          params[1] === "pending"
+            ? mode === "first"
+              ? "0x9"
+              : "0xd"
+            : mode === "nonce used"
+              ? "0xa"
+              : "0x9";
+      } else if (method === "eth_getTransactionReceipt") {
+        assert.deepEqual(params, [hash]);
+        result =
+          mode === "observed"
+            ? {
+                transactionHash: hash,
+                blockHash,
+                blockNumber: "0x42",
+                status: "0x1",
+                contractAddress: sender,
+              }
+            : null;
+      } else if (method === "eth_getTransactionByHash") result = null;
+      else if (method === "eth_getBlockByNumber") result = { hash: blockHash };
+      else if (method === "eth_sendRawTransaction") {
+        const saved = await Bun.file(journal).json();
+        assert.deepEqual(saved.transactions["token-A"], {
+          to: null,
+          data: saved.transactions["token-A"].data,
+          nonce: "0x9",
+          raw,
+          hash,
+        });
+        assert.deepEqual(params, [raw]);
+        submissions.push(params[0]);
+        throw new Error("submission interrupted after persistence");
+      } else throw new Error(`Unexpected RPC method ${method}`);
+      return Response.json({ result });
     };
-    try {
-      const path = resolve(dir, "manifest.json");
-      await run(options(["deploy", "--sender", sender, "--manifest", path]));
-      assert.equal(methods.filter((m) => m === "eth_estimateGas").length, 7);
-      assert.ok(
-        methods.every((m) => !m.includes("send") && !m.includes("sign")),
-      );
-      assert.equal(existsSync(path), false);
-      writeFileSync(path, "{}");
-      await assert.rejects(
-        run(options(["deploy", "--sender", sender, "--manifest", path])),
-        /Malformed deployment manifest/,
-      );
-      writeFileSync(
-        path,
-        JSON.stringify({
-          version: 1,
-          chainId: 84532,
-          transactions: {},
-          tokens: {},
-          pancake: {},
-          pools: [],
-          sender: "0x0000000000000000000000000000000000000002",
-          uni,
+    const args = options([
+      "deploy",
+      "--sender",
+      sender,
+      "--manifest",
+      journal,
+      "--config",
+      config,
+      "--broadcast",
+      "--keystore",
+      keystore,
+      "--password-file",
+      password,
+    ]);
+    await assert.rejects(run(args), /request failed/);
+    const first = await Bun.file(journal).text();
+    const signed = JSON.parse((await Bun.file(signedLog).text()).trim());
+    assert.deepEqual(signed.slice(0, 11), [
+      "mktx",
+      "--legacy",
+      "--chain",
+      "84532",
+      "--nonce",
+      "9",
+      "--gas-limit",
+      "121",
+      "--gas-price",
+      "14",
+      "--keystore",
+    ]);
+    mode = "resume";
+    await assert.rejects(run(args), /request failed/);
+    assert.equal(await Bun.file(journal).text(), first);
+    assert.deepEqual(submissions, [raw, raw]);
+    mode = "nonce used";
+    await assert.rejects(run(args), /Nonce used by another transaction/);
+    assert.equal(submissions.length, 2);
+    mode = "observed";
+    await assert.rejects(run(args), /request/);
+    assert.equal(submissions.length, 2, "observed receipt must not resubmit");
+    assert.equal(
+      (await Bun.file(signedLog).text()).trim().split("\n").length,
+      1,
+    );
+    assert.equal(
+      (await Bun.file(journal).json()).transactions["token-A"].receipt
+        .blockHash,
+      blockHash,
+    );
+    assert.ok(methods.includes("eth_getBlockByNumber"));
+  } finally {
+    globalThis.fetch = previousFetch;
+    process.env.PATH = previousPath;
+    if (previousURL === undefined) delete process.env.BASE_SEPOLIA_RPC_URL;
+    else process.env.BASE_SEPOLIA_RPC_URL = previousURL;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("CREATE prediction matches independent Cast at RLP nonce boundaries", () => {
+  for (const nonce of [
+    0n,
+    1n,
+    127n,
+    128n,
+    255n,
+    256n,
+    65535n,
+    65536n,
+    (1n << 64n) - 1n,
+  ]) {
+    const oracle = spawnSync(
+      "cast",
+      ["compute-address", sender, "--nonce", String(nonce)],
+      { encoding: "utf8" },
+    );
+    assert.equal(oracle.status, 0, oracle.stderr);
+    assert.equal(
+      createAddress(sender, nonce),
+      oracle.stdout.match(/0x[0-9a-fA-F]{40}/)?.[0],
+    );
+  }
+});
+
+test("raw RPC preserves receipt values and never retries failures", async () => {
+  const previousFetch = globalThis.fetch;
+  let attempts = 0;
+  const rpc = createRpc("https://secret.invalid/private-token");
+  try {
+    const receipt = {
+      status: "0x01",
+      blockNumber: "0x00",
+      extra: "unformatted",
+    };
+    globalThis.fetch = async (_url, request) => {
+      const payload = JSON.parse(request.body);
+      assert.equal(payload.method, "eth_getTransactionReceipt");
+      assert.deepEqual(payload.params, ["0xabc"]);
+      return Response.json({ result: receipt });
+    };
+    assert.deepEqual(
+      await rpc("eth_getTransactionReceipt", ["0xabc"]),
+      receipt,
+    );
+    for (const fail of [
+      () => {
+        throw new Error("private-token network failure");
+      },
+      () => new Response("private-token", { status: 503 }),
+      () =>
+        Response.json({
+          error: { code: -32005, message: "private-token rate limit" },
         }),
-      );
+      () => Response.json({}),
+    ]) {
+      attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        return fail();
+      };
       await assert.rejects(
-        run(options(["deploy", "--sender", sender, "--manifest", path])),
-        /signer mismatch/,
+        rpc("eth_sendRawTransaction", ["0x010203"]),
+        (error) => !error.message.includes("private-token"),
       );
-    } finally {
-      globalThis.fetch = previousFetch;
-      if (previousURL === undefined) delete process.env.BASE_SEPOLIA_RPC_URL;
-      else process.env.BASE_SEPOLIA_RPC_URL = previousURL;
-      rmSync(dir, { recursive: true });
+      assert.equal(attempts, 1);
     }
-  },
-);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("each RPC has a fresh 60-second abort covering body consumption", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousTimeout = AbortSignal.timeout;
+  const controllers = [];
+  let headersReceived = false;
+  try {
+    AbortSignal.timeout = (milliseconds) => {
+      assert.equal(milliseconds, 60000);
+      const controller = new AbortController();
+      controllers.push(controller);
+      return controller.signal;
+    };
+    const rpc = createRpc("https://timeout.invalid");
+    globalThis.fetch = async (_url, request) => {
+      headersReceived = true;
+      assert.equal(request.signal, controllers[0].signal);
+      return new Response(
+        new ReadableStream({
+          start(stream) {
+            stream.enqueue(new TextEncoder().encode('{"result":'));
+            request.signal.addEventListener(
+              "abort",
+              () => stream.error(request.signal.reason),
+              { once: true },
+            );
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    };
+    const pending = rpc("eth_chainId");
+    await new Promise((done) => setTimeout(done, 0));
+    assert.equal(headersReceived, true);
+    controllers[0].abort(new Error("private body timeout"));
+    await assert.rejects(pending, /network request failed \(URL withheld\)/);
+    globalThis.fetch = async (_url, request) => {
+      assert.equal(request.signal, controllers[1].signal);
+      assert.equal(request.signal.aborted, false);
+      return Response.json({ result: "0x14a34" });
+    };
+    assert.equal(await rpc("eth_chainId"), "0x14a34");
+    assert.equal(controllers.length, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    AbortSignal.timeout = previousTimeout;
+  }
+});
+
+test("static returndata requires exact canonical words including signed int24", () => {
+  // Independent ABI words, not serialized with the production encoder.
+  const word = (n) =>
+    (n < 0n ? (1n << 256n) + n : n).toString(16).padStart(64, "0");
+  for (const value of [-8388608n, -60n, -1n, 0n, 60n, 8388607n])
+    assert.equal(
+      decodeResult(
+        uniswapV3FactoryAbi,
+        "feeAmountTickSpacing",
+        `0x${word(value)}`,
+      ),
+      Number(value),
+    );
+  assert.equal(decodeResult(erc20Abi, "decimals", `0x${word(255n)}`), 255);
+  assert.equal(
+    decodeResult(uniswapPeripheryStateAbi, "factory", `0x${word(1n)}`),
+    sender,
+  );
+  const slot = [(1n << 96n) + 7n, -60n, 1n, 2n, 3n, 255n, 1n]
+    .map(word)
+    .join("");
+  assert.deepEqual(decodeResult(uniswapV3PoolAbi, "slot0", `0x${slot}`), [
+    (1n << 96n) + 7n,
+    -60,
+    1,
+    2,
+    3,
+    255,
+    true,
+  ]);
+  const pancakeSlot = [1n << 96n, -1n, 0n, 0n, 0n, 65536n, 0n]
+    .map(word)
+    .join("");
+  assert.deepEqual(
+    decodeResult(pancakeV3PoolAbi, "slot0", `0x${pancakeSlot}`),
+    [1n << 96n, -1, 0, 0, 0, 65536, false],
+  );
+  for (const [abi, name, data] of [
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", "0x"],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${"00".repeat(31)}`],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${word(60n)}00`],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${word(8388608n)}`],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${word(-8388609n)}`],
+    [uniswapV3FactoryAbi, "feeAmountTickSpacing", `0x${word(0xffffffn)}`],
+    [uniswapPeripheryStateAbi, "factory", `0x${word((1n << 160n) + 1n)}`],
+    [erc20Abi, "decimals", `0x${word(256n)}`],
+    [uniswapV3PoolAbi, "slot0", `0x${slot.slice(0, -64)}`],
+    [uniswapV3PoolAbi, "slot0", `0x${slot}${word(0n)}`],
+    [uniswapV3PoolAbi, "slot0", `0x${slot.slice(0, -64)}${word(2n)}`],
+    [uniswapV3PoolAbi, "slot0", `0x${pancakeSlot}`],
+    [uniswapPeripheryStateAbi, "factory", "private malformed body"],
+  ]) {
+    assert.throws(() => decodeResult(abi, name, data), {
+      message: `Invalid ${name} returndata`,
+    });
+  }
+});
+
+test("malformed linkage returndata stops before wallet, nonce or transaction planning", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.BASE_SEPOLIA_RPC_URL;
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-linkage-"));
+  const methods = [];
+  process.env.BASE_SEPOLIA_RPC_URL = "https://linkage.invalid";
+  globalThis.fetch = async (_url, request) => {
+    const { method } = JSON.parse(request.body);
+    methods.push(method);
+    if (method === "eth_chainId") return Response.json({ result: "0x14a34" });
+    if (method === "eth_getCode") return Response.json({ result: "0x6000" });
+    assert.equal(method, "eth_call");
+    // Correct low 20 bytes, but nonzero address padding was previously sliced away.
+    return Response.json({
+      result: `0x${"1".repeat(24)}${uni.factory.slice(2)}`,
+    });
+  };
+  try {
+    const path = resolve(dir, "manifest.json");
+    await assert.rejects(
+      run(options(["deploy", "--sender", sender, "--manifest", path])),
+      /Invalid factory returndata/,
+    );
+    assert.equal(existsSync(path), false);
+    assert.ok(
+      methods.every((method) =>
+        ["eth_chainId", "eth_getCode", "eth_call"].includes(method),
+      ),
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.BASE_SEPOLIA_RPC_URL;
+    else process.env.BASE_SEPOLIA_RPC_URL = previousURL;
+    rmSync(dir, { recursive: true });
+  }
+});

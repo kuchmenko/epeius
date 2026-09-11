@@ -8,16 +8,18 @@
   "scripts": {
     "setup": "bun scripts/tasks.ts setup",
     "generate": "bun scripts/tasks.ts generate",
-    "engine": "bun scripts/engine.ts",
-    "terminal": "bun apps/terminal/src/main.ts",
+    "engine": "bun run generate && bun scripts/engine.ts",
+    "terminal": "bun run generate && bun apps/terminal/src/main.ts",
     "check": "bun scripts/tasks.ts check",
     "check:generated": "bun scripts/tasks.ts check:generated",
-    "smoke": "bun scripts/smoke.ts",
-    "e2e": "bun scripts/e2e.ts",
+    "smoke": "bun run generate && bun scripts/smoke.ts",
+    "e2e": "bun run generate && bun scripts/e2e.ts",
+    "harness": "bun scripts/abi.ts && bun scripts/testnet/harness.mjs",
     "format": "biome check --write ."
   },
   "dependencies": {
-    "@bufbuild/protobuf": "2.14.1"
+    "@bufbuild/protobuf": "2.14.1",
+    "viem": "2.38.5"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",

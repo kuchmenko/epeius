@@ -6,16 +6,19 @@ For execution guarantees and the partial-input limitation, read [Execution contr
 
 ## Requirements and setup
 
-Run from repository root. Requires Bun 1.3.9, Git, Foundry 1.5.0 (`forge` and `cast`), and the root Go toolchain when running engine or terminal.
+Run from repository root. Requires Bun 1.3.9, Go 1.26.4 (including `gofmt` for ABI generation), Git, and Foundry 1.5.0 (`forge` and `cast`).
 
 Harness dependencies use their own `scripts/testnet/bun.lock` and local `scripts/testnet/node_modules`; they are not part of the root workspace install.
 
 ```bash
 bun install --cwd scripts/testnet --frozen-lockfile --ignore-scripts
+bun scripts/abi.ts
 bun scripts/testnet/prepare.mjs
 bun test scripts/testnet
 forge test --root contracts
 ```
+
+Generated ABIs are ignored build inputs and must exist before harness imports. `bun run harness <arguments>` generates them before launching; direct source invocations below assume the setup above. Before engine, terminal or E2E source commands, also run the root `bun install --frozen-lockfile`, `bun run setup`, and `bun run generate`.
 
 Preparation clones pinned Pancake source to `.testnet/pancake`, rejects checkout changes, compares compiled pool bytecode with the released package artifact, writes `.testnet/PancakeBootstrap.json`, and builds Foundry contracts under `contracts/out` and `contracts/cache`. These commands do not deploy or spend test ETH. `forge test` is local and includes real Pancake partial-consumption and intermediate-residue cases.
 
@@ -40,6 +43,10 @@ bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs COMMAND ...
 Use separate encrypted harness and terminal wallets. Keep keystores and password files outside Git with file permissions that exclude group and world access. The harness address must match the harness keystore. Include it as a seed recipient because it pays liquidity token amounts. Terminal wallet receives tokens for swaps.
 
 RPC URL values are not printed or passed to subprocess arguments. Only password-file path reaches Foundry. There is no private-key option or implicit environment wallet. Signing is local with `cast mktx`; submission occurs only with `--broadcast` after configured chain ID, signer, contract links, balance, and gas checks pass.
+
+Ethereum transport, ABI encoding/decoding, CREATE addresses, hashing and units use pinned viem. Contract calls use the trusted [canonical ABI inputs](../contracts/abi/README.md), not ABIs supplied by an RPC response. Raw RPC requests disable retries and use a fresh 60-second abort signal covering response headers and body. Cast remains the encrypted wallet adapter; independent Cast encodings in tests are separate evidence.
+
+Contract return data must decode and re-encode to exactly the same bytes. Malformed padding, trailing bytes, invalid booleans and out-of-range values now fail admission rather than being silently truncated. This is an intentional stricter check before planning writes. V3 price, tick-range and liquidity recipes remain protocol-specific harness policy.
 
 ## Deploy and seed
 

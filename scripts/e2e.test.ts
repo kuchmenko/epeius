@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create } from "@bufbuild/protobuf";
 import { executePrepared } from "../apps/terminal/src/execution";
-import {
-  expectedSwapData,
-  type Receipt,
-} from "../apps/terminal/src/execution-policy";
 import { executionExitCode } from "../apps/terminal/src/main";
+import { configureExecution } from "../apps/terminal/src/protocols";
+import { pancakeData } from "../apps/terminal/src/protocols/pancake-v3";
+import { uniswapData } from "../apps/terminal/src/protocols/uniswap-v3";
+import type { Receipt } from "../apps/terminal/src/receipt";
 import { runTrade, type TradeIO } from "../apps/terminal/src/trade";
 import {
   BlockContextSchema,
@@ -198,7 +198,11 @@ test("report requires final verified swap and successful child exit", async () =
 
 // These are fixed transport fixtures, not pool predictions or a second ranking implementation.
 // Signing, RPC, engine and confirmation responses are supplied; trade/execution/receipt/report code is real.
-function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
+function selectedTradeFixture(
+  confirmSwap = true,
+  freshNeedsApproval = false,
+  wrongApprovalHash = false,
+) {
   const sender = `0x${"1".repeat(40)}`;
   const input = `0x${"2".repeat(40)}`;
   const output = `0x${"3".repeat(40)}`;
@@ -328,7 +332,7 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
         p.transaction = create(PrepareExecutionResponseSchema, {
           transaction: {
             ...tx,
-            data: expectedSwapData(p, isCake ? "pancake-v3" : "uniswap-v3"),
+            data: isCake ? pancakeData(p) : uniswapData(p),
           },
         }).transaction;
       }
@@ -336,13 +340,13 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
         signer: sender,
         expectedChainId: "84532",
         slippageBps: 50,
-        trusted: {
+        trusted: configureExecution({
           tokens: [input, output],
           deployments: {
             uni: { kind: "uniswap-v3", router: uniRouter, fees: [500] },
             cake: { kind: "pancake-v3", router: cakeRouter, fees: [500] },
           },
-        },
+        }),
         chainId: async () => "0x14a34",
         prepare: async (id) => {
           calls.push(`prepare:${id ?? "new"}`);
@@ -374,7 +378,8 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
             data: `0x${amount.toString(16).padStart(64, "0")}`,
           });
           return {
-            transactionHash: hash,
+            transactionHash:
+              needsApproval && wrongApprovalHash ? swapHash : hash,
             status: "0x1",
             logs: needsApproval
               ? []
@@ -392,6 +397,21 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
   };
   return { io, events, calls };
 }
+
+test("wrong approval receipt remains unknown and never refreshes quote or resends", async () => {
+  const f = selectedTradeFixture(true, false, true);
+  const result = await runTrade(f.io);
+  expect(result).toEqual({ kind: "unknown", transactionHash: approvalHash });
+  expect(executionExitCode(result)).toBe(1);
+  expect(f.calls.filter((call) => call === "quote")).toHaveLength(1);
+  expect(f.calls.filter((call) => call.startsWith("send:"))).toHaveLength(1);
+  expect(f.calls.filter((call) => call.startsWith("receipt:"))).toEqual([
+    `receipt:${approvalHash}`,
+  ]);
+  expect(JSON.stringify(f.events.at(-1))).toBe(
+    `{"transactionHash":"${approvalHash}","submission":"pending_or_unknown","verification":{"outcome":"unavailable"},"message":"Receipt unavailable. Do not resend automatically."}`,
+  );
+});
 
 test("selected-route integration reselects fresh engine winner, but keeps manual route", async () => {
   for (const manual of [false, true]) {

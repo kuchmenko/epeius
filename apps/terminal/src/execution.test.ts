@@ -16,13 +16,17 @@ import {
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type ExecutionIO, executePrepared } from "./execution";
-import {
-  expectedExecutorData,
-  expectedSwapData,
-  type Receipt,
-  validatePreparation,
-  verifyReceipt,
-} from "./execution-policy";
+import { uint256Decimal, validatePreparation } from "./execution-policy";
+import { configureExecution } from "./protocols";
+import { expectedExecutorData } from "./protocols/fixed-executor";
+import { pancakeData } from "./protocols/pancake-v3";
+import { uniswapData } from "./protocols/uniswap-v3";
+import { type Receipt, verifyReceipt } from "./receipt";
+
+const expectedSwapData = (
+  p: PrepareExecutionResponse,
+  kind: "uniswap-v3" | "pancake-v3",
+) => (kind === "uniswap-v3" ? uniswapData(p) : pancakeData(p));
 
 const addr = (digit: string) => `0x${digit.repeat(40)}`;
 const sender = addr("1"),
@@ -34,13 +38,23 @@ const sender = addr("1"),
 const hash = `0x${"a".repeat(64)}`;
 const expectedChainId = "11155111";
 const expectedRpcChainId = "0xaa36a7";
-const trusted = {
+const settings = {
   tokens: [input, middle, output],
   deployments: {
     uni: { kind: "uniswap-v3" as const, router, fees: [500, 3000] },
     cake: { kind: "pancake-v3" as const, router, fees: [500, 3000] },
   },
 };
+const trusted = configureExecution(settings);
+const obligations = (p = prepared()) => ({
+  tokenIn: p.tokenIn,
+  tokenOut: p.tokenOut,
+  recipient: p.recipient,
+  amountInAtomic: p.amountInAtomic,
+  amountOutMinimumAtomic: p.amountOutMinimumAtomic,
+  intermediate:
+    p.route?.legs.length === 2 ? [{ token: middle, owner: router }] : [],
+});
 function prepared() {
   const result = create(PrepareExecutionResponseSchema, {
     status: PreparationStatus.READY,
@@ -145,6 +159,74 @@ function fixture() {
   };
   return { io, p, sent, requests, reports, confirmations };
 }
+
+test("uint256 decimal admission preserves zero and leading zeros without accepting other numeric syntax", () => {
+  expect(uint256Decimal("0000", "Amount")).toBe(0n);
+  expect(uint256Decimal("0009007199254740993", "Amount")).toBe(
+    9007199254740993n,
+  );
+  expect(uint256Decimal(`000${(1n << 256n) - 1n}`, "Amount")).toBe(
+    (1n << 256n) - 1n,
+  );
+  for (const value of [
+    "",
+    "+1",
+    "-1",
+    "1e3",
+    "0x10",
+    "1.0",
+    " 1",
+    (1n << 256n).toString(),
+  ])
+    expect(() => uint256Decimal(value, "Amount")).toThrow("uint256");
+});
+
+test("approval and swap map canonical success, revert and unavailable receipt explicitly", async () => {
+  for (const approval of [false, true])
+    for (const status of ["0x1", "0x0", "unavailable"]) {
+      const f = fixture();
+      if (approval) {
+        assert(f.p.transaction);
+        f.p.status = PreparationStatus.APPROVAL_REQUIRED;
+        f.p.approvalSpender = router;
+        f.p.approvalTransaction = {
+          ...f.p.transaction,
+          to: input,
+          data: `0x095ea7b3${router.slice(2).padStart(64, "0")}${"65".padStart(64, "0")}`,
+        };
+        f.p.transaction = undefined;
+      }
+      f.io.receipt = async () => {
+        if (status === "unavailable") throw new Error("offline");
+        return { ...receipt(), status };
+      };
+      const result = await executePrepared(f.io);
+      expect(result.kind).toBe(
+        status === "unavailable"
+          ? "unknown"
+          : status === "0x0"
+            ? "failed"
+            : approval
+              ? "approval-confirmed"
+              : "swap-verified",
+      );
+      expect(f.reports.at(-1)).toMatchObject({
+        transactionHash: hash,
+        verification: {
+          outcome:
+            status === "unavailable"
+              ? "unavailable"
+              : status === "0x0"
+                ? "failed"
+                : approval
+                  ? "receipt_success"
+                  : "passed",
+        },
+      });
+      expect(f.requests).toEqual([undefined, "p1"]);
+      expect(f.sent).toHaveLength(1);
+    }
+});
 
 test("submitted JSONL keys and order precede receipt observation", async () => {
   const f = fixture();
@@ -436,7 +518,8 @@ test("accepts uint256 maximum and enforces saved quote slippage with rounding", 
   assert(boundary.transaction);
   boundary.transaction.data = expectedSwapData(boundary, "uniswap-v3");
   expect(
-    validatePreparation(boundary, sender, expectedChainId, 50, trusted),
+    validatePreparation(boundary, sender, expectedChainId, 50, trusted)
+      .transaction,
   ).toBe(boundary.transaction);
 
   for (const [bps, minimum, quotedOutput] of [
@@ -452,9 +535,9 @@ test("accepts uint256 maximum and enforces saved quote slippage with rounding", 
     }
     assert(p.transaction);
     p.transaction.data = expectedSwapData(p, "uniswap-v3");
-    expect(validatePreparation(p, sender, expectedChainId, bps, trusted)).toBe(
-      p.transaction,
-    );
+    expect(
+      validatePreparation(p, sender, expectedChainId, bps, trusted).transaction,
+    ).toBe(p.transaction);
   }
 });
 
@@ -555,9 +638,10 @@ test("locally encodes both router ABIs for one and two hop routes", () => {
       p.route.provider = kind;
       if (hops === 1) p.route.legs = [{ ...p.route.legs[0], tokenOut: output }];
       p.transaction.data = expectedSwapData(p, kind);
-      expect(validatePreparation(p, sender, expectedChainId, 50, trusted)).toBe(
-        p.transaction,
-      );
+      expect(
+        validatePreparation(p, sender, expectedChainId, 50, trusted)
+          .transaction,
+      ).toBe(p.transaction);
     }
   }
 });
@@ -633,14 +717,26 @@ test("fee boundaries match independent Cast calldata and local admission", () =>
         .update(Buffer.from(p.transaction.data.slice(2), "hex"))
         .digest("hex"),
     ).toBe(digest);
-    const config = structuredClone(trusted);
-    config.deployments.uni.fees = [fee, 1000000];
-    expect(validatePreparation(p, sender, expectedChainId, 50, config)).toBe(
-      p.transaction,
-    );
+    const config = structuredClone(settings);
+    config.deployments.uni.fees = [fee];
+    expect(
+      validatePreparation(
+        p,
+        sender,
+        expectedChainId,
+        50,
+        configureExecution(config),
+      ).transaction,
+    ).toBe(p.transaction);
     p.route.legs[0].selector = { case: "feePips", value: 1000000 };
     expect(() =>
-      validatePreparation(p, sender, expectedChainId, 50, config),
+      validatePreparation(
+        p,
+        sender,
+        expectedChainId,
+        50,
+        configureExecution(config),
+      ),
     ).toThrow("not allowed");
   }
 });
@@ -762,11 +858,11 @@ test("receipt identity and removed logs cannot establish token deltas", () => {
     verifyReceipt(
       { ...r, transactionHash: `0x${"b".repeat(64)}` },
       hash,
-      prepared(),
+      obligations(),
     ).outcome,
   ).toBe("unavailable");
   r.logs[0].removed = true;
-  expect(verifyReceipt(r, hash, prepared()).outcome).toBe("unavailable");
+  expect(verifyReceipt(r, hash, obligations()).outcome).toBe("unavailable");
 });
 
 test("receipt success alone cannot pass; partial input, low output, and intermediate residue fail", () => {
@@ -778,11 +874,11 @@ test("receipt success alone cannot pass; partial input, low output, and intermed
     [...receipt().logs, log(middle, router, pool, 1)],
   ]) {
     expect(
-      verifyReceipt({ ...receipt(), logs }, hash, prepared()).outcome,
+      verifyReceipt({ ...receipt(), logs }, hash, obligations()).outcome,
     ).toBe("failed");
   }
   expect(
-    verifyReceipt({ ...receipt(), status: "0x0" }, hash, prepared()).outcome,
+    verifyReceipt({ ...receipt(), status: "0x0" }, hash, obligations()).outcome,
   ).toBe("failed");
 });
 
@@ -791,12 +887,12 @@ test("net transfers exclude prior balances, refund consumption, and unrelated tr
   // Multiple transfers sum, but no starting wallet/router balance enters the result.
   r.logs[3] = log(output, pool, sender, 99);
   r.logs.push(log(output, pool, sender, 100));
-  expect(verifyReceipt(r, hash, prepared())).toMatchObject({
+  expect(verifyReceipt(r, hash, obligations())).toMatchObject({
     outcome: "passed",
     outputReceivedAtomic: "199",
   });
   r.logs.push(log(input, pool, sender, 1));
-  expect(verifyReceipt(r, hash, prepared())).toMatchObject({
+  expect(verifyReceipt(r, hash, obligations())).toMatchObject({
     outcome: "failed",
     inputSpentAtomic: "100",
   });
@@ -804,17 +900,122 @@ test("net transfers exclude prior balances, refund consumption, and unrelated tr
     ...log(output, pool, sender, 1000000),
     transactionHash: `0x${"b".repeat(64)}`,
   });
-  expect(verifyReceipt(r, hash, prepared()).outcome).toBe("unavailable");
+  expect(verifyReceipt(r, hash, obligations()).outcome).toBe("unavailable");
 });
 
 test("direct route needs no intermediate balance; malformed transfer evidence is unavailable", () => {
   const p = prepared();
   assert(p.route);
   p.route.legs = [{ ...p.route.legs[0], tokenOut: output }];
-  expect(verifyReceipt(receipt(), hash, p).outcome).toBe("passed");
+  expect(verifyReceipt(receipt(), hash, obligations(p)).outcome).toBe("passed");
   const r = receipt();
   r.logs[0].data = "0x1";
-  expect(verifyReceipt(r, hash, p).outcome).toBe("unavailable");
+  expect(verifyReceipt(r, hash, obligations(p)).outcome).toBe("unavailable");
+});
+
+test("consumer implementation dispatches once with distinct target/spender and explicit custody", async () => {
+  for (const approval of [false, true]) {
+    const f = fixture();
+    assert(f.p.route && f.p.transaction);
+    const target = addr("7"),
+      spender = addr("8"),
+      custody = addr("9");
+    f.p.route.deploymentId = "test-only";
+    f.p.route.provider = "test-only";
+    f.p.route.legs[0].selector = { case: "tickSpacing", value: 17 };
+    f.p.transaction.to = target;
+    f.p.transaction.data = "0x1234";
+    if (approval) {
+      f.p.status = PreparationStatus.APPROVAL_REQUIRED;
+      f.p.approvalSpender = spender;
+      f.p.approvalTransaction = {
+        ...f.p.transaction,
+        to: input,
+        data: `0x095ea7b3${spender.slice(2).padStart(64, "0")}${"65".padStart(64, "0")}`,
+      };
+      f.p.transaction = undefined;
+    }
+    let builds = 0;
+    f.io.trusted = {
+      tokens: [input, middle, output],
+      deployments: {
+        "test-only": {
+          plan: () => {
+            builds++;
+            return {
+              target,
+              spender,
+              data: "0x1234",
+              quotedOutput: "198",
+              routeDetails: [["custom selector 17", "custom selector 23"]],
+              receipt: {
+                intermediate: [],
+                touched: [{ token: middle, owner: custody }],
+              },
+            };
+          },
+        },
+      },
+    };
+    f.io.confirm = async (action, _p, plan) => {
+      expect(action).toBe(approval ? "approval" : "swap");
+      expect(plan.spender).toBe(spender);
+      expect(plan.transaction.to).toBe(approval ? input : target);
+      expect(plan.routeDetails[0][0]).toBe("custom selector 17");
+      // Review receives a copy: mutation cannot change the signed transaction.
+      plan.transaction.data = "0xdead";
+      return true;
+    };
+    f.io.receipt = async () => ({
+      ...receipt(),
+      logs: [...receipt().logs, log(middle, pool, custody, 1)],
+    });
+    expect((await executePrepared(f.io)).kind).toBe(
+      approval ? "approval-confirmed" : "failed",
+    );
+    expect(builds).toBe(1);
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toMatchObject({
+      data: approval ? f.p.approvalTransaction?.data : "0x1234",
+    });
+  }
+  expect(() =>
+    configureExecution({
+      ...settings,
+      deployments: { fake: { kind: "test-only", router, fees: [500] } },
+    }),
+  ).toThrow("deployment is invalid");
+});
+
+test("Transfer decode rejects extra/missing words, topics and noncanonical address padding", () => {
+  const mutations: Array<(log: Receipt["logs"][number]) => void> = [
+    (log) => {
+      log.data += "00".repeat(32);
+    },
+    (log) => {
+      log.data = log.data.slice(0, -2);
+    },
+    (log) => {
+      log.topics.push(`0x${"0".repeat(64)}`);
+    },
+    (log) => {
+      log.topics.pop();
+    },
+    (log) => {
+      log.topics[1] = `0x01${log.topics[1].slice(4)}`;
+    },
+    (log) => {
+      log.topics[2] = log.topics[2].slice(0, -1);
+    },
+    (log) => {
+      log.address = log.address.slice(0, -1);
+    },
+  ];
+  for (const mutate of mutations) {
+    const r = receipt();
+    mutate(r.logs[0]);
+    expect(verifyReceipt(r, hash, obligations()).outcome).toBe("unavailable");
+  }
 });
 
 test("actual CLI gates cast sends, preserves terms, and keeps RPC secrets out of argv and diagnostics", async () => {

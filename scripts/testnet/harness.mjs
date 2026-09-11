@@ -9,13 +9,83 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  createClient,
+  decodeFunctionResult,
+  encodeDeployData,
+  encodeFunctionData,
+  encodeFunctionResult,
+  erc20Abi,
+  getContractAddress,
+  http,
+  isAddress,
+  isHash,
+  isHex,
+  keccak256,
+  maxUint128,
+  maxUint256,
+  parseUnits,
+  zeroAddress,
+  zeroHash,
+} from "viem";
+import {
+  liquiditySeederAbi,
+  pancakeBootstrapAbi,
+  pancakePoolDeployerAbi,
+  pancakeQuoterV2Abi,
+  pancakeV3FactoryAbi,
+  pancakeV3PoolAbi,
+  pancakeV3RouterAbi,
+  testTokenAbi,
+  uniswapPeripheryStateAbi,
+  uniswapV3FactoryAbi,
+  uniswapV3PoolAbi,
+} from "../../generated/abi/index.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const zero = `0x${"0".repeat(40)}`;
 const defaultConfig = resolve(root, "scripts/testnet/harness.toml");
 const same = (a, b) => a.toLowerCase() === b.toLowerCase();
-const confirmedHash = (hash) =>
-  /^0x[\da-fA-F]{64}$/.test(hash ?? "") && !/^0x0{64}$/.test(hash);
+const confirmedHash = (hash) => isHash(hash ?? "") && !same(hash, zeroHash);
+
+export function createRpc(url) {
+  const client = createClient({
+    transport: http(url, {
+      raw: true,
+      retryCount: 0,
+      timeout: 60000,
+      // Viem's timeout ends at headers. This fresh signal also covers the body.
+      fetchFn: (input, init) =>
+        fetch(input, {
+          ...init,
+          signal: AbortSignal.timeout(60000),
+        }),
+    }),
+  });
+  return async (method, params = []) => {
+    let body;
+    try {
+      body = await client.request({ method, params });
+    } catch {
+      throw new Error(`${method}: network request failed (URL withheld)`);
+    }
+    if (!body || body.error || body.result === undefined)
+      throw new Error(`${method}: RPC rejected request (details withheld)`);
+    return body.result;
+  };
+}
+
+export function decodeResult(abi, functionName, data) {
+  try {
+    if (!isHex(data, { strict: true })) throw new Error();
+    const result = decodeFunctionResult({ abi, functionName, data });
+    // Decoding alone accepts extra bytes and noncanonical address/integer words.
+    if (!same(encodeFunctionResult({ abi, functionName, result }), data))
+      throw new Error();
+    return result;
+  } catch {
+    throw new Error(`Invalid ${functionName} returndata`);
+  }
+}
 
 export async function canonicalReceipt(rpc, hash, previous) {
   const receipt = await rpc("eth_getTransactionReceipt", [hash]);
@@ -45,7 +115,7 @@ export async function canonicalReceipt(rpc, hash, previous) {
 }
 
 export function address(value) {
-  if (!/^0x[\da-fA-F]{40}$/.test(value ?? "") || same(value, zero))
+  if (!isAddress(value ?? "", { strict: false }) || same(value, zeroAddress))
     throw new Error("Expected nonzero 20-byte address");
   return value;
 }
@@ -157,7 +227,7 @@ export async function loadProfile(path) {
         !Number.isInteger(value) ||
         value < 0 ||
         value > 255 ||
-        1000000n * 10n ** BigInt(value) > (1n << 256n) - 1n,
+        parseUnits("1000000", value) > maxUint256,
     ) ||
     Object.entries(fixtures.pairs).some(
       ([id, pair]) =>
@@ -187,23 +257,20 @@ function cast(args) {
     throw new Error(`cast ${args[0]} failed; arguments/output withheld`);
   }
 }
-const encode = (signature, args = []) =>
-  cast(["calldata", signature, ...args.map(String)]);
-const createAddress = (sender, nonce) =>
-  address(
-    cast(["compute-address", sender, "--nonce", String(nonce)]).match(
-      /0x[\da-fA-F]{40}/,
-    )?.[0],
-  );
+export const createAddress = (sender, nonce) =>
+  address(getContractAddress({ from: sender, nonce: BigInt(nonce) }));
 function code(path) {
   const artifact = JSON.parse(readFileSync(resolve(root, path)));
   const bytes =
     artifact.evm?.bytecode?.object ??
     artifact.bytecode?.object ??
     artifact.bytecode;
-  if (typeof bytes !== "string" || !/^(0x)?[\da-fA-F]+$/.test(bytes))
+  const hex =
+    typeof bytes === "string" &&
+    (bytes.startsWith("0x") ? bytes : `0x${bytes}`);
+  if (!hex || !isHex(hex, { strict: true }) || hex.length <= 2)
     throw new Error(`Invalid or unlinked artifact: ${path}`);
-  return bytes.startsWith("0x") ? bytes : `0x${bytes}`;
+  return hex;
 }
 export function sqrt(value) {
   if (value < 0n) throw new Error("Negative square root");
@@ -226,7 +293,7 @@ export function fixture(
     throw new Error("V3 tick spacing must be a positive integer");
   // One whole token0 = one whole token1. Keep raw-unit decimal asymmetry.
   const sqrtPriceX96 = sqrt(
-    ((10n ** BigInt(token1Decimals)) << 192n) / 10n ** BigInt(token0Decimals),
+    (parseUnits("1", token1Decimals) << 192n) / parseUnits("1", token0Decimals),
   );
   const tick = Math.floor(
     Math.log(10 ** (token1Decimals - token0Decimals)) / Math.log(1.0001),
@@ -237,7 +304,7 @@ export function fixture(
   const upper = center + width;
   // ~100 whole tokens for narrow pools, ~10,000 for wide pools.
   const liquidity =
-    sqrt(10n ** BigInt(token0Decimals + token1Decimals)) * 10000n;
+    sqrt(parseUnits("1", token0Decimals + token1Decimals)) * 10000n;
   if (
     sqrtPriceX96 < 4295128739n ||
     sqrtPriceX96 >= 1461446703485210103287273052203988822378723970342n ||
@@ -249,7 +316,7 @@ export function fixture(
     lower % spacing !== 0 ||
     upper % spacing !== 0 ||
     liquidity <= 0n ||
-    liquidity > (1n << 128n) - 1n
+    liquidity > maxUint128
   )
     throw new Error("Generated V3 fixture exceeds protocol bounds");
   return {
@@ -267,23 +334,7 @@ export async function run(o) {
   const url = process.env[chain.rpc_url_env];
   if (!url || !/^https?:\/\//.test(url))
     throw new Error(`${chain.rpc_url_env} must be an HTTP(S) URL`);
-  async function rpc(method, params = []) {
-    let response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-        signal: AbortSignal.timeout(60000),
-      });
-    } catch {
-      throw new Error(`${method}: network request failed (URL withheld)`);
-    }
-    const body = await response.json();
-    if (!response.ok || body.error || !("result" in body))
-      throw new Error(`${method}: RPC rejected request (details withheld)`);
-    return body.result;
-  }
+  const rpc = createRpc(url);
   if (BigInt(await rpc("eth_chainId")) !== BigInt(chain.id))
     throw new Error(`Chain guard: expected ${chain.key} ${chain.id}`);
   const manifestExists = existsSync(o.manifest);
@@ -321,27 +372,35 @@ export async function run(o) {
     throw new Error(
       "Manifest deployment identity does not match harness config",
     );
-  const call = async (to, signature, args = []) =>
-    rpc("eth_call", [{ to, data: encode(signature, args) }, "latest"]);
-  const addr = async (to, signature, args = []) =>
-    address(`0x${(await call(to, signature, args)).slice(-40)}`);
+  const call = async (to, abi, functionName, args = []) =>
+    decodeResult(
+      abi,
+      functionName,
+      await rpc("eth_call", [
+        { to, data: encodeFunctionData({ abi, functionName, args }) },
+        "latest",
+      ]),
+    );
+  const addr = async (to, abi, functionName, args = []) =>
+    address((await call(to, abi, functionName, args)).toLowerCase());
   async function verifyCode(target) {
     const bytes = await rpc("eth_getCode", [address(target), "latest"]);
     if (bytes === "0x") throw new Error(`Missing bytecode at ${target}`);
-    return cast(["keccak", bytes]);
+    return keccak256(bytes);
   }
   const officialHashes = {};
   for (const [name, target] of Object.entries(uni))
     officialHashes[name] = await verifyCode(target);
   await verifyCode(weth);
-  for (const [name, getter] of [
-    ["quoter", "factory()"],
-    ["router", "factory()"],
-    ["npm", "factory()"],
-  ]) {
-    if (!same(await addr(uni[name], getter), uni.factory))
+  for (const name of ["quoter", "router", "npm"]) {
+    if (
+      !same(
+        await addr(uni[name], uniswapPeripheryStateAbi, "factory"),
+        uni.factory,
+      )
+    )
       throw new Error(`Official ${name} factory link mismatch`);
-    if (!same(await addr(uni[name], "WETH9()"), weth))
+    if (!same(await addr(uni[name], uniswapPeripheryStateAbi, "WETH9"), weth))
       throw new Error(`Official ${name} WETH link mismatch`);
   }
   console.log(
@@ -466,7 +525,7 @@ export async function run(o) {
         o.passwordFile,
         ...(to ? [to, data] : ["--create", data]),
       ]);
-      record = { to, data, nonce, raw, hash: cast(["keccak", raw]) };
+      record = { to, data, nonce, raw, hash: keccak256(raw) };
       manifest.transactions[key] = record;
       // Persist signed bytes and hash BEFORE submission. Restart can only resubmit this exact transaction.
       save();
@@ -488,54 +547,52 @@ export async function run(o) {
     console.log(`${key}: ${record.hash}`);
     return receipt.contractAddress;
   }
-  const deploy = async (key, path, signature, args = []) =>
-    transact(
-      key,
-      null,
-      code(path) +
-        (signature
-          ? cast(["abi-encode", signature, ...args.map(String)]).slice(2)
-          : ""),
-    );
-  const write = (key, target, signature, args) =>
-    transact(key, target, encode(signature, args));
+  const deploy = async (key, path, abi, args = []) =>
+    transact(key, null, encodeDeployData({ abi, bytecode: code(path), args }));
+  const write = (key, target, abi, functionName, args) =>
+    transact(key, target, encodeFunctionData({ abi, functionName, args }));
   if (o.command === "deploy") {
     for (const [symbol, d] of Object.entries(decimals)) {
       manifest.tokens[symbol] = {
         address: await deploy(
           `token-${symbol}`,
           artifacts.token,
-          "constructor(string,uint8)",
+          testTokenAbi,
           [symbol, d],
         ),
         decimals: d,
       };
     }
-    manifest.seeder = await deploy("seeder", artifacts.seeder);
+    manifest.seeder = await deploy(
+      "seeder",
+      artifacts.seeder,
+      liquiditySeederAbi,
+    );
     const bootstrap = await deploy(
       "pancake-bootstrap",
       artifacts.pancake_bootstrap,
+      pancakeBootstrapAbi,
     );
     manifest.pancake.bootstrap = bootstrap;
     // CREATE nonces in a contract start at one. These predictions are used only in dry-run.
     const child = (nonce) => createAddress(bootstrap, nonce);
     manifest.pancake.deployer = o.broadcast
-      ? await addr(bootstrap, "deployer()")
+      ? await addr(bootstrap, pancakeBootstrapAbi, "deployer")
       : child(1);
     manifest.pancake.factory = o.broadcast
-      ? await addr(bootstrap, "factory()")
+      ? await addr(bootstrap, pancakeBootstrapAbi, "factory")
       : child(2);
     const args = [manifest.pancake.deployer, manifest.pancake.factory, weth];
     manifest.pancake.router = await deploy(
       "pancake-router",
       artifacts.pancake_router,
-      "constructor(address,address,address)",
+      pancakeV3RouterAbi,
       args,
     );
     manifest.pancake.quoter = await deploy(
       "pancake-quoter",
       artifacts.pancake_quoter,
-      "constructor(address,address,address)",
+      pancakeQuoterV2Abi,
       args,
     );
     save();
@@ -550,7 +607,7 @@ export async function run(o) {
         throw new Error(`Missing or invalid ${symbol} deployment`);
       await verifyCode(token.address);
       if (
-        BigInt(await call(token.address, "decimals()")) !==
+        BigInt(await call(token.address, erc20Abi, "decimals")) !==
         BigInt(decimals[symbol])
       )
         throw new Error(`Wrong decimals: ${symbol}`);
@@ -559,18 +616,25 @@ export async function run(o) {
       await verifyCode(manifest.pancake[name]);
     if (
       !same(
-        await addr(manifest.pancake.deployer, "factoryAddress()"),
+        await addr(
+          manifest.pancake.deployer,
+          pancakePoolDeployerAbi,
+          "factoryAddress",
+        ),
         manifest.pancake.factory,
       )
     )
       throw new Error("Pancake deployer not initialized to factory");
-    for (const name of ["router", "quoter"]) {
+    for (const [name, abi] of [
+      ["router", pancakeV3RouterAbi],
+      ["quoter", pancakeQuoterV2Abi],
+    ]) {
       for (const [getter, expected] of [
-        ["factory()", manifest.pancake.factory],
-        ["deployer()", manifest.pancake.deployer],
-        ["WETH9()", weth],
+        ["factory", manifest.pancake.factory],
+        ["deployer", manifest.pancake.deployer],
+        ["WETH9", weth],
       ]) {
-        if (!same(await addr(manifest.pancake[name], getter), expected))
+        if (!same(await addr(manifest.pancake[name], abi, getter), expected))
           throw new Error(`Pancake ${name} ${getter} mismatch`);
       }
     }
@@ -580,23 +644,34 @@ export async function run(o) {
       throw new Error(
         "Explicit recipients must include --sender to pay for liquidity",
       );
-    const maxUint256 = (1n << 256n) - 1n;
     const tokenAmounts = Object.entries(manifest.tokens).map(
       ([symbol, token]) => {
-        const amount = 1000000n * 10n ** BigInt(token.decimals);
+        const amount = parseUnits("1000000", token.decimals);
         if (amount <= 0n || amount > maxUint256)
           throw new Error(`Mint amount exceeds uint256: ${symbol}`);
         return { symbol, token, amount };
       },
     );
     const poolPlans = [];
-    for (const [provider, factory, fees] of [
-      ["uni", uni.factory, fixtures.uniswap_fees],
-      ["pancake", manifest.pancake.factory, fixtures.pancake_fees],
+    for (const [provider, factory, fees, factoryAbi, poolAbi] of [
+      [
+        "uni",
+        uni.factory,
+        fixtures.uniswap_fees,
+        uniswapV3FactoryAbi,
+        uniswapV3PoolAbi,
+      ],
+      [
+        "pancake",
+        manifest.pancake.factory,
+        fixtures.pancake_fees,
+        pancakeV3FactoryAbi,
+        pancakeV3PoolAbi,
+      ],
     ]) {
       for (const fee of fees) {
         const spacing = Number(
-          BigInt(await call(factory, "feeAmountTickSpacing(uint24)", [fee])),
+          await call(factory, factoryAbi, "feeAmountTickSpacing", [fee]),
         );
         if (!Number.isSafeInteger(spacing) || spacing <= 0)
           throw new Error(
@@ -615,10 +690,18 @@ export async function run(o) {
             spacing,
             fee !== fixtures.broad_fee,
           );
-          const pool = `0x${(await call(factory, "getPool(address,address,uint24)", [t0.address, t1.address, fee])).slice(-40)}`;
+          const pool = (
+            await call(factory, factoryAbi, "getPool", [
+              t0.address,
+              t1.address,
+              fee,
+            ])
+          ).toLowerCase();
           poolPlans.push({
             provider,
             factory,
+            factoryAbi,
+            poolAbi,
             fee,
             pairID,
             pair,
@@ -638,50 +721,60 @@ export async function run(o) {
         await write(
           `mint-${symbol}-${recipient}`,
           token.address,
-          "mint(address,uint256)",
+          testTokenAbi,
+          "mint",
           [recipient, amount],
         );
       }
-      await write(
-        `approve-${symbol}`,
-        token.address,
-        "approve(address,uint256)",
-        [manifest.seeder, amount],
-      );
+      await write(`approve-${symbol}`, token.address, erc20Abi, "approve", [
+        manifest.seeder,
+        amount,
+      ]);
     }
     for (const plan of poolPlans) {
-      const { provider, factory, fee, pair, key, t0, t1, values: f } = plan;
+      const {
+        provider,
+        factory,
+        factoryAbi,
+        poolAbi,
+        fee,
+        pair,
+        key,
+        t0,
+        t1,
+        values: f,
+      } = plan;
       let { pool } = plan;
-      if (same(pool, zero)) {
-        await write(
-          `create-${key}`,
-          factory,
-          "createPool(address,address,uint24)",
-          [t0.address, t1.address, fee],
-        );
+      if (same(pool, zeroAddress)) {
+        await write(`create-${key}`, factory, factoryAbi, "createPool", [
+          t0.address,
+          t1.address,
+          fee,
+        ]);
         if (!o.broadcast) {
           console.log(
             `DRY ${key}: initialize and seed after creation (narrow=${fee !== fixtures.broad_fee})`,
           );
           continue;
         }
-        pool = await addr(factory, "getPool(address,address,uint24)", [
+        pool = await addr(factory, factoryAbi, "getPool", [
           t0.address,
           t1.address,
           fee,
         ]);
       }
-      const slot = await call(pool, "slot0()");
-      if (BigInt(`0x${slot.slice(2, 66)}`) === 0n)
-        await write(`initialize-${key}`, pool, "initialize(uint160)", [
+      const slot = await call(pool, poolAbi, "slot0");
+      if (slot[0] === 0n)
+        await write(`initialize-${key}`, pool, poolAbi, "initialize", [
           f.sqrtPriceX96,
         ]);
-      await write(
-        `seed-${key}`,
-        manifest.seeder,
-        "seed(address,address,int24,int24,uint128)",
-        [factory, pool, f.lower, f.upper, f.liquidity],
-      );
+      await write(`seed-${key}`, manifest.seeder, liquiditySeederAbi, "seed", [
+        factory,
+        pool,
+        f.lower,
+        f.upper,
+        f.liquidity,
+      ]);
       const entry = {
         key,
         provider,
@@ -702,7 +795,9 @@ export async function run(o) {
   if (o.command === "check") {
     for (const pool of manifest.pools) {
       await verifyCode(pool.address);
-      const liquidity = BigInt(await call(pool.address, "liquidity()"));
+      const poolAbi =
+        pool.provider === "uni" ? uniswapV3PoolAbi : pancakeV3PoolAbi;
+      const liquidity = await call(pool.address, poolAbi, "liquidity");
       console.log(`${pool.key}: active liquidity ${liquidity}`);
     }
     console.log(

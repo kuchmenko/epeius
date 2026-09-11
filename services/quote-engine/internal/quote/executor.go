@@ -4,17 +4,98 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 	"google.golang.org/protobuf/proto"
 )
 
-var executorABI = mustABI(`[{"name":"execute","type":"function","inputs":[{"name":"tokenIn","type":"address"},{"name":"tokenOut","type":"address"},{"name":"amountIn","type":"uint256"},{"name":"minAmountOut","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"allocations","type":"tuple[]","components":[{"name":"venue","type":"uint8"},{"name":"amountIn","type":"uint256"},{"name":"hops","type":"tuple[]","components":[{"name":"tokenOut","type":"address"},{"name":"fee","type":"uint24"}]}]}],"outputs":[{"type":"uint256"}]}]`)
+var executorABI = contractabi.Executor
+
+type fixedExecutorPreparation struct{ chain Chain }
+
+func (s fixedExecutorPreparation) Select(ctx context.Context, saved storedQuote, r *quotev1.PrepareExecutionRequest, _ *quotev1.RouteQuote) (executionSelection, string) {
+	allocations, err := quoteAllocations(ctx, s.chain, saved, r.Allocations)
+	if err != nil {
+		if errors.Is(err, errExecutorRoute) {
+			return executionSelection{}, "Selected route is not supported by the configured executor."
+		}
+		if errors.Is(err, errAllocationTotal) {
+			return executionSelection{}, "Allocation inputs must sum to the quoted input amount."
+		}
+		return executionSelection{}, "executor allocations could not be quoted"
+	}
+	output := new(big.Int)
+	for _, allocation := range allocations {
+		amount, _ := new(big.Int).SetString(allocation.Route.AmountOutAtomic, 10)
+		output.Add(output, amount)
+	}
+	if output.BitLen() > 256 {
+		return executionSelection{}, "invalid aggregate output"
+	}
+	return executionSelection{allocations: allocations, output: output}, ""
+}
+
+func (s fixedExecutorPreparation) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
+	if p.AmountOutMinimumAtomic == "0" {
+		return executionPlan{}, "invalid aggregate output"
+	}
+	deadline, _ := strconv.ParseUint(p.DeadlineUnix, 10, 64)
+	data, err := executorData(s.chain.Config, p, deadline)
+	if err != nil {
+		return executionPlan{}, "executor plan could not be encoded"
+	}
+	e := *s.chain.Config.Executor
+	// Capture only the immutable linkage values used for future verification.
+	configSnapshot := config.Chain{Executor: &e, Deployments: map[string]config.Deployment{
+		e.UniswapDeployment: s.chain.Config.Deployments[e.UniswapDeployment],
+		e.PancakeDeployment: s.chain.Config.Deployments[e.PancakeDeployment],
+	}}
+	tx := &quotev1.UnsignedTransaction{ChainId: s.chain.ChainID, To: common.HexToAddress(e.Address).Hex(), From: p.Recipient, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "3000000"}
+	routers := map[string]string{}
+	for _, a := range p.Allocations {
+		routers[a.Route.DeploymentId] = configSnapshot.Deployments[a.Route.DeploymentId].Router
+	}
+	checks := executorChecks(tx, p.Allocations, routers)
+	return executionPlan{transaction: tx, spender: tx.To, checks: checks, verify: func(ctx context.Context, reader Reader, hash common.Hash) string {
+		if verifyExecutor(ctx, reader, configSnapshot, hash) != nil {
+			return "executor verification failed"
+		}
+		return ""
+	}}, ""
+}
+
+func executorChecks(tx *quotev1.UnsignedTransaction, allocations []*quotev1.QuotedAllocation, routers map[string]string) SimulationChecks {
+	first := allocations[0].Route.Legs
+	checks := SimulationChecks{Input: BalanceProbe{first[0].TokenIn, tx.From}, Output: BalanceProbe{first[len(first)-1].TokenOut, tx.From}}
+	probes := []BalanceProbe{checks.Input, checks.Output}
+	add := func(token, owner string) {
+		for _, existing := range probes {
+			if strings.EqualFold(existing.Token, token) && strings.EqualFold(existing.Owner, owner) {
+				return
+			}
+		}
+		probes = append(probes, BalanceProbe{token, owner})
+	}
+	for _, a := range allocations {
+		for _, leg := range a.Route.Legs {
+			checks.ClearAllowances = append(checks.ClearAllowances, AllowanceProbe{leg.TokenIn, tx.To, routers[a.Route.DeploymentId]})
+			for _, token := range []string{leg.TokenIn, leg.TokenOut} {
+				for _, owner := range []string{tx.From, tx.To, routers[a.Route.DeploymentId]} {
+					add(token, owner)
+				}
+			}
+		}
+	}
+	checks.Preserve = probes[2:]
+	return checks
+}
 
 // executorVenue resolves exact deployment membership, not just protocol kind.
 func executorVenue(chain config.Chain, route *quotev1.RouteQuote) (uint8, error) {
@@ -70,28 +151,12 @@ func quoteAllocations(ctx context.Context, chain Chain, saved storedQuote, reque
 		return nil, err
 	}
 	for _, a := range result {
-		started := time.Now()
-		tokens := []common.Address{common.HexToAddress(a.Route.Legs[0].TokenIn)}
-		var fees []uint32
-		for _, leg := range a.Route.Legs {
-			tokens = append(tokens, common.HexToAddress(leg.TokenOut))
-			fees = append(fees, leg.GetFeePips())
-		}
+		quoter := chain.Quoters[a.Route.DeploymentId]
 		amount, _ := new(big.Int).SetString(a.AmountInAtomic, 10)
-		legs, output, err := quotePath(ctx, chain.Client, chain.Config.Deployments[a.Route.DeploymentId], tokens, fees, amount, common.HexToHash(saved.final.Block.Hash))
-		if err != nil || output == nil || output.Sign() <= 0 || output.BitLen() > 256 {
-			return nil, errors.New("executor path could not be quoted")
+		a.Route, err = quoter.Requote(ctx, a.Route, amount, saved.final.Block)
+		if err != nil {
+			return nil, err
 		}
-		for i, leg := range legs {
-			if common.HexToAddress(leg.Pool) != common.HexToAddress(a.Route.Legs[i].Pool) {
-				return nil, errors.New("executor path pool changed")
-			}
-		}
-		a.Route.Legs = legs
-		a.Route.AmountOutAtomic = output.String()
-		a.Route.LatencyMs = uint32(time.Since(started).Milliseconds())
-		a.Route.Block = proto.CloneOf(saved.final.Block)
-		a.Route.NetworkCostOutAtomic, a.Route.EffectiveOutAtomic = nil, nil
 	}
 	return result, nil
 }
@@ -121,7 +186,7 @@ func admitAllocations(chain Chain, saved storedQuote, requested []*quotev1.Route
 				break
 			}
 		}
-		if route == nil || chain.DeploymentErrors[route.DeploymentId] != "" || len(route.Legs) < 1 || len(route.Legs) > 2 {
+		if route == nil || chain.Quoters[route.DeploymentId] == nil || chain.DeploymentErrors[route.DeploymentId] != "" || len(route.Legs) < 1 || len(route.Legs) > 2 {
 			return nil, errExecutorRoute
 		}
 		venue, err := executorVenue(chain.Config, route)
@@ -134,7 +199,7 @@ func admitAllocations(chain Chain, saved storedQuote, requested []*quotev1.Route
 				return nil, errExecutorRoute
 			}
 			fee, ok := leg.Selector.(*quotev1.RouteLeg_FeePips)
-			if !ok || fee.FeePips >= 1000000 || !address.MatchString(leg.TokenIn) || !address.MatchString(leg.TokenOut) || !strings.EqualFold(input, leg.TokenIn) {
+			if !ok || fee.FeePips >= 1000000 || !validAddress(leg.TokenIn) || !validAddress(leg.TokenOut) || !strings.EqualFold(input, leg.TokenIn) {
 				return nil, errExecutorRoute
 			}
 			input = leg.TokenOut
@@ -163,9 +228,14 @@ func verifyExecutor(ctx context.Context, reader Reader, chain config.Chain, hash
 	if err != nil || len(bytecode) == 0 {
 		return fail
 	}
-	for signature, id := range map[string]string{"uniswapRouter()": e.UniswapDeployment, "pancakeRouter()": e.PancakeDeployment} {
-		data, err := reader.Call(ctx, target, crypto.Keccak256([]byte(signature))[:4], hash)
-		if err != nil || len(data) != 32 || new(big.Int).SetBytes(data[:12]).Sign() != 0 || common.BytesToAddress(data) != common.HexToAddress(chain.Deployments[id].Router) {
+	for name, id := range map[string]string{"uniswapRouter": e.UniswapDeployment, "pancakeRouter": e.PancakeDeployment} {
+		method := executorABI.Methods[name]
+		data, err := reader.Call(ctx, target, method.ID, hash)
+		if err != nil {
+			return fail
+		}
+		values, err := evm.Unpack(method, data)
+		if err != nil || values[0].(common.Address) != common.HexToAddress(chain.Deployments[id].Router) {
 			return fail
 		}
 	}

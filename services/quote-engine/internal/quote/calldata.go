@@ -5,49 +5,50 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 )
 
-func mustABI(source string) abi.ABI {
-	result, err := abi.JSON(strings.NewReader(source))
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
+var erc20ABI = contractabi.ERC20
+var uniRouterABI = contractabi.UniswapRouter02
+var pancakeRouterABI = contractabi.PancakeV3Router
+var uniDeadlineCall = evm.Method(uniRouterABI, "multicall(uint256,bytes[])")
 
-var erc20ABI = mustABI(`[{"name":"allowance","type":"function","inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"outputs":[{"type":"uint256"}]},{"name":"approve","type":"function","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"type":"bool"}]},{"name":"balanceOf","type":"function","inputs":[{"name":"owner","type":"address"}],"outputs":[{"type":"uint256"}]}]`)
-var uniRouterABI = mustABI(`[{"name":"exactInput","type":"function","inputs":[{"name":"params","type":"tuple","components":[{"name":"path","type":"bytes"},{"name":"recipient","type":"address"},{"name":"amountIn","type":"uint256"},{"name":"amountOutMinimum","type":"uint256"}]}],"outputs":[{"type":"uint256"}]},{"name":"multicall","type":"function","inputs":[{"name":"deadline","type":"uint256"},{"name":"data","type":"bytes[]"}],"outputs":[{"type":"bytes[]"}]}]`)
-
-// Pancake v3-periphery ISwapRouter (not SmartRouter): the deadline is inside the tuple.
-// https://github.com/pancakeswap/pancake-v3-contracts/blob/main/projects/v3-periphery/contracts/interfaces/ISwapRouter.sol
-var pancakeRouterABI = mustABI(`[{"name":"exactInput","type":"function","inputs":[{"name":"params","type":"tuple","components":[{"name":"path","type":"bytes"},{"name":"recipient","type":"address"},{"name":"deadline","type":"uint256"},{"name":"amountIn","type":"uint256"},{"name":"amountOutMinimum","type":"uint256"}]}],"outputs":[{"type":"uint256"}]}]`)
-
-func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
+func v3Path(route *quotev1.RouteQuote) ([]byte, error) {
 	if len(route.Legs) < 1 || len(route.Legs) > 2 {
 		return nil, errors.New("unsupported path")
 	}
 	var path []byte
 	for i, leg := range route.Legs {
 		fee, ok := leg.Selector.(*quotev1.RouteLeg_FeePips)
-		if !ok || fee.FeePips >= 1000000 || !address.MatchString(leg.TokenIn) || !address.MatchString(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
+		if !ok || fee.FeePips >= 1000000 || !validAddress(leg.TokenIn) || !validAddress(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
 			return nil, errors.New("invalid path")
 		}
 		path = append(path, common.HexToAddress(leg.TokenIn).Bytes()...)
 		path = append(path, byte(fee.FeePips>>16), byte(fee.FeePips>>8), byte(fee.FeePips))
 	}
 	path = append(path, common.HexToAddress(route.Legs[len(route.Legs)-1].TokenOut).Bytes()...)
-	if kind == "pancake-v3" {
-		return pancakeRouterABI.Pack("exactInput", struct {
-			Path                                 []byte
-			Recipient                            common.Address
-			Deadline, AmountIn, AmountOutMinimum *big.Int
-		}{path, common.HexToAddress(sender), new(big.Int).SetUint64(deadline), amount, minimum})
+	return path, nil
+}
+
+func pancakeV3RouterData(route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
+	path, err := v3Path(route)
+	if err != nil {
+		return nil, err
 	}
-	if kind != "uniswap-v3" {
-		return nil, errors.New("unsupported router")
+	return pancakeRouterABI.Pack("exactInput", struct {
+		Path                                 []byte
+		Recipient                            common.Address
+		Deadline, AmountIn, AmountOutMinimum *big.Int
+	}{path, common.HexToAddress(sender), new(big.Int).SetUint64(deadline), amount, minimum})
+}
+
+func uniswapRouter02Data(route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
+	path, err := v3Path(route)
+	if err != nil {
+		return nil, err
 	}
 	inner, err := uniRouterABI.Pack("exactInput", struct {
 		Path                       []byte
@@ -57,5 +58,5 @@ func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, min
 	if err != nil {
 		return nil, err
 	}
-	return uniRouterABI.Pack("multicall", new(big.Int).SetUint64(deadline), [][]byte{inner})
+	return uniRouterABI.Pack(uniDeadlineCall.Name, new(big.Int).SetUint64(deadline), [][]byte{inner})
 }

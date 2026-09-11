@@ -45,6 +45,13 @@ test("preparation review shows trusted exact amounts, complete addresses and sep
     },
   });
   if (!p.transaction) throw new Error("Missing fixture transaction.");
+  const plan = {
+    spender: address("4"),
+    routeDetails: [
+      [`Pool: ${address("5")}; fee: 0 pips`],
+      [`Pool: ${address("5")}; fee: 0 pips`],
+    ],
+  };
   for (const [decimals, decimal] of [
     [0, "9007199254740993123456"],
     [6, "9007199254740993.123456"],
@@ -58,7 +65,7 @@ test("preparation review shows trusted exact amounts, complete addresses and sep
         { address: p.tokenOut, symbol: "OUT", decimals: 6 },
       ],
     });
-    const text = formatPreparation(p, chain);
+    const text = formatPreparation(p, chain, plan);
     for (const expected of [
       `Total input: ${decimal} IN (9007199254740993123456 atomic)`,
       "Minimum output: 0.000197 OUT (197 atomic)",
@@ -84,10 +91,10 @@ test("preparation review shows trusted exact amounts, complete addresses and sep
       approvalTransaction: { ...p.transaction, to: p.tokenIn },
       approvalSpender: address("4"),
     };
-    expect(formatPreparation(approval, chain)).toContain(
+    expect(formatPreparation(approval, chain, plan)).toContain(
       "APPROVAL ONLY — fresh quote and separate swap consent",
     );
-    expect(formatPreparation(approval, chain)).toContain(
+    expect(formatPreparation(approval, chain, plan)).toContain(
       "Proposed swap minimum (not sent by this approval)",
     );
     const split = {
@@ -106,10 +113,10 @@ test("preparation review shows trusted exact amounts, complete addresses and sep
         },
       ],
     };
-    expect(formatPreparation(split, chain)).toContain("Allocation 2:");
-    expect(formatPreparation(split, chain)).toContain("(37 atomic)");
-    expect(formatPreparation(split, chain)).toContain("(64 atomic)");
-    expect(() => formatPreparation(p, { ...chain, tokens: [] })).toThrow(
+    expect(formatPreparation(split, chain, plan)).toContain("Allocation 2:");
+    expect(formatPreparation(split, chain, plan)).toContain("(37 atomic)");
+    expect(formatPreparation(split, chain, plan)).toContain("(64 atomic)");
+    expect(() => formatPreparation(p, { ...chain, tokens: [] }, plan)).toThrow(
       "metadata",
     );
   }

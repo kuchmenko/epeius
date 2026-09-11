@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { toJsonString } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
+import { hexToBigInt, isHex } from "viem";
 import {
   ChainStatusSchema,
   GetStatusResponseSchema,
@@ -9,7 +10,7 @@ import {
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
-import type { ExecutionResult } from "./execution";
+import { ExecutionOutcome, type ExecutionResult } from "./execution";
 import { connectExecution, executionCommand } from "./execution-command";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import {
@@ -22,11 +23,21 @@ import {
 import { runTrade } from "./trade";
 
 export function executionExitCode(result: ExecutionResult) {
-  return ["preview", "approval-confirmed", "swap-verified"].includes(
-    result.kind,
-  )
-    ? 0
-    : 1;
+  const outcome = result.kind;
+  switch (outcome) {
+    case ExecutionOutcome.Preview:
+    case ExecutionOutcome.ApprovalConfirmed:
+    case ExecutionOutcome.SwapVerified:
+      return 0;
+    case ExecutionOutcome.Canceled:
+    case ExecutionOutcome.Failed:
+    case ExecutionOutcome.Unknown:
+      return 1;
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`Unhandled execution outcome: ${String(unhandled)}`);
+    }
+  }
 }
 
 const help = `Epeius — EVM quote terminal
@@ -368,8 +379,9 @@ export async function main(rawArgs: string[]) {
       );
       const rpcChainId = await context.rpc.chainId();
       if (
-        !/^0x[0-9a-f]+$/.test(rpcChainId) ||
-        BigInt(rpcChainId).toString() !== context.expectedChainId
+        !isHex(rpcChainId, { strict: true }) ||
+        rpcChainId.length <= 2 ||
+        hexToBigInt(rpcChainId).toString() !== context.expectedChainId
       )
         throw new Error(
           `RPC network must match configured chain ID ${context.expectedChainId}.`,

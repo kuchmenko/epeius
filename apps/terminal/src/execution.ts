@@ -1,56 +1,94 @@
 import { type JsonValue, toJsonString } from "@bufbuild/protobuf";
+import { hexToBigInt, isHash, isHex } from "viem";
 import {
-  PreparationStatus,
   type PrepareExecutionResponse,
   PrepareExecutionResponseSchema,
   type UnsignedTransaction,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import {
+  assertPreparationCurrent,
   assertPreparationUnchanged,
-  type Receipt,
+  ExecutionAction,
+  type ExecutionPlan,
   type TrustedExecution,
   validatePreparation,
-  verifyReceipt,
 } from "./execution-policy";
+import {
+  type Receipt,
+  type SwapVerification,
+  VerificationOutcome,
+  verifyReceipt,
+} from "./receipt";
 
-const hashPattern = /^0x[0-9a-fA-F]{64}$/;
+export { ExecutionAction } from "./execution-policy";
+export { VerificationOutcome } from "./receipt";
+
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-export type ExecutionResult =
-  | { kind: "preview" | "canceled" }
+export type Verification =
   | {
-      kind: "approval-confirmed" | "swap-verified" | "failed";
+      action: typeof ExecutionAction.Approval;
+      evidence: {
+        outcome:
+          | typeof VerificationOutcome.ReceiptSuccess
+          | typeof VerificationOutcome.Failed
+          | typeof VerificationOutcome.Unavailable;
+      };
+    }
+  | { action: typeof ExecutionAction.Swap; evidence: SwapVerification };
+
+export const ExecutionOutcome = {
+  Preview: "preview",
+  Canceled: "canceled",
+  ApprovalConfirmed: "approval-confirmed",
+  SwapVerified: "swap-verified",
+  Failed: "failed",
+  Unknown: "unknown",
+} as const;
+
+const Submission = {
+  Submitted: "submitted",
+  Unknown: "unknown",
+  PendingOrUnknown: "pending_or_unknown",
+} as const;
+
+export type ExecutionResult =
+  | { kind: typeof ExecutionOutcome.Preview | typeof ExecutionOutcome.Canceled }
+  | {
+      kind:
+        | typeof ExecutionOutcome.ApprovalConfirmed
+        | typeof ExecutionOutcome.SwapVerified
+        | typeof ExecutionOutcome.Failed;
       transactionHash: string;
     }
-  | { kind: "unknown"; transactionHash: string | null };
+  | { kind: typeof ExecutionOutcome.Unknown; transactionHash: string | null };
+export type ExecutionOutcome = ExecutionResult["kind"];
 
 // Existing JSONL payloads; the internal result discriminator is not serialized.
 export type ExecutionEvent =
   | { preparation: JsonValue; sent: false }
-  | { sent: false; outcome: "canceled" }
+  | { sent: false; outcome: typeof ExecutionOutcome.Canceled }
   | {
       transactionHash: string;
-      submission: "submitted";
-      kind: "approval" | "swap";
-      verification: { outcome: "pending" };
+      submission: typeof Submission.Submitted;
+      kind: ExecutionAction;
+      verification: { outcome: typeof VerificationOutcome.Pending };
     }
   | {
       transactionHash: string;
-      verification:
-        | ReturnType<typeof verifyReceipt>
-        | { outcome: "receipt_success" | "failed" };
+      verification: Verification["evidence"];
       nextAction?: string;
     }
   | {
       transactionHash: null;
-      submission: "unknown";
-      verification: { outcome: "unavailable" };
+      submission: typeof Submission.Unknown;
+      verification: { outcome: typeof VerificationOutcome.Unavailable };
       message: string;
     }
   | {
       transactionHash: string;
-      submission: "pending_or_unknown";
-      verification: { outcome: "unavailable" };
+      submission: typeof Submission.PendingOrUnknown;
+      verification: { outcome: typeof VerificationOutcome.Unavailable };
       message: string;
     };
 
@@ -62,8 +100,9 @@ export type ExecutionIO = {
   chainId: () => Promise<string>;
   prepare: (preparationId?: string) => Promise<PrepareExecutionResponse>;
   confirm: (
-    kind: "approval" | "swap",
+    kind: ExecutionAction,
     p: PrepareExecutionResponse,
+    plan: ExecutionPlan,
   ) => Promise<boolean>;
   send: (tx: UnsignedTransaction) => Promise<string>;
   // Use chain.waitCanonicalReceipt: wallet/SDK success alone is not canonical evidence.
@@ -73,6 +112,46 @@ export type ExecutionIO = {
   swapOnly?: boolean;
 };
 
+function verifiedResult(
+  verification: Verification,
+  transactionHash: string,
+): ExecutionResult {
+  switch (verification.action) {
+    case ExecutionAction.Approval: {
+      const outcome = verification.evidence.outcome;
+      switch (outcome) {
+        case VerificationOutcome.ReceiptSuccess:
+          return { kind: ExecutionOutcome.ApprovalConfirmed, transactionHash };
+        case VerificationOutcome.Failed:
+          return { kind: ExecutionOutcome.Failed, transactionHash };
+        case VerificationOutcome.Unavailable:
+          return { kind: ExecutionOutcome.Unknown, transactionHash };
+        default:
+          return impossible(outcome);
+      }
+    }
+    case ExecutionAction.Swap: {
+      const outcome = verification.evidence.outcome;
+      switch (outcome) {
+        case VerificationOutcome.Passed:
+          return { kind: ExecutionOutcome.SwapVerified, transactionHash };
+        case VerificationOutcome.Failed:
+          return { kind: ExecutionOutcome.Failed, transactionHash };
+        case VerificationOutcome.Unavailable:
+          return { kind: ExecutionOutcome.Unknown, transactionHash };
+        default:
+          return impossible(outcome);
+      }
+    }
+    default:
+      return impossible(verification);
+  }
+}
+
+function impossible(value: never): never {
+  throw new Error(`Unhandled execution state: ${String(value)}`);
+}
+
 export async function executePrepared(
   io: ExecutionIO,
   preview = false,
@@ -80,8 +159,9 @@ export async function executePrepared(
   const rpcMatchesExpectedChain = async () => {
     const chainId = await io.chainId();
     return (
-      /^0x[0-9a-f]+$/.test(chainId) &&
-      BigInt(chainId).toString() === io.expectedChainId
+      isHex(chainId, { strict: true }) &&
+      chainId.length > 2 &&
+      hexToBigInt(chainId).toString() === io.expectedChainId
     );
   };
   if (!(await rpcMatchesExpectedChain()))
@@ -89,7 +169,7 @@ export async function executePrepared(
       `RPC network must match configured chain ID ${io.expectedChainId}.`,
     );
   const prepared = await io.prepare();
-  const tx = validatePreparation(
+  const plan = validatePreparation(
     prepared,
     io.signer,
     io.expectedChainId,
@@ -97,100 +177,92 @@ export async function executePrepared(
     io.trusted,
   );
   const snapshot = toJsonString(PrepareExecutionResponseSchema, prepared);
-  const kind =
-    prepared.status === PreparationStatus.APPROVAL_REQUIRED
-      ? "approval"
-      : "swap";
+  const kind = plan.action;
   if (preview || io.reportPreparation)
     io.report({ preparation: JSON.parse(snapshot), sent: false });
-  if (io.swapOnly && kind === "approval")
+  if (io.swapOnly && kind === ExecutionAction.Approval)
     throw new Error(
       "Approval is still required. Start a new trade; nothing retried.",
     );
   if (preview) {
-    return { kind: "preview" };
+    return { kind: ExecutionOutcome.Preview };
   }
-  if (!(await io.confirm(kind, prepared))) {
-    io.report({ sent: false, outcome: "canceled" });
-    return { kind: "canceled" };
+  if (!(await io.confirm(kind, prepared, structuredClone(plan)))) {
+    io.report({ sent: false, outcome: ExecutionOutcome.Canceled });
+    return { kind: ExecutionOutcome.Canceled };
   }
   const checked = await io.prepare(prepared.preparationId);
-  validatePreparation(
-    checked,
-    io.signer,
-    io.expectedChainId,
-    io.slippageBps,
-    io.trusted,
-  );
+  assertPreparationCurrent(checked);
   assertPreparationUnchanged(prepared, checked, snapshot);
   if (!(await rpcMatchesExpectedChain()))
     throw new Error("RPC network changed. Nothing sent.");
-  validatePreparation(
-    prepared,
-    io.signer,
-    io.expectedChainId,
-    io.slippageBps,
-    io.trusted,
-  );
+  assertPreparationUnchanged(prepared, checked, snapshot);
+  assertPreparationCurrent(prepared);
   let hash: string;
   try {
-    hash = (await io.send(tx)).trim();
-    if (!hashPattern.test(hash)) throw new Error("Invalid transaction hash.");
+    hash = (await io.send(plan.transaction)).trim();
+    if (hash.length !== 66 || !isHash(hash))
+      throw new Error("Invalid transaction hash.");
   } catch {
     io.report({
       transactionHash: null,
-      submission: "unknown",
-      verification: { outcome: "unavailable" },
+      submission: Submission.Unknown,
+      verification: { outcome: VerificationOutcome.Unavailable },
       message:
         "Send attempt may have reached the network. Inspect wallet transactions; do not automatically resend.",
     });
-    return { kind: "unknown", transactionHash: null };
+    return { kind: ExecutionOutcome.Unknown, transactionHash: null };
   }
   io.report({
     transactionHash: hash,
-    submission: "submitted",
+    submission: Submission.Submitted,
     kind,
-    verification: { outcome: "pending" },
+    verification: { outcome: VerificationOutcome.Pending },
   });
   try {
     const receipt = await io.receipt(hash);
-    const verification =
-      kind === "swap"
-        ? verifyReceipt(receipt, hash, prepared, io.trusted)
-        : {
+    let verification: Verification;
+    switch (plan.action) {
+      case ExecutionAction.Swap:
+        verification = {
+          action: ExecutionAction.Swap,
+          evidence: verifyReceipt(receipt, hash, plan.receipt),
+        };
+        break;
+      case ExecutionAction.Approval:
+        if (!same(receipt.transactionHash, hash))
+          throw new Error("Receipt transaction hash mismatch.");
+        verification = {
+          action: ExecutionAction.Approval,
+          evidence: {
             outcome:
-              same(receipt.transactionHash, hash) && receipt.status === "0x1"
-                ? ("receipt_success" as const)
-                : ("failed" as const),
-          };
+              receipt.status === "0x1"
+                ? VerificationOutcome.ReceiptSuccess
+                : VerificationOutcome.Failed,
+          },
+        };
+        break;
+      default:
+        return impossible(plan);
+    }
     io.report({
       transactionHash: hash,
-      verification,
-      ...(kind === "approval"
+      verification: verification.evidence,
+      ...(kind === ExecutionAction.Approval
         ? {
             nextAction:
               "Rerun quote, then execute with the new quote and selected route. Approval never executes the old quote.",
           }
         : {}),
     });
-    return {
-      kind:
-        verification.outcome === "receipt_success"
-          ? "approval-confirmed"
-          : verification.outcome === "passed"
-            ? "swap-verified"
-            : verification.outcome === "unavailable"
-              ? "unknown"
-              : "failed",
-      transactionHash: hash,
-    };
+    return verifiedResult(verification, hash);
   } catch {
     io.report({
       transactionHash: hash,
-      submission: "pending_or_unknown",
-      verification: { outcome: "unavailable" },
+      submission: Submission.PendingOrUnknown,
+      verification: { outcome: VerificationOutcome.Unavailable },
       message: "Receipt unavailable. Do not resend automatically.",
     });
-    return { kind: "unknown", transactionHash: hash };
+    return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
   }
 }

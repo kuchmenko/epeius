@@ -12,6 +12,7 @@ import { readExecutionConfig } from "./config";
 import { executePrepared } from "./execution";
 import { uint256Decimal } from "./execution-policy";
 import { formatPreparation } from "./format";
+import { configureChain } from "./protocols";
 import { castWallet } from "./wallet-cast";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -30,6 +31,7 @@ export async function connectExecution(
     configPath,
     chain,
     allocations,
+    configureChain,
   );
   if (remoteChainId !== expectedChainId)
     throw new Error(
@@ -187,13 +189,17 @@ export async function executionCommand(
           );
         return response;
       },
-      confirm: async (kind, p) => {
+      confirm: async (kind, p, plan) => {
         console.error(
-          formatPreparation(p, {
-            key: chain,
-            chainId: expectedChainId,
-            tokens,
-          }),
+          formatPreparation(
+            p,
+            {
+              key: chain,
+              chainId: expectedChainId,
+              tokens,
+            },
+            plan,
+          ),
         );
         if (!trade?.afterApproval && values[`confirm-${kind}`] === "yes")
           return true;

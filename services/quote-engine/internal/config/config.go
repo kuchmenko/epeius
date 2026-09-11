@@ -63,7 +63,7 @@ type Deployment struct {
 var chainKey = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-func Load(path string) (Config, error) {
+func Load(path string, validateProtocols func(Chain) error) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, errors.New("could not read config file")
@@ -77,6 +77,11 @@ func Load(path string) (Config, error) {
 	result.normalizeAddresses()
 	if err := result.validate(); err != nil {
 		return Config{}, err
+	}
+	for _, chain := range result.Chains {
+		if err := validateProtocols(chain); err != nil {
+			return Config{}, err
+		}
 	}
 	return result, nil
 }
@@ -132,13 +137,6 @@ func (c Config) validate() error {
 		if chain.ExecutionEnabled && (len(chain.Tokens) < 2 || len(chain.Deployments) == 0) {
 			return errors.New("execution needs at least two tokens and a deployment")
 		}
-		if e := chain.Executor; e != nil {
-			uni, uniOK := chain.Deployments[e.UniswapDeployment]
-			pancake, pancakeOK := chain.Deployments[e.PancakeDeployment]
-			if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !uniOK || !pancakeOK || uni.Kind != "uniswap-v3" || pancake.Kind != "pancake-v3" || common.HexToAddress(uni.Router) == common.HexToAddress(pancake.Router) {
-				return errors.New("executor needs a nonzero address and distinct configured Uniswap and Pancake routers")
-			}
-		}
 		seen := map[common.Address]bool{}
 		for _, token := range chain.Tokens {
 			a := common.HexToAddress(token.Address)
@@ -147,21 +145,9 @@ func (c Config) validate() error {
 			}
 			seen[a] = true
 		}
-		for id, deployment := range chain.Deployments {
-			if !chainKey.MatchString(id) || (deployment.Kind != "uniswap-v3" && deployment.Kind != "pancake-v3") || len(deployment.Fees) == 0 {
+		for id := range chain.Deployments {
+			if !chainKey.MatchString(id) {
 				return errors.New("invalid deployment kind, identifier, or fees")
-			}
-			for _, a := range []string{deployment.Factory, deployment.Quoter, deployment.Router} {
-				if !common.IsHexAddress(a) || common.HexToAddress(a) == (common.Address{}) {
-					return errors.New("deployment addresses must be nonzero EVM addresses")
-				}
-			}
-			fees := map[uint32]bool{}
-			for _, fee := range deployment.Fees {
-				if fee >= 1000000 || fees[fee] {
-					return errors.New("invalid or duplicate pool fee")
-				}
-				fees[fee] = true
 			}
 		}
 		if !envName.MatchString(chain.RPCURLEnv) {

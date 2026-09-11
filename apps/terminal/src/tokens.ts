@@ -1,15 +1,13 @@
+import { isAddress, maxUint256, parseUnits } from "viem";
 import type {
   ChainStatus,
   Token,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import type { LocalChainConfig } from "./config";
 
-const UINT256_LIMIT = 1n << 256n;
-const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-
 function normalizedAddress(value: string): string {
   const prefixed = `0x${value.replace(/^0x/i, "")}`;
-  return ADDRESS.test(prefixed) ? prefixed.toLowerCase() : "";
+  return isAddress(prefixed, { strict: false }) ? prefixed.toLowerCase() : "";
 }
 
 export function trustChainTokens(
@@ -46,7 +44,7 @@ export function trustChainTokens(
 }
 
 export function resolveToken(value: string, tokens: Token[]): Token {
-  const matches = ADDRESS.test(value)
+  const matches = isAddress(value, { strict: false })
     ? tokens.filter(
         (token) => token.address.toLowerCase() === value.toLowerCase(),
       )
@@ -61,7 +59,7 @@ export function resolveToken(value: string, tokens: Token[]): Token {
 }
 
 export function parseAtomic(value: string): string {
-  if (!/^[1-9][0-9]*$/.test(value) || BigInt(value) >= UINT256_LIMIT)
+  if (!/^[1-9][0-9]*$/.test(value) || BigInt(value) > maxUint256)
     throw new Error("Use a positive uint256 integer for --amount-atomic.");
   return value;
 }
@@ -69,15 +67,13 @@ export function parseAtomic(value: string): string {
 export function decimalToAtomic(value: string, decimals: number): string {
   if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(value))
     throw new Error("Use a positive decimal amount for --amount.");
-  const [whole, fraction = ""] = value.split(".");
+  const [, fraction = ""] = value.split(".");
   if (fraction.length > decimals)
     throw new Error(`Amount has more than ${decimals} decimal places.`);
   if (decimals === 0 && fraction)
     throw new Error("Amount has more than 0 decimal places.");
-  const atomic =
-    BigInt(whole) * 10n ** BigInt(decimals) +
-    BigInt((fraction + "0".repeat(decimals)).slice(0, decimals) || "0");
-  if (atomic <= 0n || atomic >= UINT256_LIMIT)
+  const atomic = parseUnits(value, decimals);
+  if (atomic <= 0n || atomic > maxUint256)
     throw new Error("Amount must be a positive uint256 value.");
   return atomic.toString();
 }

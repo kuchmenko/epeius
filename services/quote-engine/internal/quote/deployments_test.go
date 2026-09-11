@@ -69,7 +69,7 @@ func TestStartupDeploymentLinksAndIsolation(t *testing.T) {
 				}
 				return nil, errors.New("unexpected getter")
 			}}}
-			chain := VerifyDeployments(context.Background(), Chain{ChainID: "84532", Client: reader, Snapshot: snapshot(), Config: config.Chain{ExecutionEnabled: true, Tokens: []config.Token{{Address: tokenA}}, Deployments: map[string]config.Deployment{"uni": uni, "pancake": pancake}}})
+			chain := VerifyDeployments(context.Background(), ConfigureChain(Chain{ChainID: "84532", Client: reader, Snapshot: snapshot(), Config: config.Chain{ExecutionEnabled: true, Tokens: []config.Token{{Address: tokenA}}, Deployments: map[string]config.Deployment{"uni": uni, "pancake": pancake}}}))
 			switch failure {
 			case "none":
 				if len(chain.DeploymentErrors) != 0 {
@@ -113,7 +113,7 @@ func TestConfiguredMultiHopCrossProductsAndProviderIsolation(t *testing.T) {
 		fee := new(big.Int).SetBytes(data[100:132]).Uint64()
 		return quoteResponse(input*2 + fee), nil
 	}}
-	handler := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "84532", Client: reader, Config: settings}}, QuoteConcurrency: 4}
+	handler := configuredHandler(Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "84532", Client: reader, Config: settings}}, QuoteConcurrency: 4})
 	request := &quotev1.QuoteRequest{Chain: "test", ChainId: "84532", TokenIn: tokenA, TokenOut: tokenC, AmountInAtomic: "17", SearchBudgetMs: 1000}
 	response, err := handler.GetQuote(context.Background(), connect.NewRequest(request))
 	if err != nil {

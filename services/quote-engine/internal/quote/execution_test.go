@@ -34,6 +34,16 @@ func testRoute() *quotev1.RouteQuote {
 	}}
 }
 
+func swapData(kind string, route *quotev1.RouteQuote, sender string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
+	if kind == "uniswap-v3" {
+		return uniswapRouter02Data(route, sender, amount, minimum, deadline)
+	}
+	if kind == "pancake-v3" {
+		return pancakeV3RouterData(route, sender, amount, minimum, deadline)
+	}
+	return nil, errors.New("unsupported router")
+}
+
 func TestSwapCalldataAuthenticSelectorsAndDeadline(t *testing.T) {
 	route := testRoute()
 	amount := big.NewInt(123456789)
@@ -48,7 +58,7 @@ func TestSwapCalldataAuthenticSelectorsAndDeadline(t *testing.T) {
 			if !bytes.Equal(data[:4], crypto.Keccak256([]byte("multicall(uint256,bytes[])"))[:4]) {
 				t.Fatal("missing deadline multicall")
 			}
-			values, err := uniRouterABI.Methods["multicall"].Inputs.Unpack(data[4:])
+			values, err := uniDeadlineCall.Inputs.Unpack(data[4:])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -120,9 +130,9 @@ func (r executionFake) Canonical(ctx context.Context, s rpc.Snapshot) error {
 	return r.canonical(ctx, s)
 }
 
-type simulationFake func(context.Context, *quotev1.UnsignedTransaction, *quotev1.RouteQuote, rpc.Snapshot, *big.Int, *big.Int) (string, error)
+type simulationFake func(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (string, error)
 
-func (f simulationFake) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, r *quotev1.RouteQuote, s rpc.Snapshot, a, m *big.Int) (string, error) {
+func (f simulationFake) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, r SimulationChecks, s rpc.Snapshot, a, m *big.Int) (string, error) {
 	return f(ctx, tx, r, s, a, m)
 }
 
@@ -139,7 +149,7 @@ func executionFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, 
 		}
 		return uintWord(allowance), nil
 	}}, canonical: func(context.Context, rpc.Snapshot) error { return nil }}
-	h := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "11155111", Client: reader, Config: config.Chain{ExecutionEnabled: true, Deployments: map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Router: router}}}}}, Simulator: simulationFake(func(ctx context.Context, tx *quotev1.UnsignedTransaction, r *quotev1.RouteQuote, s rpc.Snapshot, a, m *big.Int) (string, error) {
+	h := Handler{Store: NewStore(), Chains: map[string]Chain{"test": {ChainID: "11155111", Client: reader, Config: config.Chain{ExecutionEnabled: true, Deployments: map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Router: router}}}}}, Simulator: simulationFake(func(ctx context.Context, tx *quotev1.UnsignedTransaction, r SimulationChecks, s rpc.Snapshot, a, m *big.Int) (string, error) {
 		simulations++
 		if tx.ChainId != "11155111" || s.ChainID != "11155111" || tx.From != wallet || tx.To != router || tx.ValueAtomic != "0" || tx.GasLimit != "1500000" || a.String() != "123456789" || m.String() != "9927" {
 			t.Fatal("simulation terms changed")
@@ -150,12 +160,12 @@ func executionFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, 
 		return "9991", nil
 	}), QuoteConcurrency: 4}
 	h.Store.saveQuote(&quotev1.QuoteRequest{Chain: "test", ChainId: "11155111", TokenIn: tokenA, TokenOut: tokenC, AmountInAtomic: "123456789"}, &quotev1.QuoteFinal{QuoteId: "q", Routes: []*quotev1.RouteQuote{testRoute()}, Block: &quotev1.BlockContext{Number: "112230", Hash: blockHash}}, time.Now())
-	return h, &quotev1.PrepareExecutionRequest{QuoteId: "q", RouteId: testRoute().RouteId, Sender: wallet, SlippageBps: 75}, &allowance, &timestamp, &simulations
+	return configuredHandler(h), &quotev1.PrepareExecutionRequest{QuoteId: "q", RouteId: testRoute().RouteId, Sender: wallet, SlippageBps: 75}, &allowance, &timestamp, &simulations
 }
 
 func prepare(t *testing.T, h Handler, r *quotev1.PrepareExecutionRequest) *quotev1.PrepareExecutionResponse {
 	t.Helper()
-	response, err := h.PrepareExecution(context.Background(), connect.NewRequest(r))
+	response, err := configuredHandler(h).PrepareExecution(context.Background(), connect.NewRequest(r))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +265,7 @@ func TestPreparationValidationExpiryAndSimulationFailure(t *testing.T) {
 		t.Fatal("stale quote accepted")
 	}
 	h, r, _, _, _ = executionFixture(t)
-	h.Simulator = simulationFake(func(context.Context, *quotev1.UnsignedTransaction, *quotev1.RouteQuote, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
+	h.Simulator = simulationFake(func(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
 		return "", errors.New("secret")
 	})
 	failed := prepare(t, h, r)
@@ -309,7 +319,7 @@ func TestStoreLookupAndApprovalAreDetachedAndAtomic(t *testing.T) {
 	s := NewStore()
 	now := time.Now()
 	s.saveQuote(&quotev1.QuoteRequest{AmountInAtomic: "37"}, &quotev1.QuoteFinal{QuoteId: "q", Routes: []*quotev1.RouteQuote{testRoute()}}, now)
-	p := preparation{response: &quotev1.PrepareExecutionResponse{PreparationId: "p", Route: testRoute()}, transaction: &quotev1.UnsignedTransaction{Data: "0x1234"}, expires: now.Add(retention)}
+	p := preparation{response: &quotev1.PrepareExecutionResponse{PreparationId: "p", Route: testRoute()}, executionPlan: executionPlan{transaction: &quotev1.UnsignedTransaction{Data: "0x1234"}}, expires: now.Add(retention)}
 	s.savePreparation(p)
 	p.transaction.Data = "changed after save"
 	p.response.Route.Legs[0].Pool = "changed after save"
@@ -369,7 +379,7 @@ type rejectedSimulation struct {
 	err error
 }
 
-func (s rejectedSimulation) SimulateAllocations(context.Context, *quotev1.UnsignedTransaction, []*quotev1.QuotedAllocation, map[string]string, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
+func (s rejectedSimulation) Simulate(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
 	return "", s.err
 }
 
@@ -404,7 +414,7 @@ func TestSimulationMessagesAreSafeAndNeverReturnTransactions(t *testing.T) {
 						r = &quotev1.PrepareExecutionRequest{PreparationId: ready.PreparationId}
 					}
 					wrapped := fmt.Errorf("https://secret.example X-Access-Key=secret body=secret: %w", test.err)
-					h.Simulator = rejectedSimulation{err: wrapped, simulationFake: func(context.Context, *quotev1.UnsignedTransaction, *quotev1.RouteQuote, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
+					h.Simulator = rejectedSimulation{err: wrapped, simulationFake: func(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
 						return "", wrapped
 					}}
 					got := prepare(t, h, r)
@@ -469,7 +479,7 @@ func TestPreparationStoreEvictsEarliestExpiry(t *testing.T) {
 	s := NewStore()
 	now := time.Now()
 	for i := range storeLimit + 1 {
-		s.savePreparation(preparation{response: &quotev1.PrepareExecutionResponse{PreparationId: strconv.Itoa(i)}, transaction: &quotev1.UnsignedTransaction{Data: "0xab"}, expires: now.Add(retention + time.Duration(i)*time.Second)})
+		s.savePreparation(preparation{response: &quotev1.PrepareExecutionResponse{PreparationId: strconv.Itoa(i)}, executionPlan: executionPlan{transaction: &quotev1.UnsignedTransaction{Data: "0xab"}}, expires: now.Add(retention + time.Duration(i)*time.Second)})
 	}
 	if len(s.preparations) != storeLimit {
 		t.Fatal("preparation limit changed")

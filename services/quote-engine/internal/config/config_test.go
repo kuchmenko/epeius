@@ -32,7 +32,7 @@ func loadText(t *testing.T, text string) (Config, error) {
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return Load(path)
+	return Load(path, ValidateV3Chain)
 }
 
 func TestLoadValidConfig(t *testing.T) {
