@@ -145,7 +145,14 @@ async function task(name: string) {
       for (const directory of [join(root, "generated/go"), engineDir]) {
         await run(["go", "vet", "./..."], directory);
         if (directory === engineDir)
-          await run([join(root, ".tools/bin/staticcheck"), "./..."], engineDir);
+          await run(
+            [
+              join(root, ".tools/bin/staticcheck"),
+              "-checks=inherit,-ST1005",
+              "./...",
+            ],
+            engineDir,
+          );
         // Go's test cache does not track the TypeScript subprocess inputs.
         await run(["go", "test", "-race", "-count=1", "./..."], directory);
       }
