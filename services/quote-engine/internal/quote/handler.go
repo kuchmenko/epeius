@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,7 +58,10 @@ type Chain struct {
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)
-var address = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
+
+func validAddress(value string) bool {
+	return strings.HasPrefix(value, "0x") && common.IsHexAddress(value)
+}
 
 func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.QuoteRequest]) (*connect.Response[quotev1.QuoteFinal], error) {
 	if h.QuoteConcurrency < 1 {
@@ -81,7 +85,7 @@ func (h Handler) GetQuote(ctx context.Context, req *connect.Request[quotev1.Quot
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no quoting deployments configured"))
 	}
 	for _, value := range []string{r.TokenIn, r.TokenOut} {
-		if !address.MatchString(value) {
+		if !validAddress(value) {
 			return invalid("addresses must be 20-byte hex strings")
 		}
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
@@ -95,12 +96,12 @@ func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 	}
 	balances := append([]BalanceProbe{checks.Input, checks.Output}, checks.Preserve...)
 	for _, probe := range balances {
-		if !address.MatchString(probe.Token) || !address.MatchString(probe.Owner) {
+		if !validAddress(probe.Token) || !validAddress(probe.Owner) {
 			return "", fail
 		}
 	}
 	for _, probe := range checks.ClearAllowances {
-		if !address.MatchString(probe.Token) || !address.MatchString(probe.Owner) || !address.MatchString(probe.Spender) {
+		if !validAddress(probe.Token) || !validAddress(probe.Owner) || !validAddress(probe.Spender) {
 			return "", fail
 		}
 	}
@@ -198,10 +199,18 @@ func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 		}
 		if i != len(probes) {
 			raw, err := hexutil.Decode(trace.Output)
-			if err != nil || len(raw) != 32 {
+			if err != nil {
 				return "", errSimulationEvidence
 			}
-			values[i] = new(big.Int).SetBytes(raw)
+			method := erc20ABI.Methods["balanceOf"]
+			if i > 2*len(probes) {
+				method = erc20ABI.Methods["allowance"]
+			}
+			decoded, err := evm.Unpack(method, raw)
+			if err != nil {
+				return "", errSimulationEvidence
+			}
+			values[i] = decoded[0].(*big.Int)
 		}
 	}
 	after := len(probes) + 1

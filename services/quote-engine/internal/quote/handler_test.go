@@ -265,6 +265,8 @@ func TestHandlerValidationBoundaries(t *testing.T) {
 		{"unknown chain", func(r *quotev1.QuoteRequest) { r.Chain = "unknown" }, connect.CodeInvalidArgument},
 		{"chain ID mismatch", func(r *quotev1.QuoteRequest) { r.ChainId = "1" }, connect.CodeInvalidArgument},
 		{"bad address", func(r *quotev1.QuoteRequest) { r.TokenIn = "0x1234" }, connect.CodeInvalidArgument},
+		{"missing address prefix", func(r *quotev1.QuoteRequest) { r.TokenIn = r.TokenIn[2:] }, connect.CodeInvalidArgument},
+		{"uppercase address prefix", func(r *quotev1.QuoteRequest) { r.TokenIn = "0X" + r.TokenIn[2:] }, connect.CodeInvalidArgument},
 		{"unsupported pair", func(r *quotev1.QuoteRequest) { r.TokenOut = r.TokenIn }, connect.CodeInvalidArgument},
 		{"zero amount", func(r *quotev1.QuoteRequest) { r.AmountInAtomic = "0" }, connect.CodeInvalidArgument},
 		{"signed amount", func(r *quotev1.QuoteRequest) { r.AmountInAtomic = "+1" }, connect.CodeInvalidArgument},

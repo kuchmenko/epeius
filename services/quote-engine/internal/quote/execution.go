@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -37,7 +38,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		if r.QuoteId != "" || r.RouteId != "" || r.Sender != "" || r.SlippageBps != 0 || len(r.Allocations) != 0 {
 			return invalid()
 		}
-	} else if r.QuoteId == "" || (r.RouteId == "") == (len(r.Allocations) == 0) || len(r.Allocations) > 2 || !address.MatchString(r.Sender) || common.HexToAddress(r.Sender) == (common.Address{}) || r.SlippageBps >= 10000 {
+	} else if r.QuoteId == "" || (r.RouteId == "") == (len(r.Allocations) == 0) || len(r.Allocations) > 2 || !validAddress(r.Sender) || common.HexToAddress(r.Sender) == (common.Address{}) || r.SlippageBps >= 10000 {
 		return invalid()
 	}
 	if h.Store == nil {
@@ -107,17 +108,22 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 	minimum, _ := new(big.Int).SetString(response.AmountOutMinimumAtomic, 10)
 	allowanceData, _ := erc20ABI.Pack("allowance", common.HexToAddress(response.Recipient), common.HexToAddress(p.spender))
 	allowanceBytes, err := reader.Call(ctx, common.HexToAddress(response.TokenIn), allowanceData, common.HexToHash(snapshot.BlockHash))
-	if err != nil || len(allowanceBytes) != 32 {
+	if err != nil {
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "allowance check failed")
 	}
+	values, err := evm.Unpack(erc20ABI.Methods["allowance"], allowanceBytes)
+	if err != nil {
+		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "allowance check failed")
+	}
+	allowance := values[0].(*big.Int)
 	if !recheck {
 		var exists bool
-		p.approval, exists = h.Store.markApproval(r.QuoteId, response.Recipient+p.spender, new(big.Int).SetBytes(allowanceBytes).Cmp(amount) < 0, time.Now())
+		p.approval, exists = h.Store.markApproval(r.QuoteId, response.Recipient+p.spender, allowance.Cmp(amount) < 0, time.Now())
 		if !exists || !time.Now().Before(saved.expires) {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote expired or unavailable during preparation; request a fresh quote")
 		}
 	}
-	if new(big.Int).SetBytes(allowanceBytes).Cmp(amount) < 0 {
+	if allowance.Cmp(amount) < 0 {
 		if recheck && !p.approval {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Approval state changed; request a fresh quote.")
 		}

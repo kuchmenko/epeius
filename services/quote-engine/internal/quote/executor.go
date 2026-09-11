@@ -199,7 +199,7 @@ func admitAllocations(chain Chain, saved storedQuote, requested []*quotev1.Route
 				return nil, errExecutorRoute
 			}
 			fee, ok := leg.Selector.(*quotev1.RouteLeg_FeePips)
-			if !ok || fee.FeePips >= 1000000 || !address.MatchString(leg.TokenIn) || !address.MatchString(leg.TokenOut) || !strings.EqualFold(input, leg.TokenIn) {
+			if !ok || fee.FeePips >= 1000000 || !validAddress(leg.TokenIn) || !validAddress(leg.TokenOut) || !strings.EqualFold(input, leg.TokenIn) {
 				return nil, errExecutorRoute
 			}
 			input = leg.TokenOut

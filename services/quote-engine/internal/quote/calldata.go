@@ -23,7 +23,7 @@ func v3Path(route *quotev1.RouteQuote) ([]byte, error) {
 	var path []byte
 	for i, leg := range route.Legs {
 		fee, ok := leg.Selector.(*quotev1.RouteLeg_FeePips)
-		if !ok || fee.FeePips >= 1000000 || !address.MatchString(leg.TokenIn) || !address.MatchString(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
+		if !ok || fee.FeePips >= 1000000 || !validAddress(leg.TokenIn) || !validAddress(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
 			return nil, errors.New("invalid path")
 		}
 		path = append(path, common.HexToAddress(leg.TokenIn).Bytes()...)
