@@ -2,15 +2,16 @@ import { createInterface } from "node:readline/promises";
 import { toJsonString } from "@bufbuild/protobuf";
 import {
   PreparationStatus,
-  PrepareExecutionResponseSchema,
   type RouteQuote,
   RouteQuoteSchema,
+  type Token,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { readChain } from "./chain";
 import type { quoteClient } from "./client";
 import { readExecutionConfig } from "./config";
 import { executePrepared } from "./execution";
 import { uint256Decimal } from "./execution-policy";
+import { formatPreparation } from "./format";
 import { castWallet } from "./wallet-cast";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -53,6 +54,7 @@ export async function executionCommand(
   remoteChainId: string,
   client: ReturnType<typeof quoteClient>,
   signal: AbortSignal,
+  tokens: Token[],
   trade?: {
     route: RouteQuote;
     amountInAtomic: string;
@@ -160,7 +162,11 @@ export async function executionCommand(
       },
       confirm: async (kind, p) => {
         console.error(
-          `${kind === "approval" ? "APPROVAL ONLY — fresh quote required afterward" : "SWAP"}\n${toJsonString(PrepareExecutionResponseSchema, p, { prettySpaces: 2 })}`,
+          formatPreparation(p, {
+            key: chain,
+            chainId: expectedChainId,
+            tokens,
+          }),
         );
         if (!trade?.afterApproval && values[`confirm-${kind}`] === "yes")
           return true;

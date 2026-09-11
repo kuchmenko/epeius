@@ -49,6 +49,8 @@ function prepared() {
     deadlineUnix: "4102444800",
     amountInAtomic: "101",
     amountOutMinimumAtomic: "197",
+    simulatedAmountOutAtomic: "199",
+    simulationBlock: { number: "124", hash: `0x${"b".repeat(64)}` },
     tokenIn: input,
     tokenOut: output,
     recipient: sender,
@@ -800,11 +802,15 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   const blockRequests: unknown[] = [];
   const requests: unknown[] = [];
   const preparationTimeouts: Array<string | null> = [];
+  const trace: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       const path = new URL(request.url).pathname;
+      trace.push(
+        path.includes("QuoteService") ? (path.split("/").at(-1) ?? "") : "rpc",
+      );
       if (path.endsWith("/GetStatus"))
         return new Response(
           toBinary(
@@ -887,6 +893,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         method: string;
         params: unknown[];
       };
+      trace.push(body.method);
       if (body.method === "eth_getBlockByNumber") {
         blockRequests.push(body.params);
         return Response.json({
@@ -924,24 +931,38 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     `[terminal]\ndefault_chain='testnet'\nengine_url='${server.url}'\nsearch_budget_ms=2000\n[chains.testnet]\nchain_id=${expectedChainId}\nexecution_enabled=true\nrpc_url_env='EPEIUS_FIXTURE_RPC'\n[[chains.testnet.tokens]]\naddress='${input.slice(2)}'\nsymbol='IN'\ndecimals=18\n[[chains.testnet.tokens]]\naddress='${middle.slice(2)}'\nsymbol='MID'\ndecimals=6\n[[chains.testnet.tokens]]\naddress='${output.slice(2)}'\nsymbol='OUT'\ndecimals=8\n[chains.testnet.deployments.uni]\nkind='uniswap-v3'\nrouter='${router.slice(2)}'\nfees=[500,3000]\n`,
   );
   const rpc = `${server.url}secret-api-key`;
-  const run = async (args: string[], rpcOverride = rpc) => {
+  const run = async (
+    args: string[],
+    rpcOverride = rpc,
+    confirmation?: "approval" | "swap",
+  ) => {
+    trace.length = 0;
+    const command = [
+      process.execPath,
+      "apps/terminal/src/main.ts",
+      ...args,
+      "--config",
+      config,
+      ...(args[0] === "trade"
+        ? ["--in", "IN", "--out", "OUT", "--amount-atomic", "101"]
+        : args.includes("--allocations")
+          ? ["--quote-id", "q1"]
+          : ["--quote-id", "q1", "--route-id", "r1"]),
+      "--keystore",
+      "/fixture/keystore",
+      "--password-file",
+      "/fixture/password",
+    ];
+    const stdoutPath = join(directory, "tty.stdout.jsonl");
     const child = Bun.spawn(
-      [
-        process.execPath,
-        "apps/terminal/src/main.ts",
-        ...args,
-        "--config",
-        config,
-        ...(args[0] === "trade"
-          ? ["--in", "IN", "--out", "OUT", "--amount-atomic", "101"]
-          : args.includes("--allocations")
-            ? ["--quote-id", "q1"]
-            : ["--quote-id", "q1", "--route-id", "r1"]),
-        "--keystore",
-        "/fixture/keystore",
-        "--password-file",
-        "/fixture/password",
-      ],
+      confirmation
+        ? [
+            "script",
+            "-qefc",
+            `${command.map((arg) => `'${arg.replaceAll("'", "'\\''")}'`).join(" ")} > '${stdoutPath}'`,
+            "/dev/null",
+          ]
+        : command,
       {
         cwd: join(import.meta.dir, "../../.."),
         env: {
@@ -950,17 +971,39 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
           EPEIUS_FIXTURE_RPC: rpcOverride,
           ETH_PRIVATE_KEY: "must-not-reach-cast",
         },
-        stdin: "ignore",
+        stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
       },
     );
+    if (!confirmation) child.stdin.end();
+    let answered = false;
     const [out, err, code] = await Promise.all([
-      new Response(child.stdout).text(),
+      (async () => {
+        let output = "";
+        const decoder = new TextDecoder();
+        for await (const chunk of child.stdout) {
+          const text = decoder.decode(chunk, { stream: true });
+          output += text;
+          trace.push(`stdout:${text.trimEnd()}`);
+          if (
+            confirmation &&
+            !answered &&
+            output.includes("to sign and send this transaction:")
+          ) {
+            answered = true;
+            child.stdin.write(`${confirmation}\n`);
+            child.stdin.end();
+          }
+        }
+        return output + decoder.decode();
+      })(),
       new Response(child.stderr).text(),
       child.exited,
     ]);
-    return { out, err, code };
+    return confirmation
+      ? { out: await Bun.file(stdoutPath).text(), err: out + err, code }
+      : { out, err, code };
   };
   const calls = async () =>
     (await Bun.file(callsPath).text())
@@ -974,6 +1017,19 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
             privateKey?: string;
           },
       );
+  const capture = async (
+    name: string,
+    result: { out: string; err: string; code: number },
+  ) => {
+    const destination = process.env.EPEIUS_TERMINAL_CAPTURE_DIR;
+    if (!destination) return;
+    await Bun.write(join(destination, `${name}.stdout.jsonl`), result.out);
+    await Bun.write(join(destination, `${name}.stderr.txt`), result.err);
+    await Bun.write(
+      join(destination, `${name}.trace.json`),
+      JSON.stringify({ exitCode: result.code, trace }, null, 2),
+    );
+  };
   try {
     const slowPreview = await run(["prepare"]);
     expect(slowPreview.code).toBe(0);
@@ -993,7 +1049,9 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect((await run(["prepare", "--slippage-bps", "10000"])).err).toContain(
       "0 through 9999",
     );
-    expect((await run(["execute"])).out).toContain('"canceled"');
+    const nonTTY = await run(["execute"]);
+    expect(nonTTY.out).toBe('{"sent":false,"outcome":"canceled"}\n');
+    await capture("non-tty", nonTTY);
     expect((await run(["execute", "--confirm-approval", "yes"])).out).toContain(
       '"canceled"',
     );
@@ -1001,8 +1059,12 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
       (await calls()).filter((call) => call.args[0] === "send"),
     ).toHaveLength(0);
     const success = await run(["execute", "--confirm-swap", "yes"]);
+    await capture("swap", success);
     expect(success.code).toBe(0);
-    expect(success.out).toContain('"outcome":"passed"');
+    expect(success.out).toBe(
+      `{"transactionHash":"${hash}","submission":"submitted","kind":"swap","verification":{"outcome":"pending"}}\n` +
+        `{"transactionHash":"${hash}","verification":{"outcome":"passed","inputSpentAtomic":"101","outputReceivedAtomic":"199","routerIntermediateDeltas":{"${middle}":"0"},"reason":"Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted."}}\n`,
+    );
     expect(receiptReads).toBe(3);
     expect(blockRequests).toEqual([["0x123", false]]);
     const send = (await calls()).filter((call) => call.args[0] === "send");
@@ -1049,6 +1111,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     });
     canonicalMismatch = true;
     const mismatch = await run(["execute", "--confirm-swap", "yes"]);
+    await capture("unknown", mismatch);
     expect(mismatch.code).toBe(1);
     expect(mismatch.out).not.toContain('"outcome":"passed"');
     expect(mismatch.out).toContain('"submission":"pending_or_unknown"');
@@ -1114,6 +1177,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     quoteCount = 0;
     tradeApproval = true;
     const approved = await run(["trade", "--confirm-approval", "yes"]);
+    await capture("approval", approved);
     expect(approved.code).toBe(1);
     expect(quoteCount).toBe(2);
     const approvalEvents = approved.out
@@ -1186,6 +1250,10 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         ["trade"],
       ]) {
         const blocked = await run([...args, "--confirm-swap", "yes"]);
+        await capture(
+          status === PreparationStatus.REJECTED ? "rejected" : "requote",
+          blocked,
+        );
         expect(blocked.code).toBe(1);
         expect(blocked.err).toContain(
           "quote block unavailable\\n\\u001b[2J\\u009b31m\\u202euntrusted",
@@ -1230,8 +1298,55 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
     expect(
       (await calls()).filter((call) => call.args[0] === "send"),
     ).toHaveLength(5);
+    // Two real configured venues and asymmetric allocations exercise the human split review.
+    p.allocations[0].amountInAtomic = "37";
+    assert(p.allocations[0].route);
+    p.allocations[0].route.amountOutAtomic = "79";
+    p.allocations.push(
+      create(QuotedAllocationSchema, {
+        amountInAtomic: "64",
+        route: {
+          ...p.allocations[0].route,
+          routeId: "pan-direct",
+          provider: "pancake-v3",
+          deploymentId: "pan",
+          amountOutAtomic: "119",
+          legs: [
+            {
+              ...p.allocations[0].route.legs[0],
+              tokenIn: input,
+              tokenOut: output,
+              pool,
+              selector: { case: "feePips", value: 0 },
+            },
+          ],
+        },
+      }),
+    );
+    p.transaction.data = expectedExecutorData(p);
+    const split = await run([
+      "execute",
+      "--allocations",
+      '[{"routeId":"r1","amountInAtomic":"37"},{"routeId":"pan-direct","amountInAtomic":"64"}]',
+      "--confirm-swap",
+      "yes",
+    ]);
+    expect(split.code).toBe(0);
+    expect(split.err).toContain("Allocation 2: pan-direct");
+    expect(split.err).toContain("(37 atomic)");
+    expect(split.err).toContain("(64 atomic)");
+    await capture("split", split);
+    p = prepared();
+    const interactive = await run(["execute"], rpc, "swap");
+    expect(interactive.code).toBe(0);
+    expect(interactive.err).toContain(
+      "Type swap to sign and send this transaction:",
+    );
+    expect(interactive.out).toContain('"outcome":"passed"');
+    expect(interactive.out).not.toContain("Type swap");
+    await capture("interactive-swap", interactive);
   } finally {
     await server.stop(true);
     await rm(directory, { recursive: true });
   }
-}, 15000);
+}, 20000);

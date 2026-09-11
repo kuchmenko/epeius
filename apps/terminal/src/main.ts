@@ -214,11 +214,11 @@ export async function main(rawArgs: string[]) {
           : config.engineUrl,
       );
       const status = await client.getStatus({}, { signal: abort.signal });
-      const chain = chainFromStatus(
+      let chain = chainFromStatus(
         status.chains,
         values.chain ?? config.defaultChain,
       );
-      trustChainTokens(chain, config.chains[chain.key]);
+      chain = trustChainTokens(chain, config.chains[chain.key]);
       if (!chain.executionEnabled || !chain.connected)
         throw new Error("Engine must enable execution on the connected chain.");
       return executionExitCode(
@@ -230,6 +230,7 @@ export async function main(rawArgs: string[]) {
           chain.chainId,
           client,
           abort.signal,
+          chain.tokens,
         ),
       );
     }
@@ -374,6 +375,7 @@ export async function main(rawArgs: string[]) {
                 chain.chainId,
                 client,
                 abort.signal,
+                chain.tokens,
                 {
                   route,
                   amountInAtomic,

@@ -1,7 +1,9 @@
-import type {
-  ChainStatus,
-  QuoteFinal,
-  Token,
+import {
+  type ChainStatus,
+  PreparationStatus,
+  type PrepareExecutionResponse,
+  type QuoteFinal,
+  type Token,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 
 export function formatAtomic(value: string, decimals: number) {
@@ -14,6 +16,103 @@ export function formatAtomic(value: string, decimals: number) {
 
 function amount(token: Token, atomic: string) {
   return `${formatAtomic(atomic, token.decimals)} ${token.symbol} (${atomic} atomic)`;
+}
+
+export function formatPreparation(
+  p: PrepareExecutionResponse,
+  chain: Pick<ChainStatus, "key" | "chainId" | "tokens">,
+) {
+  const text = (value: string) =>
+    JSON.stringify(value)
+      .slice(1, -1)
+      .replace(
+        /[\p{Cc}\p{Cf}]/gu,
+        (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      );
+  const token = (address: string) => {
+    const found = chain.tokens.find(
+      (item) => item.address.toLowerCase() === address.toLowerCase(),
+    );
+    if (!found) throw new Error("Preparation token metadata is unavailable.");
+    return found;
+  };
+  const amount = (address: string, atomic: string) => {
+    const metadata = token(address);
+    return `${text(formatAtomic(atomic, metadata.decimals))} ${text(metadata.symbol)} (${text(atomic)} atomic)`;
+  };
+  const identity = (address: string) =>
+    `${text(token(address).symbol)} ${address}`;
+  const timestamp = (unix: string) => {
+    const milliseconds = BigInt(unix) * 1000n;
+    // Date only represents this range; all displayed Unix values remain exact.
+    const utc =
+      milliseconds <= 8640000000000000n
+        ? new Date(Number(milliseconds)).toISOString()
+        : "outside UTC calendar range";
+    return `${utc} (Unix ${unix})`;
+  };
+  const approval = p.status === PreparationStatus.APPROVAL_REQUIRED;
+  const tx = approval ? p.approvalTransaction : p.transaction;
+  if (!tx) throw new Error("Preparation has no transaction to review.");
+  const lines = [
+    approval
+      ? "APPROVAL ONLY — fresh quote and separate swap consent required afterward"
+      : "SWAP",
+    `Chain: ${text(chain.key)} (${chain.chainId})`,
+    `Account: ${tx.from}`,
+    `Recipient: ${p.recipient}`,
+    `Transaction target: ${tx.to}`,
+    `Spender: ${approval ? p.approvalSpender : tx.to}`,
+    `Input token: ${identity(p.tokenIn)}`,
+    `Output token: ${identity(p.tokenOut)}`,
+    `Total input: ${amount(p.tokenIn, p.amountInAtomic)}`,
+    `${approval ? "Proposed swap minimum (not sent by this approval)" : "Minimum output"}: ${amount(p.tokenOut, p.amountOutMinimumAtomic)}`,
+  ];
+  const routes = p.allocations.length
+    ? p.allocations
+    : [{ route: p.route, amountInAtomic: p.amountInAtomic }];
+  for (const [index, allocation] of routes.entries()) {
+    const route = allocation.route;
+    if (!route) throw new Error("Preparation route is unavailable.");
+    lines.push(
+      "",
+      `${p.allocations.length ? `Allocation ${index + 1}` : "Route"}: ${text(route.routeId)}`,
+      `Deployment: ${text(route.deploymentId)} (${text(route.provider)})`,
+      `Input: ${amount(p.tokenIn, allocation.amountInAtomic)}`,
+      `Quoted output (estimate): ${amount(p.tokenOut, route.amountOutAtomic)}`,
+    );
+    for (const [i, leg] of route.legs.entries())
+      lines.push(
+        `Hop ${i + 1}: ${identity(leg.tokenIn)} to ${identity(leg.tokenOut)}`,
+        `  Pool: ${text(leg.pool)}; fee: ${leg.selector.value} pips`,
+      );
+    if (route.block)
+      lines.push(
+        `Quote block: ${text(route.block.number)} (${text(route.block.hash)})`,
+      );
+  }
+  lines.push(
+    "",
+    `Swap deadline: ${timestamp(p.deadlineUnix)}`,
+    `Preparation expires: ${timestamp(p.expiresAtUnix)}`,
+  );
+  lines.push(
+    p.simulationBlock
+      ? `Simulation block: ${text(p.simulationBlock.number)} (${text(p.simulationBlock.hash)})`
+      : "Simulation block: not provided",
+  );
+  if (p.simulatedAmountOutAtomic)
+    lines.push(
+      `Simulated output (estimate, not a receipt): ${amount(p.tokenOut, p.simulatedAmountOutAtomic)}`,
+    );
+  if (approval)
+    lines.push(
+      "This approval authorizes only the total input above. It does not send a swap.",
+    );
+  lines.push(
+    "Actual output is verified from canonical receipt token deltas after submission.",
+  );
+  return lines.join("\n");
 }
 
 export function formatStatus(chains: ChainStatus[]) {
