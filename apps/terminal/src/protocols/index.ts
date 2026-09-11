@@ -1,8 +1,8 @@
-import type { readExecutionConfig } from "./config";
-import type { TrustedExecution } from "./execution-policy";
-import { fixedExecutor } from "./executor";
-import { pancake } from "./pancake";
-import { uniswap } from "./uniswap";
+import type { readExecutionConfig } from "../config";
+import type { TrustedExecution } from "../execution-policy";
+import { fixedExecutor } from "./fixed-executor";
+import { pancake } from "./pancake-v3";
+import { uniswap } from "./uniswap-v3";
 
 export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
   tokens,

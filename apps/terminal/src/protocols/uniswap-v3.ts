@@ -1,7 +1,7 @@
 import { type Address, encodeFunctionData } from "viem";
-import { uniswapRouter02Abi } from "../../../generated/abi";
-import type { PrepareExecutionResponse } from "../../../generated/ts/epeius/quote/v1/quote_pb";
-import { uint256Decimal } from "./execution-policy";
+import { uniswapRouter02Abi } from "../../../../generated/abi";
+import type { PrepareExecutionResponse } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
+import { uint256Decimal } from "../execution-policy";
 import { admitV3Route, directV3Terms, v3Deployment, v3Path } from "./v3";
 
 export function uniswapData(p: PrepareExecutionResponse) {

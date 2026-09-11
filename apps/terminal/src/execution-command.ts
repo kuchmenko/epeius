@@ -10,9 +10,9 @@ import { readChain } from "./chain";
 import type { quoteClient } from "./client";
 import { readExecutionConfig } from "./config";
 import { executePrepared } from "./execution";
-import { configureChain } from "./execution-composition";
 import { uint256Decimal } from "./execution-policy";
 import { formatPreparation } from "./format";
+import { configureChain } from "./protocols";
 import { castWallet } from "./wallet-cast";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();

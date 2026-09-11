@@ -7,9 +7,9 @@ import {
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { executePrepared } from "./execution";
 import { parseAllocations } from "./execution-command";
-import { configureExecution } from "./execution-composition";
 import { validatePreparation } from "./execution-policy";
-import { expectedExecutorData } from "./executor";
+import { configureExecution } from "./protocols";
+import { expectedExecutorData } from "./protocols/fixed-executor";
 import { type Receipt, verifyReceipt } from "./receipt";
 
 const addr = (digit: string) => `0x${digit.repeat(40)}`;

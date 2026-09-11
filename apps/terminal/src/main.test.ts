@@ -15,8 +15,8 @@ import type {
   ExecutionResult,
   Verification,
 } from "./execution";
-import { configureChain } from "./execution-composition";
 import { executionExitCode } from "./main";
+import { configureChain } from "./protocols";
 import { decimalToAtomic, parseAtomic, resolveToken } from "./tokens";
 
 const token = (symbol: string, address: string, decimals: number) => ({

@@ -2,8 +2,8 @@ import { type Address, encodePacked, isAddress } from "viem";
 import type {
   PrepareExecutionResponse,
   RouteQuote,
-} from "../../../generated/ts/epeius/quote/v1/quote_pb";
-import { type SwapTerms, uint256Decimal } from "./execution-policy";
+} from "../../../../generated/ts/epeius/quote/v1/quote_pb";
+import { type SwapTerms, uint256Decimal } from "../execution-policy";
 
 export type V3Deployment = { kind: string; router: string; fees: number[] };
 

@@ -66,6 +66,7 @@ For execution review, run the CLI with local Connect/RPC fixtures and a stub Cas
 ```text
 epeius.toml                       Runtime settings and chain definitions
 apps/terminal/src/                CLI, config, formatting, signing, receipt checks
+  protocols/                     Protocol plans, shared V3 rules and composition
 services/quote-engine/
   cmd/epeius-engine/              Server and local chain inspection commands
   internal/config/                Strict TOML loading and validation
@@ -93,13 +94,13 @@ Go RPC uses go-ethereum with canonical hash-pinned EIP-1898 calls. ABI decoding 
 
 ## Terminal execution modules
 
-`main.ts` dispatches commands and maps typed results to the existing exit codes. `execution-command.ts` connects config, wallet, RPC, prompts, and JSONL output. `execution.ts` builds a validated plan once, then runs consent, immutable recheck, one send, and verification using supplied operations. `execution-policy.ts` owns common trust, amount, expiry and immutable-term checks. `uniswap.ts`, `pancake.ts` and `executor.ts` own their encoding, admission and presentation; `v3.ts` contains shared V3 path rules. `receipt.ts` proves the plan's explicit ERC20 delta obligations. `trade.ts` refreshes only after `approval-confirmed`; it does not infer approval success from an output callback.
+`main.ts` dispatches commands and maps typed results to the existing exit codes. `execution-command.ts` connects config, wallet, RPC, prompts, and JSONL output. `execution.ts` builds a validated plan once, then runs consent, immutable recheck, one send, and verification using supplied operations. `execution-policy.ts` owns common trust, amount, expiry and immutable-term checks. `protocols/uniswap-v3.ts`, `protocols/pancake-v3.ts` and `protocols/fixed-executor.ts` own their encoding, admission and presentation; `protocols/v3.ts` contains shared V3 path rules. `receipt.ts` proves the plan's explicit ERC20 delta obligations. `trade.ts` refreshes only after `approval-confirmed`; it does not infer approval success from an output callback.
 
 `ExecutionResult` distinguishes `preview`, `canceled`, `approval-confirmed`, `swap-verified`, `failed`, and `unknown`. Known submitted outcomes keep their transaction hash. Pre-send validation errors still reach the CLI error path. Preview and verified approval/swap map to exit 0; cancellation, failure, and unknown map to exit 1. A trade is complete only after a verified swap, not after approval. `ExecutionEvent` types the existing machine payloads without changing their wire fields.
 
 Runtime `ExecutionAction`, `VerificationOutcome` and `ExecutionOutcome` constants name the existing string values. Action-specific verification and exhaustive switches prevent a swap proof from becoming an approval result or a new outcome from silently falling through to failure. Wire tests keep literal expected JSONL values independent of these constants.
 
-`config.ts` owns TOML parsing; `readExecutionConfig` receives protocol configuration from explicit `execution-composition.ts` wiring. Protocol-specific selector descriptions come from the selected implementation, not a formatting switch. The alternate-plan test uses a different target and spender, a custom selector and explicit custody obligations without changing the common flow.
+`config.ts` owns TOML parsing; `readExecutionConfig` receives protocol configuration from explicit `protocols/index.ts` wiring. This directory groups concrete execution plans and their composition, while their consumer-owned interfaces remain in `execution-policy.ts`. Protocol-specific selector descriptions come from the selected implementation, not a formatting switch. The alternate-plan test uses a different target and spender, a custom selector and explicit custody obligations without changing the common flow.
 
 `wallet-cast.ts` owns credentials, account discovery, and Cast submission. `chain.ts` uses raw viem RPC requests and canonical receipt polling, with retries/batching disabled and a fresh 15-second abort covering headers and body. It does not delegate canonical acceptance to a convenience waiter. `format.ts` renders human review with checked token metadata. No wallet registry, generic plugin layer, JavaScript private keys, WalletConnect, or account-abstraction implementation is present.
 

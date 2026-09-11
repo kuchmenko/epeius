@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create } from "@bufbuild/protobuf";
 import { executePrepared } from "../apps/terminal/src/execution";
-import { configureExecution } from "../apps/terminal/src/execution-composition";
 import { executionExitCode } from "../apps/terminal/src/main";
-import { pancakeData } from "../apps/terminal/src/pancake";
+import { configureExecution } from "../apps/terminal/src/protocols";
+import { pancakeData } from "../apps/terminal/src/protocols/pancake-v3";
+import { uniswapData } from "../apps/terminal/src/protocols/uniswap-v3";
 import type { Receipt } from "../apps/terminal/src/receipt";
 import { runTrade, type TradeIO } from "../apps/terminal/src/trade";
-import { uniswapData } from "../apps/terminal/src/uniswap";
 import {
   BlockContextSchema,
   PreparationStatus,

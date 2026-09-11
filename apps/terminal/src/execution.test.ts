@@ -16,12 +16,12 @@ import {
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type ExecutionIO, executePrepared } from "./execution";
-import { configureExecution } from "./execution-composition";
 import { uint256Decimal, validatePreparation } from "./execution-policy";
-import { expectedExecutorData } from "./executor";
-import { pancakeData } from "./pancake";
+import { configureExecution } from "./protocols";
+import { expectedExecutorData } from "./protocols/fixed-executor";
+import { pancakeData } from "./protocols/pancake-v3";
+import { uniswapData } from "./protocols/uniswap-v3";
 import { type Receipt, verifyReceipt } from "./receipt";
-import { uniswapData } from "./uniswap";
 
 const expectedSwapData = (
   p: PrepareExecutionResponse,

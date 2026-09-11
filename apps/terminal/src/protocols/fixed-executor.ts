@@ -5,9 +5,9 @@ import {
   isHash,
   zeroAddress,
 } from "viem";
-import { executorAbi } from "../../../generated/abi";
-import type { PrepareExecutionResponse } from "../../../generated/ts/epeius/quote/v1/quote_pb";
-import { type SwapTerms, uint256Decimal } from "./execution-policy";
+import { executorAbi } from "../../../../generated/abi";
+import type { PrepareExecutionResponse } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
+import { type SwapTerms, uint256Decimal } from "../execution-policy";
 import { admitV3Route, type V3Deployment, v3Review } from "./v3";
 
 export function expectedExecutorData(p: PrepareExecutionResponse): string {
