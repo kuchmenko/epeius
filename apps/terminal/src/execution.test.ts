@@ -9,6 +9,7 @@ import {
   GetStatusResponseSchema,
   PreparationStatus,
   PrepareExecutionRequestSchema,
+  type PrepareExecutionResponse,
   PrepareExecutionResponseSchema,
   QuotedAllocationSchema,
   QuoteFinalSchema,
@@ -794,6 +795,7 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
   let quoteCount = 0;
   let tradeApproval = false;
   let alterTradeAmount = false;
+  let rejection: PrepareExecutionResponse | undefined;
   const blockHash = `0x${"b".repeat(64)}`;
   const blockRequests: unknown[] = [];
   const requests: unknown[] = [];
@@ -874,9 +876,12 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
         );
         if (requests.length === 1) await Bun.sleep(5200);
         if (alterTradeAmount) p.amountInAtomic = "102";
-        return new Response(toBinary(PrepareExecutionResponseSchema, p), {
-          headers: { "content-type": "application/proto" },
-        });
+        return new Response(
+          toBinary(PrepareExecutionResponseSchema, rejection ?? p),
+          {
+            headers: { "content-type": "application/proto" },
+          },
+        );
       }
       const body = (await request.json()) as {
         method: string;
@@ -1166,6 +1171,36 @@ console.log(args[0] === 'wallet' ? '${sender}' : '${hash}');
       "--allocations",
       '[{"routeId":"r1","amountInAtomic":"101"}]',
     ];
+    const executable = p;
+    for (const status of [
+      PreparationStatus.REJECTED,
+      PreparationStatus.REQUOTE_REQUIRED,
+    ]) {
+      rejection = create(PrepareExecutionResponseSchema, {
+        status,
+        message: "quote block unavailable\n\u001b[2J\u009b31m\u202euntrusted",
+      });
+      for (const args of [
+        ["execute", ...allocationArgs],
+        ["execute"],
+        ["trade"],
+      ]) {
+        const blocked = await run([...args, "--confirm-swap", "yes"]);
+        expect(blocked.code).toBe(1);
+        expect(blocked.err).toContain(
+          "quote block unavailable\\n\\u001b[2J\\u009b31m\\u202euntrusted",
+        );
+        expect(blocked.err).not.toContain("different allocations");
+        expect(blocked.err).not.toContain("selected quote");
+        expect(blocked.err).not.toContain("\u001b");
+      }
+    }
+    p = executable;
+    assert(p.transaction);
+    rejection = undefined;
+    expect(
+      (await calls()).filter((call) => call.args[0] === "send"),
+    ).toHaveLength(4);
     const executorPreview = await run(["prepare", ...allocationArgs]);
     expect(executorPreview.code).toBe(0);
     expect(executorPreview.out).toContain('"allocations"');

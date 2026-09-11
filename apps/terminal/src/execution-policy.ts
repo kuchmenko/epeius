@@ -258,7 +258,7 @@ export function validatePreparation(
     )
   )
     throw new Error(
-      "Preparation rejected, expired, or requires a fresh quote. Rerun quote.",
+      `Preparation rejected, expired, or requires a fresh quote. Rerun quote.${p.message ? ` Engine reason: ${JSON.stringify(p.message).replace(/[\p{Cc}\p{Cf}]/gu, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}` : ""}`,
     );
   const approval = p.status === PreparationStatus.APPROVAL_REQUIRED;
   const tx = approval ? p.approvalTransaction : p.transaction;

@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline/promises";
 import { toJsonString } from "@bufbuild/protobuf";
 import {
+  PreparationStatus,
   PrepareExecutionResponseSchema,
   type RouteQuote,
   RouteQuoteSchema,
@@ -122,6 +123,14 @@ export async function executionCommand(
               },
           { signal, timeoutMs: 25000 },
         );
+        // Rejections have no executable terms. Status validation reports the reason.
+        if (
+          ![
+            PreparationStatus.READY,
+            PreparationStatus.APPROVAL_REQUIRED,
+          ].includes(response.status)
+        )
+          return response;
         if (response.route && response.route.routeId !== values["route-id"])
           throw new Error("Engine returned a different route. Nothing sent.");
         if (
