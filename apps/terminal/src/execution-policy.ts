@@ -1,52 +1,48 @@
 import { toJsonString } from "@bufbuild/protobuf";
 import {
   type Address,
-  decodeEventLog,
-  encodeAbiParameters,
-  encodeEventTopics,
   encodeFunctionData,
-  encodePacked,
   erc20Abi,
-  type Hex,
   isAddress,
-  isHash,
   isHex,
   maxUint256,
   size,
 } from "viem";
 import {
-  executorAbi as executorABI,
-  pancakeV3RouterAbi as pancakeABI,
-  uniswapRouter02Abi as uniswapABI,
-} from "../../../generated/abi";
-import {
   PreparationStatus,
   type PrepareExecutionResponse,
   PrepareExecutionResponseSchema,
+  type UnsignedTransaction,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import type { ReceiptObligations } from "./receipt";
 
-const address = {
-  test: (value: string) => isAddress(value, { strict: false }),
+export type SwapTerms = {
+  target: string;
+  spender: string;
+  data: string;
+  quotedOutput: string;
+  routeDetails: string[][];
+  receipt: Pick<ReceiptObligations, "intermediate" | "touched">;
 };
-const hashPattern = {
-  test: (value: string) => value.length === 66 && isHash(value),
+
+export type ExecutionImplementation = {
+  plan: (prepared: PrepareExecutionResponse, tokens: string[]) => SwapTerms;
 };
-const transfer = encodeEventTopics({ abi: erc20Abi, eventName: "Transfer" })[0];
-const uint256MaxDecimal = maxUint256.toString();
-const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 export type TrustedExecution = {
   tokens: string[];
-  executor?: {
-    address: string;
-    uniswapDeployment: string;
-    pancakeDeployment: string;
-  };
-  deployments: Record<
-    string,
-    { kind: "uniswap-v3" | "pancake-v3"; router: string; fees: number[] }
-  >;
+  deployments: Record<string, ExecutionImplementation>;
+  executor?: ExecutionImplementation;
 };
+
+export type ExecutionPlan = {
+  transaction: UnsignedTransaction;
+  spender: string;
+  routeDetails: string[][];
+} & ({ action: "approval" } | { action: "swap"; receipt: ReceiptObligations });
+
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const uint256MaxDecimal = maxUint256.toString();
 
 export const uint256Decimal = (value: string, label: string) => {
   const normalized = value.replace(/^0+(?=\d)/, "");
@@ -59,210 +55,6 @@ export const uint256Decimal = (value: string, label: string) => {
     throw new Error(`${label} must fit uint256.`);
   return BigInt(normalized);
 };
-
-export function expectedSwapData(
-  p: PrepareExecutionResponse,
-  kind: "uniswap-v3" | "pancake-v3",
-): string {
-  if (!p.route) throw new Error("Invalid route terms.");
-  if (p.route.legs.some((leg) => leg.selector.case !== "feePips"))
-    throw new Error("Invalid route terms.");
-  const path = encodePacked(
-    [...p.route.legs.flatMap(() => ["address", "uint24"]), "address"],
-    [
-      ...p.route.legs.flatMap((leg) => [leg.tokenIn, leg.selector.value]),
-      p.route.legs.at(-1)?.tokenOut as Address,
-    ],
-  );
-  const params = {
-    path,
-    recipient: p.recipient.toLowerCase() as Address,
-    amountIn: uint256Decimal(p.amountInAtomic, "Input amount"),
-    amountOutMinimum: uint256Decimal(
-      p.amountOutMinimumAtomic,
-      "Minimum output amount",
-    ),
-  };
-  const deadline = uint256Decimal(p.deadlineUnix, "Deadline");
-  if (kind === "pancake-v3")
-    return encodeFunctionData({
-      abi: pancakeABI,
-      functionName: "exactInput",
-      args: [{ ...params, deadline }],
-    });
-  const inner = encodeFunctionData({
-    abi: uniswapABI,
-    functionName: "exactInput",
-    args: [params],
-  });
-  return encodeFunctionData({
-    abi: uniswapABI,
-    functionName: "multicall",
-    args: [deadline, [inner]],
-  });
-}
-
-export function expectedExecutorData(p: PrepareExecutionResponse): string {
-  const allocations = p.allocations.map((allocation) => {
-    if (!allocation.route) throw new Error("Missing allocation route.");
-    const route = allocation.route;
-    return {
-      venue: route.provider === "uniswap-v3" ? 0 : 1,
-      amountIn: uint256Decimal(allocation.amountInAtomic, "Allocation input"),
-      hops: route.legs.map((leg) => ({
-        tokenOut: leg.tokenOut.toLowerCase() as Address,
-        fee: leg.selector.value ?? 0,
-      })),
-    };
-  });
-  return encodeFunctionData({
-    abi: executorABI,
-    functionName: "execute",
-    args: [
-      p.tokenIn.toLowerCase() as Address,
-      p.tokenOut.toLowerCase() as Address,
-      uint256Decimal(p.amountInAtomic, "Input amount"),
-      uint256Decimal(p.amountOutMinimumAtomic, "Minimum output amount"),
-      uint256Decimal(p.deadlineUnix, "Deadline"),
-      allocations,
-    ],
-  });
-}
-
-export type Receipt = {
-  transactionHash: string;
-  status: string;
-  blockHash?: string | null;
-  blockNumber?: string | null;
-  logs: Array<{
-    address: string;
-    topics: string[];
-    data: string;
-    transactionHash: string;
-    removed?: boolean;
-  }>;
-};
-
-export function verifyReceipt(
-  receipt: Receipt,
-  hash: string,
-  prepared: PrepareExecutionResponse,
-  trusted?: TrustedExecution,
-) {
-  if (!same(receipt.transactionHash, hash))
-    return {
-      outcome: "unavailable",
-      reason: "Receipt transaction hash mismatch.",
-    };
-  if (receipt.status !== "0x1")
-    return {
-      outcome: "failed",
-      reason: "Transaction reverted or receipt status is not successful.",
-    };
-  try {
-    const deltas = new Map<string, bigint>();
-    for (const log of receipt.logs) {
-      if (!same(log.transactionHash, hash) || log.removed)
-        throw new Error("Invalid receipt log identity.");
-      if (!same(log.topics[0] ?? "", transfer)) continue;
-      if (!address.test(log.address))
-        throw new Error("Nonstandard Transfer log.");
-      const { args } = decodeEventLog({
-        abi: erc20Abi,
-        eventName: "Transfer",
-        strict: true,
-        topics: log.topics as [Hex, ...Hex[]],
-        data: log.data as Hex,
-      });
-      const topics = encodeEventTopics({
-        abi: erc20Abi,
-        eventName: "Transfer",
-        args: { from: args.from, to: args.to },
-      });
-      const data = encodeAbiParameters([{ type: "uint256" }], [args.value]);
-      // SDK decoding alone accepts extra words and nonzero address padding.
-      if (
-        topics.length !== log.topics.length ||
-        topics.some((topic, i) => !same(String(topic), log.topics[i])) ||
-        !same(data, log.data)
-      )
-        throw new Error("Nonstandard Transfer log.");
-      const value = args.value;
-      for (const [owner, sign] of [
-        [args.from, -1n],
-        [args.to, 1n],
-      ] as const) {
-        const key = `${log.address.toLowerCase()}:${owner.toLowerCase()}`;
-        deltas.set(key, (deltas.get(key) ?? 0n) + sign * value);
-      }
-    }
-    const delta = (token: string, owner: string) =>
-      deltas.get(`${token.toLowerCase()}:${owner.toLowerCase()}`) ?? 0n;
-    const input = -delta(prepared.tokenIn, prepared.recipient);
-    const output = delta(prepared.tokenOut, prepared.recipient);
-    const router = prepared.transaction?.to;
-    const routes = prepared.allocations.length
-      ? prepared.allocations.map((a) => a.route)
-      : [prepared.route];
-    if (!router || routes.some((route) => !route?.legs.length))
-      throw new Error("Route evidence missing.");
-    const intermediates = [
-      ...new Set(
-        routes.flatMap(
-          (route) => route?.legs.slice(0, -1).map((leg) => leg.tokenOut) ?? [],
-        ),
-      ),
-    ];
-    const balances: Record<string, string> = {};
-    if (prepared.allocations.length) {
-      for (const route of routes) {
-        const venueRouter =
-          route && trusted?.deployments[route.deploymentId]?.router;
-        if (!route || !venueRouter)
-          throw new Error("Configured router evidence missing.");
-        for (const token of [
-          route.legs[0].tokenIn,
-          ...route.legs.map((leg) => leg.tokenOut),
-        ]) {
-          for (const owner of [router, venueRouter, prepared.recipient]) {
-            if (
-              same(owner, prepared.recipient) &&
-              (same(token, prepared.tokenIn) || same(token, prepared.tokenOut))
-            )
-              continue;
-            balances[`${token}:${owner}`] = delta(token, owner).toString();
-          }
-        }
-      }
-    }
-    const residue =
-      intermediates.some((token) => delta(token, router) !== 0n) ||
-      Object.values(balances).some((value) => value !== "0");
-    return {
-      outcome:
-        input === BigInt(prepared.amountInAtomic) &&
-        output >= BigInt(prepared.amountOutMinimumAtomic) &&
-        !residue
-          ? "passed"
-          : "failed",
-      inputSpentAtomic: input.toString(),
-      outputReceivedAtomic: output.toString(),
-      routerIntermediateDeltas: Object.fromEntries(
-        intermediates.map((token) => [token, delta(token, router).toString()]),
-      ),
-      ...(prepared.allocations.length
-        ? { touchedTokenOwnerDeltas: balances }
-        : {}),
-      reason:
-        "Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted.",
-    };
-  } catch {
-    return {
-      outcome: "unavailable",
-      reason: "Receipt cannot establish standard ERC20 transfer invariants.",
-    };
-  }
-}
 
 export function assertPreparationUnchanged(
   prepared: PrepareExecutionResponse,
@@ -286,16 +78,10 @@ export function assertPreparationUnchanged(
     );
 }
 
-export function validatePreparation(
+export function assertPreparationCurrent(
   p: PrepareExecutionResponse,
-  signer: string,
-  expectedChainId: string,
-  slippageBps: number,
-  trusted: TrustedExecution,
   now = Math.floor(Date.now() / 1000),
 ) {
-  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 9999)
-    throw new Error("Requested slippage must be 0 through 9999 bps.");
   if (
     ![PreparationStatus.READY, PreparationStatus.APPROVAL_REQUIRED].includes(
       p.status,
@@ -304,12 +90,32 @@ export function validatePreparation(
     throw new Error(
       `Preparation rejected, expired, or requires a fresh quote. Rerun quote.${p.message ? ` Engine reason: ${JSON.stringify(p.message).replace(/[\p{Cc}\p{Cf}]/gu, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}` : ""}`,
     );
+  const deadline = uint256Decimal(p.deadlineUnix, "Deadline");
+  if (
+    !/^[0-9]+$/.test(p.expiresAtUnix) ||
+    BigInt(p.expiresAtUnix) <= BigInt(now) ||
+    deadline <= BigInt(now)
+  )
+    throw new Error("Preparation expired. Rerun quote.");
+}
+
+export function validatePreparation(
+  p: PrepareExecutionResponse,
+  signer: string,
+  expectedChainId: string,
+  slippageBps: number,
+  trusted: TrustedExecution,
+  now = Math.floor(Date.now() / 1000),
+): ExecutionPlan {
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 9999)
+    throw new Error("Requested slippage must be 0 through 9999 bps.");
+  assertPreparationCurrent(p, now);
   const approval = p.status === PreparationStatus.APPROVAL_REQUIRED;
   const tx = approval ? p.approvalTransaction : p.transaction;
   if (
     !tx ||
     !p.preparationId ||
-    !address.test(signer) ||
+    !isAddress(signer, { strict: false }) ||
     !same(p.recipient, signer) ||
     !same(tx.from, signer)
   )
@@ -319,7 +125,7 @@ export function validatePreparation(
       `Prepared transaction chain ID must match configured chain ID ${expectedChainId}.`,
     );
   if (
-    !address.test(tx.to) ||
+    !isAddress(tx.to, { strict: false }) ||
     !isHex(tx.data, { strict: true }) ||
     tx.data.length % 2 !== 0 ||
     size(tx.data) === 0 ||
@@ -327,132 +133,48 @@ export function validatePreparation(
     !/^[1-9][0-9]*$/.test(tx.gasLimit)
   )
     throw new Error("Invalid ERC20 transaction terms.");
-  const deadline = uint256Decimal(p.deadlineUnix, "Deadline");
-  if (
-    !/^[0-9]+$/.test(p.expiresAtUnix) ||
-    BigInt(p.expiresAtUnix) <= BigInt(now) ||
-    deadline <= BigInt(now)
-  )
-    throw new Error("Preparation expired. Rerun quote.");
   const amountIn = uint256Decimal(p.amountInAtomic, "Input amount");
   const minimum = uint256Decimal(
     p.amountOutMinimumAtomic,
     "Minimum output amount",
   );
   if (
-    !address.test(p.tokenIn) ||
-    !address.test(p.tokenOut) ||
+    !isAddress(p.tokenIn, { strict: false }) ||
+    !isAddress(p.tokenOut, { strict: false }) ||
     same(p.tokenIn, p.tokenOut) ||
     !/^[1-9][0-9]*$/.test(p.amountInAtomic) ||
-    !/^[1-9][0-9]*$/.test(p.amountOutMinimumAtomic)
+    !/^[1-9][0-9]*$/.test(p.amountOutMinimumAtomic) ||
+    ![p.tokenIn, p.tokenOut].every((token) =>
+      trusted.tokens.some((configured) => same(token, configured)),
+    )
   )
     throw new Error("Invalid swap amount or token terms.");
-  const executor = p.allocations.length > 0;
-  if (executor === !!p.route || p.allocations.length > 2)
+  const allocated = p.allocations.length > 0;
+  if (allocated === !!p.route || p.allocations.length > 2)
     throw new Error("Provide either a direct route or executor allocations.");
-  const routes = executor ? p.allocations.map((a) => a.route) : [p.route];
-  if (routes.some((route) => !route)) throw new Error("Missing route terms.");
-  let quotedOutput = 0n;
-  const configuredTokens = new Set(
-    trusted.tokens.map((token) => token.toLowerCase()),
-  );
-  const venues = new Set<string>();
-  for (const route of routes) {
-    if (!route) throw new Error("Missing route terms.");
-    const output = uint256Decimal(route.amountOutAtomic, "Route quoted output");
-    if (output <= 0n) throw new Error("Route quoted output must be positive.");
-    quotedOutput += output;
-    if (
-      !route.legs.length ||
-      route.legs.length > 2 ||
-      !same(route.legs[0].tokenIn, p.tokenIn) ||
-      !same(route.legs[route.legs.length - 1].tokenOut, p.tokenOut) ||
-      (route.legs.length === 2 &&
-        !same(route.legs[0].tokenOut, route.legs[1].tokenIn))
-    )
-      throw new Error("Invalid route terms.");
-    const deployment = trusted.deployments[route.deploymentId];
-    if (
-      !deployment ||
-      route.provider !== deployment.kind ||
-      !address.test(deployment.router) ||
-      !route.legs.every(
-        (leg) =>
-          leg.selector.case === "feePips" &&
-          Number.isInteger(leg.selector.value) &&
-          leg.selector.value >= 0 &&
-          leg.selector.value < 1_000_000 &&
-          deployment.fees.includes(leg.selector.value) &&
-          configuredTokens.has(leg.tokenIn.toLowerCase()) &&
-          configuredTokens.has(leg.tokenOut.toLowerCase()),
-      )
-    )
-      throw new Error(
-        "Route is not allowed by local token and deployment config.",
-      );
-    if (executor) {
-      const expectedId =
-        route.provider === "uniswap-v3"
-          ? trusted.executor?.uniswapDeployment
-          : trusted.executor?.pancakeDeployment;
-      const tokens = [
-        route.legs[0].tokenIn,
-        ...route.legs.map((leg) => leg.tokenOut),
-      ].map((token) => token.toLowerCase());
-      if (
-        !trusted.executor ||
-        !address.test(trusted.executor.address) ||
-        route.deploymentId !== expectedId ||
-        venues.has(route.provider) ||
-        new Set(tokens).size !== tokens.length
-      )
-        throw new Error(
-          "Executor routes must use configured distinct venues without cycles.",
-        );
-      venues.add(route.provider);
-      const block = p.allocations[0].route?.block;
-      if (
-        !route.block ||
-        !block ||
-        !hashPattern.test(block.hash) ||
-        !/^[0-9]+$/.test(block.number) ||
-        route.block.number !== block.number ||
-        !same(route.block.hash, block.hash)
-      )
-        throw new Error("Allocation quotes must share one block.");
-    }
-  }
-  if (
-    executor &&
-    p.allocations.reduce((total, a) => {
-      const amount = uint256Decimal(a.amountInAtomic, "Allocation input");
-      if (amount <= 0n) throw new Error("Allocation inputs must be positive.");
-      return total + amount;
-    }, 0n) !== amountIn
-  )
-    throw new Error("Allocation inputs must sum to the total input.");
-  if (quotedOutput > maxUint256)
-    throw new Error("Aggregate output must fit uint256.");
-  const requestedMinimum =
-    (quotedOutput * BigInt(10000 - slippageBps)) / 10000n;
-  if (minimum !== requestedMinimum)
+  const implementation = p.route
+    ? trusted.deployments[p.route.deploymentId]
+    : trusted.executor;
+  if (!implementation)
+    throw new Error(
+      "Route is not allowed by local token and deployment config.",
+    );
+  const terms = implementation.plan(p, trusted.tokens);
+  const quoted = uint256Decimal(terms.quotedOutput, "Aggregate output");
+  if (quoted <= 0n) throw new Error("Route quoted output must be positive.");
+  if (minimum !== (quoted * BigInt(10000 - slippageBps)) / 10000n)
     throw new Error(
       "Prepared slippage minimum does not match saved route quote.",
     );
-  const deployment = p.route
-    ? trusted.deployments[p.route.deploymentId]
-    : undefined;
-  const spender = executor ? trusted.executor?.address : deployment?.router;
-  if (!spender) throw new Error("Missing configured spender.");
   if (approval) {
     const expected = encodeFunctionData({
       abi: erc20Abi,
       functionName: "approve",
-      args: [spender.toLowerCase() as Address, amountIn],
+      args: [terms.spender as Address, amountIn],
     });
     if (
-      !address.test(p.approvalSpender) ||
-      !same(p.approvalSpender, spender) ||
+      !isAddress(p.approvalSpender, { strict: false }) ||
+      !same(p.approvalSpender, terms.spender) ||
       !same(tx.to, p.tokenIn) ||
       !same(tx.data, expected) ||
       p.transaction
@@ -460,12 +182,27 @@ export function validatePreparation(
       throw new Error(
         "Approval must authorize only the displayed input amount and spender.",
       );
-  } else {
-    const expected = deployment
-      ? expectedSwapData(p, deployment.kind)
-      : expectedExecutorData(p);
-    if (!same(tx.to, spender) || !same(tx.data, expected))
-      throw new Error("Swap transaction does not match locally encoded route.");
+    return {
+      action: "approval",
+      transaction: tx,
+      spender: terms.spender,
+      routeDetails: terms.routeDetails,
+    };
   }
-  return tx;
+  if (!same(tx.to, terms.target) || !same(tx.data, terms.data))
+    throw new Error("Swap transaction does not match locally encoded route.");
+  return {
+    action: "swap",
+    transaction: tx,
+    spender: terms.spender,
+    routeDetails: terms.routeDetails,
+    receipt: {
+      tokenIn: p.tokenIn,
+      tokenOut: p.tokenOut,
+      recipient: p.recipient,
+      amountInAtomic: p.amountInAtomic,
+      amountOutMinimumAtomic: p.amountOutMinimumAtomic,
+      ...terms.receipt,
+    },
+  };
 }

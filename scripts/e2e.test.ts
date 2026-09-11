@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create } from "@bufbuild/protobuf";
 import { executePrepared } from "../apps/terminal/src/execution";
-import {
-  expectedSwapData,
-  type Receipt,
-} from "../apps/terminal/src/execution-policy";
+import { configureExecution } from "../apps/terminal/src/execution-composition";
 import { executionExitCode } from "../apps/terminal/src/main";
+import { pancakeData } from "../apps/terminal/src/pancake";
+import type { Receipt } from "../apps/terminal/src/receipt";
 import { runTrade, type TradeIO } from "../apps/terminal/src/trade";
+import { uniswapData } from "../apps/terminal/src/uniswap";
 import {
   BlockContextSchema,
   PreparationStatus,
@@ -328,7 +328,7 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
         p.transaction = create(PrepareExecutionResponseSchema, {
           transaction: {
             ...tx,
-            data: expectedSwapData(p, isCake ? "pancake-v3" : "uniswap-v3"),
+            data: isCake ? pancakeData(p) : uniswapData(p),
           },
         }).transaction;
       }
@@ -336,13 +336,13 @@ function selectedTradeFixture(confirmSwap = true, freshNeedsApproval = false) {
         signer: sender,
         expectedChainId: "84532",
         slippageBps: 50,
-        trusted: {
+        trusted: configureExecution({
           tokens: [input, output],
           deployments: {
             uni: { kind: "uniswap-v3", router: uniRouter, fees: [500] },
             cake: { kind: "pancake-v3", router: cakeRouter, fees: [500] },
           },
-        },
+        }),
         chainId: async () => "0x14a34",
         prepare: async (id) => {
           calls.push(`prepare:${id ?? "new"}`);

@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { toJsonString } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
+import { hexToBigInt, isHex } from "viem";
 import {
   ChainStatusSchema,
   GetStatusResponseSchema,
@@ -368,8 +369,9 @@ export async function main(rawArgs: string[]) {
       );
       const rpcChainId = await context.rpc.chainId();
       if (
-        !/^0x[0-9a-f]+$/.test(rpcChainId) ||
-        BigInt(rpcChainId).toString() !== context.expectedChainId
+        !isHex(rpcChainId, { strict: true }) ||
+        rpcChainId.length <= 2 ||
+        hexToBigInt(rpcChainId).toString() !== context.expectedChainId
       )
         throw new Error(
           `RPC network must match configured chain ID ${context.expectedChainId}.`,

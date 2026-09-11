@@ -6,6 +6,7 @@ import {
   type QuoteFinal,
   type Token,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import type { ExecutionPlan } from "./execution-policy";
 
 export function formatAtomic(value: string, decimals: number) {
   if (decimals === 0) return value;
@@ -19,6 +20,7 @@ function amount(token: Token, atomic: string) {
 export function formatPreparation(
   p: PrepareExecutionResponse,
   chain: Pick<ChainStatus, "key" | "chainId" | "tokens">,
+  plan: Pick<ExecutionPlan, "spender" | "routeDetails">,
 ) {
   const text = (value: string) =>
     JSON.stringify(value)
@@ -60,7 +62,7 @@ export function formatPreparation(
     `Account: ${tx.from}`,
     `Recipient: ${p.recipient}`,
     `Transaction target: ${tx.to}`,
-    `Spender: ${approval ? p.approvalSpender : tx.to}`,
+    `Spender: ${plan.spender}`,
     `Input token: ${identity(p.tokenIn)}`,
     `Output token: ${identity(p.tokenOut)}`,
     `Total input: ${amount(p.tokenIn, p.amountInAtomic)}`,
@@ -82,7 +84,7 @@ export function formatPreparation(
     for (const [i, leg] of route.legs.entries())
       lines.push(
         `Hop ${i + 1}: ${identity(leg.tokenIn)} to ${identity(leg.tokenOut)}`,
-        `  Pool: ${text(leg.pool)}; fee: ${leg.selector.value} pips`,
+        `  ${text(plan.routeDetails[index][i])}`,
       );
     if (route.block)
       lines.push(

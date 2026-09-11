@@ -6,7 +6,7 @@ import {
   isHex,
   zeroHash,
 } from "viem";
-import type { Receipt } from "./execution-policy";
+import type { Receipt } from "./receipt";
 
 const validHash = (value: string) => value.length === 66 && isHash(value);
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();

@@ -1,10 +1,12 @@
 import { resolve } from "node:path";
+import { isAddress } from "viem";
 import type { TrustedExecution } from "./execution-policy";
 
-const localAddress = /^(?:0x|0X)?[0-9a-fA-F]{40}$/;
 const normalizeLocalAddress = (value: string) => {
-  if (!localAddress.test(value)) throw new Error("Invalid local address.");
-  return `0x${value.replace(/^0x/i, "").toLowerCase()}`;
+  const address = `0x${value.replace(/^0x/i, "")}`;
+  if (!isAddress(address, { strict: false }))
+    throw new Error("Invalid local address.");
+  return address.toLowerCase();
 };
 
 export type TerminalConfig = {
@@ -144,6 +146,13 @@ export async function readExecutionConfig(
   configPath: string,
   chain: string,
   allocations: boolean,
+  configure: (
+    tokens: string[],
+    settings: NonNullable<
+      Awaited<ReturnType<typeof readSettings>>["chains"]
+    >[string],
+    allocations: boolean,
+  ) => TrustedExecution,
 ) {
   const config = await readSettings(configPath);
   const localChain = config.chains?.[chain];
@@ -159,59 +168,16 @@ export async function readExecutionConfig(
       "Local chain must set a safe positive chain_id, explicitly enable execution, and set rpc_url_env.",
     );
   const expectedChainId = String(localChain.chain_id);
-  const trusted: TrustedExecution = { tokens: [], deployments: {} };
+  const tokens: string[] = [];
   for (const token of localChain.tokens ?? []) {
     if (!token.address)
       throw new Error("Local execution tokens must have valid addresses.");
     try {
-      trusted.tokens.push(normalizeLocalAddress(token.address));
+      tokens.push(normalizeLocalAddress(token.address));
     } catch {
       throw new Error("Local execution tokens must have valid addresses.");
     }
   }
-  for (const [id, deployment] of Object.entries(localChain.deployments ?? {})) {
-    if (
-      (deployment.kind !== "uniswap-v3" && deployment.kind !== "pancake-v3") ||
-      !deployment.router ||
-      !localAddress.test(deployment.router) ||
-      !Array.isArray(deployment.fees) ||
-      !deployment.fees.every(
-        (fee) => Number.isInteger(fee) && fee >= 0 && fee < 1_000_000,
-      )
-    )
-      throw new Error("Local execution deployment is invalid.");
-    trusted.deployments[id] = {
-      kind: deployment.kind,
-      router: normalizeLocalAddress(deployment.router),
-      fees: deployment.fees,
-    };
-  }
-  if (allocations) {
-    const e = localChain.executor;
-    const uni =
-      e?.uniswap_deployment && trusted.deployments[e.uniswap_deployment];
-    const pan =
-      e?.pancake_deployment && trusted.deployments[e.pancake_deployment];
-    if (
-      !e?.address ||
-      !e.uniswap_deployment ||
-      !e.pancake_deployment ||
-      !localAddress.test(e.address) ||
-      BigInt(normalizeLocalAddress(e.address)) === 0n ||
-      !uni ||
-      !pan ||
-      uni.kind !== "uniswap-v3" ||
-      pan.kind !== "pancake-v3" ||
-      uni.router.toLowerCase() === pan.router.toLowerCase()
-    )
-      throw new Error(
-        "Local executor needs an address and distinct Uniswap/Pancake deployments.",
-      );
-    trusted.executor = {
-      address: normalizeLocalAddress(e.address),
-      uniswapDeployment: e.uniswap_deployment,
-      pancakeDeployment: e.pancake_deployment,
-    };
-  }
+  const trusted = configure(tokens, localChain, allocations);
   return { expectedChainId, rpcUrlEnv: localChain.rpc_url_env, trusted };
 }

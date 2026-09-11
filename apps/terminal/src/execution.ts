@@ -1,18 +1,18 @@
 import { type JsonValue, toJsonString } from "@bufbuild/protobuf";
 import { hexToBigInt, isHash, isHex } from "viem";
 import {
-  PreparationStatus,
   type PrepareExecutionResponse,
   PrepareExecutionResponseSchema,
   type UnsignedTransaction,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import {
+  assertPreparationCurrent,
   assertPreparationUnchanged,
-  type Receipt,
+  type ExecutionPlan,
   type TrustedExecution,
   validatePreparation,
-  verifyReceipt,
 } from "./execution-policy";
+import { type Receipt, verifyReceipt } from "./receipt";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
@@ -64,6 +64,7 @@ export type ExecutionIO = {
   confirm: (
     kind: "approval" | "swap",
     p: PrepareExecutionResponse,
+    plan: ExecutionPlan,
   ) => Promise<boolean>;
   send: (tx: UnsignedTransaction) => Promise<string>;
   // Use chain.waitCanonicalReceipt: wallet/SDK success alone is not canonical evidence.
@@ -90,7 +91,7 @@ export async function executePrepared(
       `RPC network must match configured chain ID ${io.expectedChainId}.`,
     );
   const prepared = await io.prepare();
-  const tx = validatePreparation(
+  const plan = validatePreparation(
     prepared,
     io.signer,
     io.expectedChainId,
@@ -98,10 +99,7 @@ export async function executePrepared(
     io.trusted,
   );
   const snapshot = toJsonString(PrepareExecutionResponseSchema, prepared);
-  const kind =
-    prepared.status === PreparationStatus.APPROVAL_REQUIRED
-      ? "approval"
-      : "swap";
+  const kind = plan.action;
   if (preview || io.reportPreparation)
     io.report({ preparation: JSON.parse(snapshot), sent: false });
   if (io.swapOnly && kind === "approval")
@@ -111,31 +109,20 @@ export async function executePrepared(
   if (preview) {
     return { kind: "preview" };
   }
-  if (!(await io.confirm(kind, prepared))) {
+  if (!(await io.confirm(kind, prepared, structuredClone(plan)))) {
     io.report({ sent: false, outcome: "canceled" });
     return { kind: "canceled" };
   }
   const checked = await io.prepare(prepared.preparationId);
-  validatePreparation(
-    checked,
-    io.signer,
-    io.expectedChainId,
-    io.slippageBps,
-    io.trusted,
-  );
+  assertPreparationCurrent(checked);
   assertPreparationUnchanged(prepared, checked, snapshot);
   if (!(await rpcMatchesExpectedChain()))
     throw new Error("RPC network changed. Nothing sent.");
-  validatePreparation(
-    prepared,
-    io.signer,
-    io.expectedChainId,
-    io.slippageBps,
-    io.trusted,
-  );
+  assertPreparationUnchanged(prepared, checked, snapshot);
+  assertPreparationCurrent(prepared);
   let hash: string;
   try {
-    hash = (await io.send(tx)).trim();
+    hash = (await io.send(plan.transaction)).trim();
     if (hash.length !== 66 || !isHash(hash))
       throw new Error("Invalid transaction hash.");
   } catch {
@@ -157,8 +144,8 @@ export async function executePrepared(
   try {
     const receipt = await io.receipt(hash);
     const verification =
-      kind === "swap"
-        ? verifyReceipt(receipt, hash, prepared, io.trusted)
+      plan.action === "swap"
+        ? verifyReceipt(receipt, hash, plan.receipt)
         : {
             outcome:
               same(receipt.transactionHash, hash) && receipt.status === "0x1"

@@ -10,6 +10,7 @@ import { readChain } from "./chain";
 import type { quoteClient } from "./client";
 import { readExecutionConfig } from "./config";
 import { executePrepared } from "./execution";
+import { configureChain } from "./execution-composition";
 import { uint256Decimal } from "./execution-policy";
 import { formatPreparation } from "./format";
 import { castWallet } from "./wallet-cast";
@@ -30,6 +31,7 @@ export async function connectExecution(
     configPath,
     chain,
     allocations,
+    configureChain,
   );
   if (remoteChainId !== expectedChainId)
     throw new Error(
@@ -187,13 +189,17 @@ export async function executionCommand(
           );
         return response;
       },
-      confirm: async (kind, p) => {
+      confirm: async (kind, p, plan) => {
         console.error(
-          formatPreparation(p, {
-            key: chain,
-            chainId: expectedChainId,
-            tokens,
-          }),
+          formatPreparation(
+            p,
+            {
+              key: chain,
+              chainId: expectedChainId,
+              tokens,
+            },
+            plan,
+          ),
         );
         if (!trade?.afterApproval && values[`confirm-${kind}`] === "yes")
           return true;
