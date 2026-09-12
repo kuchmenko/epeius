@@ -210,8 +210,8 @@ func TestSlipstreamChecksQuoteOriginOncePerSearch(t *testing.T) {
 }
 
 func TestSlipstreamCreatesCandidatesLazily(t *testing.T) {
-	tokens := make([]config.Token, 12)
-	spacings := make([]int32, 12)
+	tokens := make([]config.Token, 32)
+	spacings := make([]int32, 32)
 	for i := range tokens {
 		tokens[i].Address = common.BigToAddress(big.NewInt(int64(i + 3))).Hex()
 		spacings[i] = int32(i + 1)
@@ -224,12 +224,14 @@ func TestSlipstreamCreatesCandidatesLazily(t *testing.T) {
 	}
 	request := &quotev1.QuoteRequest{TokenIn: tokenA, TokenOut: tokenB, AmountInAtomic: "17"}
 	block := &quotev1.BlockContext{Hash: blockHash}
-	allocations := testing.AllocsPerRun(3, func() {
-		_ = q.Candidates(request, block)
+	result := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			_ = q.Candidates(request, block)
+		}
 	})
-	candidateCount := len(spacings) + len(tokens)*len(spacings)*len(spacings)
-	if allocations >= float64(candidateCount) {
-		t.Fatalf("candidate iterator allocated %.0f objects before iteration", allocations)
+	const maxIteratorSetupBytes = 64 << 10
+	if result.AllocedBytesPerOp() > maxIteratorSetupBytes {
+		t.Fatalf("candidate iterator allocated %d bytes before iteration", result.AllocedBytesPerOp())
 	}
 }
 
