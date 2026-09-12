@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"slices"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -183,25 +184,52 @@ func TestSlipstreamChecksQuoteOriginOncePerSearch(t *testing.T) {
 		reader:     reader,
 		id:         "slip",
 		deployment: config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex()},
+		tokens:     []config.Token{{Address: tokenC}},
 		options:    slipstream.Options{TickSpacings: []int32{100, 200}},
 	}
 	next := q.Candidates(
 		&quotev1.QuoteRequest{TokenIn: tokenA, TokenOut: tokenB, AmountInAtomic: "17"},
 		&quotev1.BlockContext{Hash: blockHash},
 	)
-	quoted := 0
+	var ids []string
 	for {
 		candidate, ok := next(context.Background())
 		if !ok {
 			break
 		}
+		ids = append(ids, candidate.ID)
 		if _, err := candidate.Quote(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		quoted++
 	}
-	if quoted != 2 || moduleChecks != 1 || originChecks != 1 {
-		t.Fatalf("quoted=%d moduleChecks=%d originChecks=%d", quoted, moduleChecks, originChecks)
+	middle := common.HexToAddress(tokenC).Hex()
+	wantIDs := []string{"slip:100", "slip:200", "slip:100:" + middle + ":100", "slip:100:" + middle + ":200", "slip:200:" + middle + ":100", "slip:200:" + middle + ":200"}
+	if !slices.Equal(ids, wantIDs) || moduleChecks != 1 || originChecks != 1 {
+		t.Fatalf("ids=%v moduleChecks=%d originChecks=%d", ids, moduleChecks, originChecks)
+	}
+}
+
+func TestSlipstreamCreatesCandidatesLazily(t *testing.T) {
+	tokens := make([]config.Token, 12)
+	spacings := make([]int32, 12)
+	for i := range tokens {
+		tokens[i].Address = common.BigToAddress(big.NewInt(int64(i + 3))).Hex()
+		spacings[i] = int32(i + 1)
+	}
+	q := slipstreamQuoter{
+		id:         "slip",
+		deployment: config.Deployment{Kind: "aerodrome-slipstream"},
+		tokens:     tokens,
+		options:    slipstream.Options{TickSpacings: spacings},
+	}
+	request := &quotev1.QuoteRequest{TokenIn: tokenA, TokenOut: tokenB, AmountInAtomic: "17"}
+	block := &quotev1.BlockContext{Hash: blockHash}
+	allocations := testing.AllocsPerRun(3, func() {
+		_ = q.Candidates(request, block)
+	})
+	candidateCount := len(spacings) + len(tokens)*len(spacings)*len(spacings)
+	if allocations >= float64(candidateCount) {
+		t.Fatalf("candidate iterator allocated %.0f objects before iteration", allocations)
 	}
 }
 

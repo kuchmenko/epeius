@@ -43,29 +43,37 @@ func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 		spacings []int32
 		id       string
 	}
-	paths := []path{}
-	for _, s := range spacings {
-		paths = append(paths, path{[]common.Address{common.HexToAddress(r.TokenIn), common.HexToAddress(r.TokenOut)}, []int32{s}, fmt.Sprintf("%s:%d", q.id, s)})
-	}
-	for _, middle := range tokens {
-		for _, a := range spacings {
-			for _, b := range spacings {
-				paths = append(paths, path{[]common.Address{common.HexToAddress(r.TokenIn), middle, common.HexToAddress(r.TokenOut)}, []int32{a, b}, fmt.Sprintf("%s:%d:%s:%d", q.id, a, middle.Hex(), b)})
-			}
-		}
-	}
+	in, out := common.HexToAddress(r.TokenIn), common.HexToAddress(r.TokenOut)
 	amount, _ := new(big.Int).SetString(r.AmountInAtomic, 10)
 	factory := common.HexToAddress(q.deployment.Factory)
 	hash := common.HexToHash(block.Hash)
 	var checkOrigin sync.Once
 	var checkOriginErr error
-	index := 0
+	direct, middle, first, second := 0, 0, 0, 0
 	return func(ctx context.Context) (QuoteCandidate, bool) {
-		if index >= len(paths) || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return QuoteCandidate{}, false
 		}
-		p := paths[index]
-		index++
+		var p path
+		if direct < len(spacings) {
+			s := spacings[direct]
+			direct++
+			p = path{[]common.Address{in, out}, []int32{s}, fmt.Sprintf("%s:%d", q.id, s)}
+		} else if middle < len(tokens) {
+			a, b, via := spacings[first], spacings[second], tokens[middle]
+			second++
+			if second == len(spacings) {
+				second = 0
+				first++
+				if first == len(spacings) {
+					first = 0
+					middle++
+				}
+			}
+			p = path{[]common.Address{in, via, out}, []int32{a, b}, fmt.Sprintf("%s:%d:%s:%d", q.id, a, via.Hex(), b)}
+		} else {
+			return QuoteCandidate{}, false
+		}
 		return QuoteCandidate{ID: p.id, Quote: func(ctx context.Context) (*quotev1.RouteQuote, error) {
 			start := time.Now()
 			// The fee module and zero-origin discount are immutable at the pinned
