@@ -47,6 +47,8 @@ The terminal independently checks the configured deployment and full pool ID, re
 
 Informational quotes take no wallet address. Epeius supplies a fixed nonzero `FundManagement` address required by `queryBatchSwap`, uses external balances, and performs the quote as a pinned read-only call. Preparation does depend on selected signer: signer must hold enough input, approve configured Vault, remain both sender and recipient, and pass simulation before terminal consent.
 
+The provider supports canonical Weighted, Stable, and Composable Stable pool implementations, whose swap calculation does not use the request sender or recipient. Custom or managed pools whose `onSwap` logic depends on either account are unsupported because the quote request intentionally has no wallet address. Startup identity checks do not prove pool source provenance, so operators must not configure account-dependent implementations; preparation simulation still fails closed for the selected signer.
+
 ## Limitations
 
 Only direct, single-pool, exact-input ERC-20 swaps are supported. Native assets, internal balances, BPT swaps, relayers, custom user data, batch or multi-pool routes, SOR, transfer-tax tokens, and rebasing tokens are unsupported. The checked-in configuration keeps execution disabled.
