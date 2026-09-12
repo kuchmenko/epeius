@@ -176,6 +176,18 @@ test("quote output includes chain, block, exact amounts, tiers, and partial warn
           },
         ],
       },
+      {
+        routeId: "v4",
+        provider: "uniswap-v4",
+        amountOutAtomic: "1234567",
+        legs: [
+          {
+            pool: `0x${"a".repeat(64)}`,
+            tokenIn: input.address,
+            tokenOut: output.address,
+          },
+        ],
+      },
     ],
   });
   const text = formatQuote(quote, chain, input, output, "1000000000000000000");
@@ -188,6 +200,8 @@ test("quote output includes chain, block, exact amounts, tiers, and partial warn
   expect(text).toContain(
     "pool address 0x06df3b2bbb68adc8b0e302443692037ed9f91b42",
   );
+  expect(text).toContain(`pool 0x${"a".repeat(64)}; pool hash`);
+  expect(text).not.toContain(`pool address 0x${"a".repeat(40)}`);
   expect(text).not.toContain("unknown selector");
   expect(text).toContain("Search was partial");
   expect(text).toContain("Engine recommendation: 500");

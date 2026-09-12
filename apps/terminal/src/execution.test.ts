@@ -1357,7 +1357,7 @@ console.log(args[0] === 'wallet' ? readFileSync(${JSON.stringify(accountPath)}, 
         : args[0] === "status" || args[0] === "tokens"
           ? []
           : args.includes("--preparation-id")
-            ? ["--route-id", "r1"]
+            ? []
             : args.includes("--allocations")
               ? ["--quote-id", "q1"]
               : ["--quote-id", "q1", "--route-id", "r1"]),

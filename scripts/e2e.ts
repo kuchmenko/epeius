@@ -251,7 +251,6 @@ async function main(args: string[]) {
       return { quote, route };
     };
     const execute = async (
-      routeId: string,
       preparationId: string,
       kind: "approval" | "swap",
     ) => {
@@ -264,8 +263,6 @@ async function main(args: string[]) {
           remote.key,
           "--config",
           config.path,
-          "--route-id",
-          routeId,
           "--preparation-id",
           preparationId,
           "--slippage-bps",
@@ -309,7 +306,7 @@ async function main(args: string[]) {
         prepared,
       });
       if (prepared.status === PreparationStatus.READY) {
-        await execute(selected.route.routeId, prepared.preparationId, "swap");
+        await execute(prepared.preparationId, "swap");
         swapped = true;
         break;
       }
@@ -321,7 +318,7 @@ async function main(args: string[]) {
         throw new Error(
           "A third permission is still required; nothing else sent.",
         );
-      await execute(selected.route.routeId, prepared.preparationId, "approval");
+      await execute(prepared.preparationId, "approval");
       selected = await freshQuote();
     }
     if (!swapped) throw new Error("Scenario did not produce a swap.");

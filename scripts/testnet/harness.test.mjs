@@ -376,6 +376,47 @@ test("V4 fixture derives canonical pool ID and PositionManager action payload", 
   );
   assert.equal(actions, "0x020d");
   assert.equal(params.length, 2);
+  const [mintKey, lower, upper, liquidity, max0, max1, recipient, hookData] =
+    decodeAbiParameters(
+      [
+        {
+          type: "tuple",
+          components: [
+            { name: "currency0", type: "address" },
+            { name: "currency1", type: "address" },
+            { name: "fee", type: "uint24" },
+            { name: "tickSpacing", type: "int24" },
+            { name: "hooks", type: "address" },
+          ],
+        },
+        { type: "int24" },
+        { type: "int24" },
+        { type: "uint256" },
+        { type: "uint128" },
+        { type: "uint128" },
+        { type: "address" },
+        { type: "bytes" },
+      ],
+      params[0],
+    );
+  assert.deepEqual(
+    {
+      currency0: mintKey.currency0.toLowerCase(),
+      currency1: mintKey.currency1.toLowerCase(),
+      fee: mintKey.fee,
+      tickSpacing: mintKey.tickSpacing,
+      hooks: mintKey.hooks.toLowerCase(),
+    },
+    plan.key,
+  );
+  assert.equal(lower, plan.lower);
+  assert.equal(upper, plan.upper);
+  assert.ok(lower < upper);
+  assert.equal(liquidity, BigInt(plan.liquidity));
+  assert.equal(max0, plan.amount0Max);
+  assert.equal(max1, plan.amount1Max);
+  assert.equal(recipient.toLowerCase(), owner.toLowerCase());
+  assert.equal(hookData, "0x");
   const [settle0, settle1] = decodeAbiParameters(
     [{ type: "address" }, { type: "address" }],
     params[1],

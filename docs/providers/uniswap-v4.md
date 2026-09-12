@@ -51,7 +51,7 @@ Configured pools are checked when quoted, not at startup. A pool whose StateView
 Epeius uses fixed canonical ABIs and encoding rules:
 
 - StateView `getSlot0(bytes32)` checks pool initialization.
-- Quoter `quoteExactInputSingle` returns the exact-output estimate at one pinned block.
+- Quoter `quoteExactInputSingle` returns an output amount estimate for an exact-input quote at one pinned block.
 - Universal Router `execute` runs the V4 swap, settle, and take actions with a deadline.
 - Permit2 `allowance` and `approve` provide the router's token permission.
 - PoolManager getters on the periphery contracts establish deployment linkage.

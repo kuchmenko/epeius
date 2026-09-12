@@ -7,6 +7,7 @@ import {
   OnChainPermissionSchema,
   PreparationStatus,
   PrepareExecutionResponseSchema,
+  UnsignedTransactionSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { validatePreparation } from "./execution-policy";
 import { configureExecution } from "./protocols";
@@ -92,6 +93,45 @@ test("terminal reconstructs reviewed V4 action bytes and Permit2 permission", ()
       .update(Buffer.from(data.slice(2), "hex"))
       .digest("hex"),
   ).toBe("db25857dd02bc68ee7c058200a182fee1c552394b4208135792021fde1661de1");
+  p.transaction = create(UnsignedTransactionSchema, {
+    chainId: "8453",
+    from: sender,
+    to: router,
+    data,
+    valueAtomic: "0",
+    gasLimit: "200000",
+  });
+  p.approvalSpender = permit2;
+  expect(() =>
+    validatePreparation(
+      p,
+      sender,
+      "8453",
+      175,
+      configureExecution({
+        tokens: [weth, usdc],
+        deployments: { v4: rawDeployment },
+      }),
+      1777777000,
+    ),
+  ).toThrow("READY preparation");
+  p.approvalSpender = "";
+  p.approvalTransaction = p.transaction;
+  expect(() =>
+    validatePreparation(
+      p,
+      sender,
+      "8453",
+      175,
+      configureExecution({
+        tokens: [weth, usdc],
+        deployments: { v4: rawDeployment },
+      }),
+      1777777000,
+    ),
+  ).toThrow("READY preparation");
+  p.approvalTransaction = undefined;
+  p.transaction = undefined;
   const expiration = 1777779577;
   p.status = PreparationStatus.APPROVAL_REQUIRED;
   const permission = create(OnChainPermissionSchema, {

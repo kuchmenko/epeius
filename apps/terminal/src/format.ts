@@ -173,8 +173,12 @@ export function formatQuote(
         selector = `fee ${leg.selector.value} pips`;
       else if (leg.selector.case === "tickSpacing")
         selector = `tick spacing ${leg.selector.value}`;
-      else if (/^0x[0-9a-f]{64}$/.test(leg.pool))
+      else if (
+        route.provider === "balancer-v2" &&
+        /^0x[0-9a-f]{64}$/.test(leg.pool)
+      )
         selector = `pool address ${getAddress(sliceHex(leg.pool as Hex, 0, 20)).toLowerCase()}`;
+      else if (/^0x[0-9a-f]{64}$/.test(leg.pool)) selector = "pool hash";
       lines.push(
         `Leg ${index + 1}: pool ${leg.pool}; ${selector}; ${leg.tokenIn} to ${leg.tokenOut}`,
       );
