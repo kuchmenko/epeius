@@ -1,7 +1,5 @@
 # Aerodrome Slipstream
 
-This guide describes Aerodrome Slipstream as implemented by Epeius. It separates protocol behavior documented upstream from Epeius admission and execution policy.
-
 ## Protocol overview
 
 **Upstream facts.** Slipstream is adapted from Uniswap V3. Its concentrated-liquidity pools are identified by token pair and signed `int24` tick spacing rather than token pair and fee. Swap fees can be dynamic. Gauge and reward changes also exist in Slipstream, but they are outside the Epeius swap path.
@@ -19,8 +17,6 @@ For exact-input multihop swaps, the path is packed as `address | int24 | address
 | Direct router tuple | Uniswap SwapRouter02 form; deadline supplied by its multicall | Pancake deadline-bearing tuple | Slipstream deadline-bearing tuple |
 | Fee model relevant to Epeius | Selector is fee | Selector is fee | Selector identifies pool; fee may be dynamic |
 | Configured executor | Supported | Supported | Not supported |
-
-This table describes only contracts and configuration visible to Epeius. It makes no broader compatibility claim about Pancake V3.
 
 ## Configuration
 
