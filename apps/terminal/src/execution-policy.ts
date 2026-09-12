@@ -8,6 +8,7 @@ import {
   maxUint256,
   size,
 } from "viem";
+import { permit2Abi } from "../../../generated/abi";
 import {
   PreparationStatus,
   type PrepareExecutionResponse,
@@ -30,6 +31,7 @@ export type SwapTerms = {
   quotedOutput: string;
   routeDetails: string[][];
   receipt: Pick<ReceiptObligations, "intermediate" | "touched">;
+  permission?: { target: string; spender: string };
 };
 
 export type ExecutionImplementation = {
@@ -115,7 +117,10 @@ export function validatePreparation(
     throw new Error("Requested slippage must be 0 through 9999 bps.");
   assertPreparationCurrent(p, now);
   const approval = p.status === PreparationStatus.APPROVAL_REQUIRED;
-  const tx = approval ? p.approvalTransaction : p.transaction;
+  const permission = p.onChainPermission;
+  const tx = approval
+    ? (permission?.transaction ?? p.approvalTransaction)
+    : p.transaction;
   if (
     !tx ||
     !p.preparationId ||
@@ -171,12 +176,53 @@ export function validatePreparation(
       "Prepared slippage minimum does not match saved route quote.",
     );
   if (approval) {
+    if (permission) {
+      const expiration = uint256Decimal(
+        permission.expirationUnix,
+        "Permission expiration",
+      );
+      const expected = encodeFunctionData({
+        abi: permit2Abi,
+        functionName: "approve",
+        args: [
+          p.tokenIn as Address,
+          terms.target as Address,
+          amountIn,
+          Number(expiration),
+        ],
+      });
+      if (
+        p.approvalTransaction ||
+        !terms.permission ||
+        !same(terms.permission.target, terms.spender) ||
+        !same(terms.permission.spender, terms.target) ||
+        !same(permission.target, terms.permission.target) ||
+        !same(permission.token, p.tokenIn) ||
+        !same(permission.spender, terms.permission.spender) ||
+        permission.amountAtomic !== p.amountInAtomic ||
+        expiration <= uint256Decimal(p.deadlineUnix, "Deadline") ||
+        expiration >= 1n << 48n ||
+        !same(tx.to, permission.target) ||
+        !same(tx.data, expected) ||
+        p.transaction
+      )
+        throw new Error(
+          "Permit2 permission must authorize only the displayed token, amount, spender, and expiration.",
+        );
+      return {
+        action: ExecutionAction.Approval,
+        transaction: tx,
+        spender: permission.target,
+        routeDetails: terms.routeDetails,
+      };
+    }
     const expected = encodeFunctionData({
       abi: erc20Abi,
       functionName: "approve",
       args: [terms.spender as Address, amountIn],
     });
     if (
+      p.onChainPermission ||
       !isAddress(p.approvalSpender, { strict: false }) ||
       !same(p.approvalSpender, terms.spender) ||
       !same(tx.to, p.tokenIn) ||

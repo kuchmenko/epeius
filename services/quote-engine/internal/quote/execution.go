@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
@@ -143,6 +144,48 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		h.Store.savePreparation(p)
 		return connect.NewResponse(response), nil
 	}
+	if p.permission != nil {
+		permission := p.permission
+		data, _ := contractabi.Permit2.Pack("allowance", common.HexToAddress(response.Recipient), common.HexToAddress(permission.token), common.HexToAddress(permission.spender))
+		permissionBytes, err := reader.Call(ctx, common.HexToAddress(permission.target), data, common.HexToHash(snapshot.BlockHash))
+		if err != nil {
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "permission check failed")
+		}
+		values, err := evm.Unpack(contractabi.Permit2.Methods["allowance"], permissionBytes)
+		if err != nil {
+			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "permission check failed")
+		}
+		permissionAmount := values[0].(*big.Int)
+		expiration := values[1].(*big.Int).Uint64()
+		required := permissionAmount.Cmp(permission.amount) < 0 || expiration <= deadline
+		if !recheck {
+			var exists bool
+			p.approval, exists = h.Store.markApproval(r.QuoteId, response.Recipient+permission.target+permission.spender, required, time.Now())
+			if !exists || !time.Now().Before(saved.expires) {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote expired or unavailable during preparation; request a fresh quote")
+			}
+		}
+		if required {
+			if recheck && !p.approval {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Permission state changed; request a fresh quote.")
+			}
+			call, _ := contractabi.Permit2.Pack("approve", common.HexToAddress(permission.token), common.HexToAddress(permission.spender), permission.amount, new(big.Int).SetUint64(permission.expiration))
+			response.Status = quotev1.PreparationStatus_PREPARATION_STATUS_APPROVAL_REQUIRED
+			response.Message = "Grant the required Permit2 permission, then request a fresh quote."
+			response.OnChainPermission = &quotev1.OnChainPermission{
+				Target: permission.target, Token: permission.token, Spender: permission.spender,
+				AmountAtomic: permission.amount.String(), ExpirationUnix: strconv.FormatUint(permission.expiration, 10),
+				Transaction: &quotev1.UnsignedTransaction{ChainId: chain.ChainID, From: response.Recipient, To: permission.target, Data: hexutil.Encode(call), ValueAtomic: "0", GasLimit: "100000"},
+			}
+			if err := reader.Canonical(ctx, snapshot); err != nil {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "The permission check block could not be confirmed; request a fresh quote.")
+			}
+			response.SimulationBlock = &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
+			p.approval = true
+			h.Store.savePreparation(p)
+			return connect.NewResponse(response), nil
+		}
+	}
 	if p.approval {
 		return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Approval state changed; request a fresh quote.")
 	}
@@ -189,6 +232,7 @@ func buildPreparation(ctx context.Context, strategy PreparationStrategy, saved s
 		return preparation{}, message
 	}
 	plan.transaction = proto.CloneOf(plan.transaction)
+	plan.permission = plan.permission.clone()
 	plan.checks = plan.checks.clone()
 	return preparation{chain: saved.request.Chain, expires: now.Add(retention), response: response, executionPlan: plan}, ""
 }

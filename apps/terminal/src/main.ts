@@ -54,7 +54,7 @@ Usage:
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
 prepare previews without sending. execute displays terms and asks approval or swap confirmation.
 trade quotes, selects the engine recommendation or --route-id, and executes. Selection uses raw output, not gas-adjusted output or a global best.
-After approval, trade refreshes once, reselects the engine recommendation (or keeps --route-id), and requires a fresh interactive swap confirmation.
+After each approval, trade gets a fresh quote and asks separately for the next permission or swap. At most two permission transactions are allowed.
 Approval always requires a fresh quote afterward. Execution output is JSON lines; confirmations go to stderr.`;
 
 type Globals = {
@@ -391,7 +391,7 @@ export async function main(rawArgs: string[]) {
           {
             quote: getQuote,
             report: (result) => console.log(JSON.stringify(result)),
-            execute: async (quote, route, afterApproval) => {
+            execute: async (quote, route, afterApproval, approvalRound) => {
               return executionCommand(
                 "trade",
                 {
@@ -412,6 +412,7 @@ export async function main(rawArgs: string[]) {
                   tokenIn: tokenIn.address,
                   tokenOut: tokenOut.address,
                   afterApproval,
+                  approvalRound,
                 },
               );
             },

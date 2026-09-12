@@ -1,0 +1,141 @@
+package quote
+
+import (
+	"context"
+	"errors"
+	"math/big"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
+	"google.golang.org/protobuf/proto"
+)
+
+type v4Quoter struct {
+	reader     Reader
+	id         string
+	deployment config.Deployment
+}
+
+type v4Candidate struct {
+	id   string
+	pool config.UniswapV4Pool
+}
+
+func (q v4Quoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.BlockContext) func(context.Context) (QuoteCandidate, bool) {
+	in, out := common.HexToAddress(r.TokenIn), common.HexToAddress(r.TokenOut)
+	amount, _ := new(big.Int).SetString(r.AmountInAtomic, 10)
+	var candidates []v4Candidate
+	for _, pool := range q.deployment.Pools {
+		currency0, currency1 := common.HexToAddress(pool.Currency0), common.HexToAddress(pool.Currency1)
+		if in != currency0 && in != currency1 || out != currency0 && out != currency1 {
+			continue
+		}
+		id, _ := uniswapv4.PoolID(v4PoolKey(pool))
+		candidates = append(candidates, v4Candidate{q.id + ":" + id.Hex(), pool})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].id < candidates[j].id })
+	return func(ctx context.Context) (QuoteCandidate, bool) {
+		if len(candidates) == 0 || ctx.Err() != nil {
+			return QuoteCandidate{}, false
+		}
+		candidate := candidates[0]
+		candidates = candidates[1:]
+		return QuoteCandidate{ID: candidate.id, Quote: func(ctx context.Context) (*quotev1.RouteQuote, error) {
+			return q.quote(ctx, candidate.id, candidate.pool, in, out, amount, block)
+		}}, true
+	}
+}
+
+func (q v4Quoter) quote(ctx context.Context, id string, pool config.UniswapV4Pool, in, out common.Address, amount *big.Int, block *quotev1.BlockContext) (*quotev1.RouteQuote, error) {
+	start := time.Now()
+	key := v4PoolKey(pool)
+	poolID, err := uniswapv4.PoolID(key)
+	if err != nil {
+		return nil, err
+	}
+	provider := uniswapv4.Provider{Client: q.reader, Quoter: common.HexToAddress(q.deployment.Quoter), StateView: common.HexToAddress(q.deployment.StateView)}
+	output, err := provider.Quote(ctx, key, in == key.Currency0, amount, common.HexToHash(block.Hash))
+	if err != nil {
+		return nil, err
+	}
+	leg := &quotev1.RouteLeg{
+		Pool:     poolID.Hex(),
+		TokenIn:  in.Hex(),
+		TokenOut: out.Hex(),
+		UniswapV4PoolKey: &quotev1.UniswapV4PoolKey{
+			Currency0: pool.Currency0, Currency1: pool.Currency1, FeePips: pool.FeePips,
+			TickSpacing: pool.TickSpacing, Hooks: pool.Hooks,
+		},
+	}
+	return &quotev1.RouteQuote{RouteId: id, Provider: q.deployment.Kind, DeploymentId: q.id, Legs: []*quotev1.RouteLeg{leg}, AmountOutAtomic: output.String(), Block: proto.CloneOf(block), LatencyMs: uint32(time.Since(start).Milliseconds())}, nil
+}
+
+func (q v4Quoter) Requote(ctx context.Context, route *quotev1.RouteQuote, amount *big.Int, block *quotev1.BlockContext) (*quotev1.RouteQuote, error) {
+	pool, ok := q.admit(route)
+	if !ok {
+		return nil, errors.New("Uniswap V4 route is not configured")
+	}
+	return q.quote(ctx, route.RouteId, pool, common.HexToAddress(route.Legs[0].TokenIn), common.HexToAddress(route.Legs[0].TokenOut), amount, block)
+}
+
+func (q v4Quoter) admit(route *quotev1.RouteQuote) (config.UniswapV4Pool, bool) {
+	if route == nil || route.Provider != "uniswap-v4" || route.DeploymentId != q.id || len(route.Legs) != 1 || route.Legs[0].UniswapV4PoolKey == nil || route.Legs[0].Selector != nil {
+		return config.UniswapV4Pool{}, false
+	}
+	leg := route.Legs[0]
+	for _, pool := range q.deployment.Pools {
+		key := leg.UniswapV4PoolKey
+		id, _ := uniswapv4.PoolID(v4PoolKey(pool))
+		if strings.EqualFold(leg.Pool, id.Hex()) && strings.EqualFold(key.Currency0, pool.Currency0) && strings.EqualFold(key.Currency1, pool.Currency1) && key.FeePips == pool.FeePips && key.TickSpacing == pool.TickSpacing && strings.EqualFold(key.Hooks, pool.Hooks) && (strings.EqualFold(leg.TokenIn, pool.Currency0) && strings.EqualFold(leg.TokenOut, pool.Currency1) || strings.EqualFold(leg.TokenIn, pool.Currency1) && strings.EqualFold(leg.TokenOut, pool.Currency0)) {
+			return pool, true
+		}
+	}
+	return config.UniswapV4Pool{}, false
+}
+
+func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
+	reader, ok := q.reader.(codeReader)
+	if !ok {
+		return errors.New("deployment code unavailable")
+	}
+	for _, address := range []string{q.deployment.PoolManager, q.deployment.Quoter, q.deployment.StateView, q.deployment.Permit2, q.deployment.Router} {
+		code, err := reader.Code(ctx, common.HexToAddress(address), hash)
+		if err != nil || len(code) == 0 {
+			return errors.New("Uniswap V4 deployment verification failed")
+		}
+	}
+	for target, contract := range map[string]struct {
+		method string
+	}{q.deployment.Quoter: {"poolManager"}, q.deployment.StateView: {"poolManager"}} {
+		var method = contractabi.UniswapV4Quoter.Methods[contract.method]
+		if target == q.deployment.StateView {
+			method = contractabi.UniswapV4StateView.Methods[contract.method]
+		}
+		data, err := reader.Call(ctx, common.HexToAddress(target), method.ID, hash)
+		if err != nil {
+			return errors.New("Uniswap V4 deployment verification failed")
+		}
+		values, err := evm.Unpack(method, data)
+		if err != nil || values[0].(common.Address) != common.HexToAddress(q.deployment.PoolManager) {
+			return errors.New("Uniswap V4 deployment verification failed")
+		}
+	}
+	provider := uniswapv4.Provider{Client: q.reader, Quoter: common.HexToAddress(q.deployment.Quoter), StateView: common.HexToAddress(q.deployment.StateView)}
+	for _, pool := range q.deployment.Pools {
+		if err := provider.VerifyPool(ctx, v4PoolKey(pool), hash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func v4PoolKey(pool config.UniswapV4Pool) uniswapv4.PoolKey {
+	return uniswapv4.NewPoolKey(common.HexToAddress(pool.Currency0), common.HexToAddress(pool.Currency1), pool.FeePips, pool.TickSpacing, common.HexToAddress(pool.Hooks))
+}

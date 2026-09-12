@@ -114,3 +114,32 @@ test("only successful verified approval refreshes; cancellation and unknown subm
     expect(f.quoteCount()).toBe(1);
   }
 });
+
+test("trade permits two confirmed permission rounds, then sends swap", async () => {
+  let round = 0;
+  const calls: Array<[boolean, number | undefined]> = [];
+  const io: TradeIO = {
+    quote: async () =>
+      create(QuoteFinalSchema, {
+        quoteId: `q${round + 1}`,
+        bestRouteId: "v4",
+        routes: [{ routeId: "v4", amountOutAtomic: "100" }],
+      }),
+    execute: async (_quote, _route, afterApproval, approvalRound) => {
+      calls.push([afterApproval, approvalRound]);
+      return round++ < 2
+        ? { kind: "approval-confirmed", transactionHash: "hash" }
+        : { kind: "swap-verified", transactionHash: "hash" };
+    },
+    report: () => {},
+  };
+  expect(await runTrade(io)).toEqual({
+    kind: "swap-verified",
+    transactionHash: "hash",
+  });
+  expect(calls).toEqual([
+    [false, 0],
+    [true, 1],
+    [true, 2],
+  ]);
+});

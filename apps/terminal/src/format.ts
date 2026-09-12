@@ -52,7 +52,9 @@ export function formatPreparation(
     return `${utc} (Unix ${unix})`;
   };
   const approval = p.status === PreparationStatus.APPROVAL_REQUIRED;
-  const tx = approval ? p.approvalTransaction : p.transaction;
+  const tx = approval
+    ? (p.onChainPermission?.transaction ?? p.approvalTransaction)
+    : p.transaction;
   if (!tx) throw new Error("Preparation has no transaction to review.");
   const lines = [
     approval
@@ -107,7 +109,14 @@ export function formatPreparation(
     );
   if (approval)
     lines.push(
-      "This approval authorizes only the total input above. It does not send a swap.",
+      ...(p.onChainPermission
+        ? [
+            `Permission contract: ${p.onChainPermission.target}`,
+            `Delegated spender: ${p.onChainPermission.spender}`,
+            `Permission expiration: ${timestamp(p.onChainPermission.expirationUnix)}`,
+          ]
+        : []),
+      "This permission authorizes only the total input above. It does not send a swap.",
     );
   lines.push(
     "Actual output is verified from canonical receipt token deltas after submission.",

@@ -241,6 +241,45 @@ pools = ["` + pool + `"]
 	}
 }
 
+func TestUniswapV4ConfigRequiresCompleteAllowlistedNoHookPool(t *testing.T) {
+	text := validConfig + `[[chains.test-net.tokens]]
+address = "0x1111111111111111111111111111111111111111"
+symbol = "A"
+decimals = 18
+[[chains.test-net.tokens]]
+address = "0x2222222222222222222222222222222222222222"
+symbol = "B"
+decimals = 6
+[chains.test-net.deployments.v4]
+kind = "uniswap-v4"
+pool_manager = "0x3333333333333333333333333333333333333333"
+quoter = "0x4444444444444444444444444444444444444444"
+state_view = "0x5555555555555555555555555555555555555555"
+router = "0x6666666666666666666666666666666666666666"
+permit2 = "0x7777777777777777777777777777777777777777"
+[[chains.test-net.deployments.v4.pools]]
+currency0 = "0x1111111111111111111111111111111111111111"
+currency1 = "0x2222222222222222222222222222222222222222"
+fee_pips = 500
+tick_spacing = 10
+hooks = "0x0000000000000000000000000000000000000000"
+`
+	got, err := loadText(t, text)
+	if err != nil || got.Chains["test-net"].Deployments["v4"].Pools[0].TickSpacing != 10 {
+		t.Fatalf("valid V4 deployment rejected: %v", err)
+	}
+	for _, change := range [][2]string{
+		{"fee_pips = 500", "fee_pips = 8388608"},
+		{"tick_spacing = 10", "tick_spacing = 0"},
+		{"0x0000000000000000000000000000000000000000", "0x8888888888888888888888888888888888888888"},
+		{"currency0 = \"0x1111111111111111111111111111111111111111\"", "currency0 = \"0x2222222222222222222222222222222222222222\""},
+	} {
+		if _, err := loadText(t, strings.Replace(text, change[0], change[1], 1)); err == nil {
+			t.Fatalf("invalid V4 pool accepted: %s", change[1])
+		}
+	}
+}
+
 func TestLoadNormalizesPrefixlessConfiguredAddresses(t *testing.T) {
 	const prefixed = "0x1111111111111111111111111111111111111111"
 	text := validConfig + `[[chains.test-net.tokens]]

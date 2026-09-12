@@ -30,6 +30,22 @@ test("E2E covers both directions and hop counts independently for each deploymen
     { deployment: "uni", hops: 2, input: "A", output: "C" },
     { deployment: "uni", hops: 2, input: "C", output: "A" },
   ]);
+  expect(
+    scenarios([{ id: "uniswap-v4", kind: "uniswap-v4" }], "WETH", "USDC"),
+  ).toEqual([
+    {
+      deployment: "uniswap-v4",
+      hops: 1,
+      input: "WETH",
+      output: "USDC",
+    },
+    {
+      deployment: "uniswap-v4",
+      hops: 1,
+      input: "USDC",
+      output: "WETH",
+    },
+  ]);
 });
 
 test("default E2E only lists scenarios without a signer or reachable engine", async () => {

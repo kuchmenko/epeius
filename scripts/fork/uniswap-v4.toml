@@ -1,0 +1,38 @@
+[terminal]
+default_chain = "base-fork"
+engine_url = "http://127.0.0.1:18080"
+search_budget_ms = 15000
+
+[engine]
+listen_addr = "127.0.0.1:18080"
+quote_concurrency = 2
+
+[chains.base-fork]
+chain_id = 8453
+rpc_url_env = "ANVIL_RPC_URL"
+execution_enabled = true
+
+[[chains.base-fork.tokens]]
+address = "0x4200000000000000000000000000000000000006"
+symbol = "WETH"
+decimals = 18
+
+[[chains.base-fork.tokens]]
+address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+symbol = "USDC"
+decimals = 6
+
+[chains.base-fork.deployments.uniswap-v4]
+kind = "uniswap-v4"
+pool_manager = "0x498581ff718922c3f8e6a244956af099b2652b2b"
+quoter = "0x0d5e0f971ed27fbff6c2837bf31316121532048d"
+state_view = "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71"
+router = "0x6ff5693b99212da76ad316178a184ab56d299b43"
+permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+
+[[chains.base-fork.deployments.uniswap-v4.pools]]
+currency0 = "0x4200000000000000000000000000000000000006"
+currency1 = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+fee_pips = 500
+tick_spacing = 10
+hooks = "0x0000000000000000000000000000000000000000"

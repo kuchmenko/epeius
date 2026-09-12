@@ -119,6 +119,13 @@
     "abiSha256": "b6070610b5f812f1dacfcb356fd1e7a322c1258045c3e89c7da54a0e8dc1c315"
   },
   {
+    "name": "Permit2",
+    "origin": "https://github.com/Uniswap/permit2/blob/cc56ad0f3439c502c246fc5cfcc3db92bb8b7219/src/interfaces/IAllowanceTransfer.sol (reviewed allowance and on-chain approve interface)",
+    "license": "MIT",
+    "sourceSha256": "a31c712c5cc8d171818a4225c09011f9ba86b2d5edf6045ac812bab93b6bbb87",
+    "abiSha256": "094cb9c40e2b732dae8f4545b8fee7ab0a2e65101721a3e46908d17c31124c42"
+  },
+  {
     "name": "TestToken",
     "origin": "contracts/src/TestToken.sol at 1b57a3f6c7354d96ea2ad4ec95c57c18b4e0cd0b; solc 0.8.24, contracts/foundry.toml",
     "license": "MIT",
@@ -145,6 +152,41 @@
     "license": "GPL-2.0-or-later",
     "sourceSha256": "210a7bf29f26de9f45d35dac1214943eca41c3a002007dd6a0e1aa870bf2d2d1",
     "abiSha256": "08d0321b05b9824f82f7df69cf65a6b712926936c2cb5ad57499a2f23342bf4c"
+  },
+  {
+    "name": "UniswapUniversalRouter",
+    "origin": "https://github.com/Uniswap/universal-router/blob/3663f6db6e2fe121753cd2d899699c2dc75dca86/contracts/interfaces/IUniversalRouter.sol (reviewed deadline execute interface)",
+    "license": "GPL-3.0-or-later",
+    "sourceSha256": "b846941980a23b3d35cde5228daf004124fb7bb6ccfa7ab9cc3a3473480a5163",
+    "abiSha256": "a4e66e320fda7ad04f979594c165d84e4afc71fda01818542b9013ef3bdeb7d3"
+  },
+  {
+    "name": "UniswapV4PoolManager",
+    "origin": "https://github.com/Uniswap/v4-core/blob/a7cf038cd568801a79a9b4cf92cd5b52c95c8585/src/interfaces/IPoolManager.sol (reviewed initialize interface)",
+    "license": "BUSL-1.1",
+    "sourceSha256": "a98405333567e4ab344489728014795721cf0071c151536377d2fcc986e0600c",
+    "abiSha256": "a884f4517a7b1e7bab4b3dcab38cbbc8b778d236c335d72645b5c8d484bf11c1"
+  },
+  {
+    "name": "UniswapV4Quoter",
+    "origin": "https://github.com/Uniswap/v4-periphery/blob/444c526b77d804590f0d7bc5a481af5a3277c952/src/interfaces/IV4Quoter.sol plus Base deployed poolManager getter (reviewed exact-input-single interface)",
+    "license": "MIT",
+    "sourceSha256": "10854fab70de923e073da348368a2e0ef25d674a6bc2a968392ffe43a268cc14",
+    "abiSha256": "f925e411a0b681a85227abf593f1b9fa5f91f9bf181946b71aad563deaa72a59"
+  },
+  {
+    "name": "UniswapV4PositionManager",
+    "origin": "https://github.com/Uniswap/v4-periphery/blob/5d5dbf9d/src/PositionManager.sol and inherited interfaces (reviewed Base Sepolia deployment methods only)",
+    "license": "MIT",
+    "sourceSha256": "b64ec0ff4f3621cd6c2356364908612ac3c833e4f25bc54dc4e6a62b419b72e2",
+    "abiSha256": "b7b2f8024c0043660b3759902ef0947fabe23b41b628615e10e634fb97f4d3b8"
+  },
+  {
+    "name": "UniswapV4StateView",
+    "origin": "https://github.com/Uniswap/v4-periphery/blob/444c526b77d804590f0d7bc5a481af5a3277c952/src/lens/StateView.sol (reviewed poolManager and getSlot0 interface)",
+    "license": "MIT",
+    "sourceSha256": "cee9aff0c7d832d93a59f813c62613ac288a66898f49b9ad1de17e6007d7dab5",
+    "abiSha256": "f3f007a122fb86d05f739669d5525d3f12fd7d7b9dc31a9c8c9bff92c516dab7"
   },
   {
     "name": "UniswapV3Factory",

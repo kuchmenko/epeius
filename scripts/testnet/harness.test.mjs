@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { erc20Abi } from "viem";
+import { decodeAbiParameters, erc20Abi } from "viem";
 import {
   pancakeV3PoolAbi,
   uniswapPeripheryStateAbi,
@@ -22,6 +22,7 @@ import {
   options,
   run,
   sqrt,
+  v4PoolPlan,
 } from "./harness.mjs";
 
 const sender = "0x0000000000000000000000000000000000000001";
@@ -157,6 +158,7 @@ test("canonical receipt hash changes and block disagreement are rejected", async
 
 test("only explicit broadcast with explicit encrypted signer is accepted", () => {
   assert.equal(options(["deploy", "--sender", sender]).broadcast, false);
+  assert.equal(options(["seed-v4", "--sender", sender]).broadcast, false);
   assert.equal(
     options([
       "deploy",
@@ -201,6 +203,19 @@ test("checked-in profile owns chain, contracts, fixture tokens and fee limits", 
   assert.deepEqual(profile.decimals, { A: 18, B: 6, C: 8 });
   assert.deepEqual(profile.fixtures.uniswap_fees, [500, 3000]);
   assert.deepEqual(profile.fixtures.pancake_fees, [500, 2500]);
+  assert.deepEqual(profile.fixtures.uniswap_v4, {
+    pair: ["A", "C"],
+    fee: 500,
+    tick_spacing: 10,
+  });
+  assert.equal(
+    profile.uniV4.pool_manager,
+    "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408",
+  );
+  assert.equal(
+    profile.uniV4.position_manager,
+    "0x4B2C77d209D3405F41a037Ec6c77F7F5b8e2ca80",
+  );
 });
 
 test("profile reads custom quote concurrency and rejects absent or zero values", async () => {
@@ -314,6 +329,50 @@ test("equal-decimal V3 fixture stays valid and derives each bound independently"
   assert.ok(BigInt(result.liquidity) <= (1n << 128n) - 1n);
 });
 
+test("V4 fixture derives canonical pool ID and PositionManager action payload", () => {
+  const owner = "0x22D8382B5B49Bb0cc8156EC572CC581F154e042E";
+  const tokenA = {
+    address: "0x14ddd6cca49ed2ff37ede2d2ea336812eef51434",
+    decimals: 18,
+  };
+  const tokenC = {
+    address: "0xca7ad770c3ca045aed82e0669d0246c069675311",
+    decimals: 8,
+  };
+  const plan = v4PoolPlan(
+    tokenC,
+    tokenA,
+    { fee: 500, tick_spacing: 10 },
+    owner,
+  );
+  // Independently derived with Cast abi-encode plus keccak.
+  assert.equal(
+    plan.poolId,
+    "0xd5c73e110d9b56bad25071372c615a08f5c34636b6b92a82088297b95ea71ba3",
+  );
+  assert.deepEqual(plan.key, {
+    currency0: tokenA.address,
+    currency1: tokenC.address,
+    fee: 500,
+    tickSpacing: 10,
+    hooks: "0x0000000000000000000000000000000000000000",
+  });
+  assert.equal(plan.amount0Max, 10000n * 10n ** 18n);
+  assert.equal(plan.amount1Max, 10000n * 10n ** 8n);
+  const [actions, params] = decodeAbiParameters(
+    [{ type: "bytes" }, { type: "bytes[]" }],
+    plan.unlockData,
+  );
+  assert.equal(actions, "0x020d");
+  assert.equal(params.length, 2);
+  const [settle0, settle1] = decodeAbiParameters(
+    [{ type: "address" }, { type: "address" }],
+    params[1],
+  );
+  assert.equal(settle0.toLowerCase(), tokenA.address);
+  assert.equal(settle1.toLowerCase(), tokenC.address);
+});
+
 test("V3 fixture rejects 0/255 decimals whose generated values exceed protocol bounds", () => {
   assert.throws(() => fixture(0, 255, 10), /V3|bound|decimal/i);
 });
@@ -418,6 +477,7 @@ test("seed preflights every pool before estimating an earlier createPool", async
         'AB = ["A", "B"]\nBC = ["B", "C"]\nAC = ["A", "C"]',
         'AB = ["A", "B"]',
       )
+      .replace('pair = ["A", "C"]', 'pair = ["A", "B"]')
       .replace("pancake_fees = [500, 2500]", "pancake_fees = []");
     const manifest = {
       version: 1,

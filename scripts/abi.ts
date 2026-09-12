@@ -23,6 +23,10 @@ const goNames = new Set([
   "PancakeV3Router",
   "PancakeV3Factory",
   "PancakeQuoterV2",
+  "Permit2",
+  "UniswapUniversalRouter",
+  "UniswapV4Quoter",
+  "UniswapV4StateView",
 ]);
 
 // Only reviewed local canonical inputs are read. No network or runtime ABI source.

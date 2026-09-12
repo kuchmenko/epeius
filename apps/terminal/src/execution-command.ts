@@ -97,6 +97,7 @@ export async function executionCommand(
     tokenIn: string;
     tokenOut: string;
     afterApproval: boolean;
+    approvalRound?: number;
   },
 ) {
   if (
@@ -136,7 +137,7 @@ export async function executionCommand(
     {
       signer,
       reportPreparation: !!trade,
-      swapOnly: trade?.afterApproval,
+      swapOnly: (trade?.approvalRound ?? 0) >= 2,
       expectedChainId,
       slippageBps: Number(slippage),
       trusted,

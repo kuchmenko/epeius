@@ -140,6 +140,16 @@ export async function readSettings(path: string) {
             router?: string;
             fees?: number[];
             options?: unknown;
+            pool_manager?: string;
+            state_view?: string;
+            permit2?: string;
+            pools?: Array<{
+              currency0?: string;
+              currency1?: string;
+              fee_pips?: number;
+              tick_spacing?: number;
+              hooks?: string;
+            }>;
           }
         >;
       }

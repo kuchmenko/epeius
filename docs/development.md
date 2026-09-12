@@ -63,6 +63,33 @@ For execution review, run the CLI with local Connect/RPC fixtures and a stub Cas
 
 `bun run smoke` prints each connected chain, quote summaries, and `Read-only smoke check passed. No transactions sent.` only after all checks pass. A failing run prints a short diagnostic to stderr and exits nonzero.
 
+Uniswap V4 fork acceptance uses Base block `51172639` and requires an archive RPC. The checked-in runtime fixture is `scripts/fork/uniswap-v4.toml`. Start Anvil, align its next block with wall time, and fund the first standard Anvil account with WETH:
+
+```bash
+anvil --fork-url "$BASE_ARCHIVE_RPC_URL" --fork-block-number 51172639 \
+  --chain-id 8453 --host 127.0.0.1 --port 28545
+
+export ANVIL_RPC_URL=http://127.0.0.1:28545
+cast rpc --rpc-url "$ANVIL_RPC_URL" anvil_setNextBlockTimestamp "$(date +%s)"
+cast rpc --rpc-url "$ANVIL_RPC_URL" evm_mine
+cast send --rpc-url "$ANVIL_RPC_URL" --private-key "$ANVIL_PRIVATE_KEY" \
+  --value 2ether 0x4200000000000000000000000000000000000006 'deposit()'
+```
+
+Import that local-only key into a temporary Cast keystore, then run engine and E2E runner in separate terminals:
+
+```bash
+ANVIL_RPC_URL=http://127.0.0.1:28545 bun run engine -- \
+  --config scripts/fork/uniswap-v4.toml --anvil-simulation
+
+ANVIL_RPC_URL=http://127.0.0.1:28545 bun scripts/e2e.ts \
+  --config scripts/fork/uniswap-v4.toml --in WETH --out USDC --broadcast \
+  --keystore "$FORK_KEYSTORE" --password-file "$FORK_PASSWORD_FILE" \
+  --report .testnet/uniswap-v4-fork.jsonl
+```
+
+`--anvil-simulation` accepts exactly one chain and a plain loopback HTTP endpoint whose client identifies itself as Anvil. It uses pinned `debug_traceCall` transfer logs and never signs, submits, impersonates, or changes fork state. The E2E run covers both directions. Each direction exercises ERC20 approval to Permit2, Permit2 approval to Universal Router, a fresh quote after each permission, swap signing and submission, and canonical receipt checks. Confirm exact wallet input/output deltas and unchanged Universal Router WETH/USDC balances in the report. This fork uses deployed production contracts but remains local evidence; it does not prove live submission or production behavior.
+
 ## Layout
 
 ```text
@@ -74,7 +101,7 @@ services/quote-engine/
   internal/config/                Strict TOML loading and validation
   internal/rpc/                   Chain verification and pinned reads
   internal/quote/                 Status, quote, preparation, and simulation
-  internal/providers/uniswapv3/   Direct Uniswap/Pancake V3 quote calls
+  internal/providers/             Direct V3-family and Uniswap V4 quote calls
 proto/epeius/quote/v1/            Connect service contract
 generated/go/                     Generated Go module
 generated/ts/                     Generated TypeScript bindings
@@ -88,15 +115,15 @@ docs/                             Unified documentation
 
 `quote/handler.go` schedules opaque `QuoteCandidate` callbacks from `ProtocolQuoter`; it owns budgets, cancellation, concurrency, stable ordering and raw-output ranking. `v3.go` owns V3 candidate paths and quote/requote; `v3_deployments.go` owns its topology checks. `balancer_v2.go` owns full pool-ID verification, one-pool signed-delta quotes, Vault preparation, and its no-Vault-residue policy. The shared `Reader` requires EVM calls and snapshots, not a protocol-specific provider.
 
-`PreparationStrategy` in `quote/preparation.go` selects a supported route or allocation plan, then builds one transaction, an independent spender and explicit simulation obligations from frozen economic terms. `routers.go` and `executor.go` implement the current variants. `execution.go` stores detached terms and rechecks them without rebuilding calldata. `tenderly.go` consumes balance/allowance probes; it does not infer router or executor policy from a route.
+`PreparationStrategy` in `quote/preparation.go` selects a supported route or allocation plan, then builds one transaction, an independent spender and explicit simulation obligations from frozen economic terms. `routers.go`, `v4_router.go`, and `executor.go` implement current variants. `execution.go` stores detached terms and rechecks them without rebuilding calldata. Uniswap V4 returns at most one permission transaction per fresh quote: ERC20 approval to Permit2 first, then Permit2 approval to Universal Router. `tenderly.go` consumes balance/allowance probes; it does not infer router or executor policy from a route.
 
-`quote/composition.go` selects shipped implementations. `config.Load` accepts protocol validation supplied by startup; the shipped `config.ValidateChain` checks protocol and fixed-executor settings. New implementations can live beside the current ones without adding protocol switches to search, preparation lifecycle or simulation. The alternate-implementation test exercises config through quote and preparation with no V3 legs, different target/spender, stable ties and build-once rechecks. It is a test implementation, not a new supported protocol.
+`quote/composition.go` selects shipped implementations. `config.Load` accepts protocol validation supplied by startup; the shipped `config.ValidateChain` checks current direct protocols and fixed-executor settings. New implementations can live beside the current ones without adding protocol switches to search, preparation lifecycle or simulation. The alternate-implementation test exercises config through quote and preparation with no V3 legs, different target/spender, stable ties and build-once rechecks. It is a test implementation, not a new supported protocol.
 
 Go RPC uses go-ethereum with canonical hash-pinned EIP-1898 calls. ABI decoding uses canonical artifacts and strict re-encoding where needed. Factory address padding, trailing bytes and an out-of-range QuoterV2 uint160 result are now rejected explicitly; the SDK alone does not enforce every ABI integer width.
 
 ## Terminal execution modules
 
-`main.ts` dispatches commands and maps typed results to existing exit codes. `execution-command.ts` connects config, wallet, RPC, prompts, and JSONL output. `execution.ts` builds a validated plan once, then runs consent, immutable recheck, one send, and verification using supplied operations. `execution-policy.ts` owns common trust, amount, expiry and immutable-term checks. Files in `protocols/` own protocol encoding, admission, presentation, and receipt obligations; `v3.ts` contains shared V3 path rules. `receipt.ts` proves explicit ERC20 delta obligations. `trade.ts` refreshes only after `approval-confirmed`; it does not infer approval success from an output callback.
+`main.ts` dispatches commands and maps typed results to existing exit codes. `execution-command.ts` connects config, wallet, RPC, prompts, and JSONL output. `execution.ts` builds a validated plan once, then runs consent, immutable recheck, one send, and verification using supplied operations. `execution-policy.ts` owns common trust, amount, expiry and immutable-term checks. Files in `protocols/` own protocol encoding, admission, presentation, and receipt obligations; `v3.ts` contains shared V3 path rules. `receipt.ts` proves explicit ERC20 delta obligations. `trade.ts` refreshes only after `approval-confirmed`; it allows two separately confirmed V4 permission rounds and does not infer approval success from an output callback.
 
 `ExecutionResult` distinguishes `preview`, `canceled`, `approval-confirmed`, `swap-verified`, `failed`, and `unknown`. Known submitted outcomes keep their transaction hash. Pre-send validation errors still reach the CLI error path. Preview and verified approval/swap map to exit 0; cancellation, failure, and unknown map to exit 1. A trade is complete only after a verified swap, not after approval. `ExecutionEvent` types the existing machine payloads without changing their wire fields.
 

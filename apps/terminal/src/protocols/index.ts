@@ -5,6 +5,8 @@ import { fixedExecutor } from "./fixed-executor";
 import { pancake } from "./pancake-v3";
 import { slipstream } from "./slipstream";
 import { uniswap } from "./uniswap-v3";
+import { uniswapV4 } from "./uniswap-v4";
+import type { V3Deployment } from "./v3";
 
 type RawDeployment = {
   kind?: string;
@@ -13,6 +15,16 @@ type RawDeployment = {
   router?: string;
   fees?: number[];
   options?: unknown;
+  pool_manager?: string;
+  state_view?: string;
+  permit2?: string;
+  pools?: Array<{
+    currency0?: string;
+    currency1?: string;
+    fee_pips?: number;
+    tick_spacing?: number;
+    hooks?: string;
+  }>;
 };
 
 type ParsedDeployment = TrustedExecution["deployments"][string] & {
@@ -29,6 +41,7 @@ const providerParsers = new Map<
   ["pancake-v3", pancake],
   ["aerodrome-slipstream", slipstream],
   ["balancer-v2", balancer],
+  ["uniswap-v4", uniswapV4],
 ]);
 
 const deploymentFields = new Set([
@@ -38,6 +51,10 @@ const deploymentFields = new Set([
   "router",
   "fees",
   "options",
+  "pool_manager",
+  "state_view",
+  "permit2",
+  "pools",
 ]);
 
 export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
@@ -87,7 +104,16 @@ export function configureExecution(config: {
     tokens: config.tokens,
     deployments,
     ...(config.executor
-      ? { executor: fixedExecutor(config.executor, deployments) }
+      ? {
+          executor: fixedExecutor(
+            config.executor,
+            Object.fromEntries(
+              Object.entries(deployments).filter(
+                ([, deployment]) => deployment.kind !== "uniswap-v4",
+              ),
+            ) as Record<string, V3Deployment>,
+          ),
+        }
       : {}),
   };
 }

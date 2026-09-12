@@ -7,17 +7,26 @@ import { readConfig, readSettings } from "../apps/terminal/src/config";
 import { decimalToAtomic, resolveToken } from "../apps/terminal/src/tokens";
 import { PreparationStatus } from "../generated/ts/epeius/quote/v1/quote_pb";
 
-export function scenarios(deployments: string[]) {
-  return [...deployments].sort().flatMap((deployment) =>
-    [1, 2].flatMap((hops) =>
-      [false, true].map((reverse) => ({
-        deployment,
-        hops,
-        input: reverse ? "C" : "A",
-        output: reverse ? "A" : "C",
-      })),
-    ),
-  );
+export function scenarios(
+  deployments: Array<string | { id: string; kind?: string }>,
+  input = "A",
+  output = "C",
+) {
+  return deployments
+    .map((deployment) =>
+      typeof deployment === "string" ? { id: deployment } : deployment,
+    )
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .flatMap((deployment) =>
+      (deployment.kind === "uniswap-v4" ? [1] : [1, 2]).flatMap((hops) =>
+        [false, true].map((reverse) => ({
+          deployment: deployment.id,
+          hops,
+          input: reverse ? output : input,
+          output: reverse ? input : output,
+        })),
+      ),
+    );
 }
 
 // Persist submitted hashes as they arrive, before waiting for receipt verification.
@@ -68,6 +77,8 @@ async function main(args: string[]) {
       keystore: { type: "string" },
       "password-file": { type: "string" },
       report: { type: "string" },
+      in: { type: "string" },
+      out: { type: "string" },
       selection: { type: "boolean", default: false },
       broadcast: { type: "boolean", default: false },
       help: { type: "boolean" },
@@ -75,7 +86,7 @@ async function main(args: string[]) {
   });
   if (values.help) {
     console.log(
-      "Usage: bun scripts/e2e.ts --config PATH [--chain KEY] [--selection] [--broadcast --keystore PATH --password-file PATH] [--report PATH]\nWithout --broadcast, prints scenarios without network calls. Default: named deployment/hop/direction coverage. --selection: engine-selected trades in both directions, with interactive approval and swap confirmations. Requires seeded harness fixture tokens A and C as scenario inputs, not a general token whitelist. Stops at first failure without resending.",
+      "Usage: bun scripts/e2e.ts --config PATH [--chain KEY] [--in TOKEN --out TOKEN] [--selection] [--broadcast --keystore PATH --password-file PATH] [--report PATH]\nWithout --broadcast, prints scenarios without network calls. Default: named deployment/hop/direction coverage using A and C. --selection: engine-selected trades in both directions, with interactive approval and swap confirmations. --in and --out replace A and C together. Stops at first failure without resending.",
     );
     return;
   }
@@ -98,10 +109,18 @@ async function main(args: string[]) {
     throw new Error(
       "Selected chain requires at least one configured deployment.",
     );
-  const planned = scenarios(deployments.map(([id]) => id));
+  if (!!values.in !== !!values.out)
+    throw new Error("Provide --in and --out together.");
+  const input = values.in ?? "A";
+  const output = values.out ?? "C";
+  const planned = scenarios(
+    deployments.map(([id, deployment]) => ({ id, kind: deployment.kind })),
+    input,
+    output,
+  );
   const selectedScenarios = [
-    { input: "A", output: "C" },
-    { input: "C", output: "A" },
+    { input, output },
+    { input: output, output: input },
   ];
   const plan = values.selection ? selectedScenarios : planned;
   const track = values.selection ? "selection" : "coverage";
@@ -272,25 +291,40 @@ async function main(args: string[]) {
       );
     };
     let selected = await freshQuote();
-    const prepared = await client.prepareExecution(
-      {
-        quoteId: selected.quote.quoteId,
-        routeId: selected.route.routeId,
-        sender,
-        slippageBps: 50,
-      },
-      { timeoutMs: 45000 },
-    );
-    await record({ event: "preparation_preview", scenario, prepared });
-    if (prepared.status === PreparationStatus.APPROVAL_REQUIRED) {
+    let swapped = false;
+    for (const permissionRound of [0, 1, 2]) {
+      const prepared = await client.prepareExecution(
+        {
+          quoteId: selected.quote.quoteId,
+          routeId: selected.route.routeId,
+          sender,
+          slippageBps: 50,
+        },
+        { timeoutMs: 45000 },
+      );
+      await record({
+        event: "preparation_preview",
+        scenario,
+        permissionRound,
+        prepared,
+      });
+      if (prepared.status === PreparationStatus.READY) {
+        await execute(selected.quote.quoteId, selected.route.routeId, "swap");
+        swapped = true;
+        break;
+      }
+      if (prepared.status !== PreparationStatus.APPROVAL_REQUIRED)
+        throw new Error(
+          "Preparation did not pass; nothing sent for this scenario.",
+        );
+      if (permissionRound === 2)
+        throw new Error(
+          "A third permission is still required; nothing else sent.",
+        );
       await execute(selected.quote.quoteId, selected.route.routeId, "approval");
       selected = await freshQuote();
-    } else if (prepared.status !== PreparationStatus.READY) {
-      throw new Error(
-        "Preparation did not pass; nothing sent for this scenario.",
-      );
     }
-    await execute(selected.quote.quoteId, selected.route.routeId, "swap");
+    if (!swapped) throw new Error("Scenario did not produce a swap.");
     await record({ event: "scenario_passed", scenario });
   }
   await record({ event: "passed", track, count: planned.length });

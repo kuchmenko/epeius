@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   createClient,
   decodeFunctionResult,
+  encodeAbiParameters,
   encodeDeployData,
   encodeFunctionData,
   encodeFunctionResult,
@@ -36,10 +37,15 @@ import {
   pancakeV3FactoryAbi,
   pancakeV3PoolAbi,
   pancakeV3RouterAbi,
+  permit2Abi,
   testTokenAbi,
   uniswapPeripheryStateAbi,
   uniswapV3FactoryAbi,
   uniswapV3PoolAbi,
+  uniswapV4PoolManagerAbi,
+  uniswapV4PositionManagerAbi,
+  uniswapV4QuoterAbi,
+  uniswapV4StateViewAbi,
 } from "../../generated/abi/index.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -127,8 +133,10 @@ export function options(args) {
     manifest: resolve(root, ".testnet/manifest.json"),
     recipients: [],
   };
-  if (!["deploy", "seed", "check", "config"].includes(result.command))
-    throw new Error("Expected deploy, seed, check, or config");
+  if (
+    !["deploy", "seed", "seed-v4", "check", "config"].includes(result.command)
+  )
+    throw new Error("Expected deploy, seed, seed-v4, check, or config");
   const names = {
     "--config": "config",
     "--manifest": "manifest",
@@ -153,9 +161,12 @@ export function options(args) {
     else result[names[name]] = value;
   }
   if (result.sender) address(result.sender);
-  if (result.broadcast && !["deploy", "seed"].includes(result.command))
+  if (
+    result.broadcast &&
+    !["deploy", "seed", "seed-v4"].includes(result.command)
+  )
     throw new Error("Read-only command cannot broadcast");
-  if (["deploy", "seed"].includes(result.command) && !result.sender)
+  if (["deploy", "seed", "seed-v4"].includes(result.command) && !result.sender)
     throw new Error("--sender required even for dry-run");
   if (result.command === "seed" && !result.recipients.length)
     throw new Error(
@@ -176,6 +187,7 @@ export async function loadProfile(path) {
   }
   const chain = raw.chain;
   const uni = raw.uniswap;
+  const uniV4 = raw.uniswap_v4;
   const fixtures = raw.fixtures;
   const artifacts = raw.artifacts;
   const engine = raw.engine;
@@ -194,6 +206,7 @@ export async function loadProfile(path) {
     !Number.isInteger(fixtures.broad_fee) ||
     !Array.isArray(fixtures.uniswap_fees) ||
     !Array.isArray(fixtures.pancake_fees) ||
+    !fixtures.uniswap_v4 ||
     !artifacts ||
     [
       "token",
@@ -218,7 +231,27 @@ export async function loadProfile(path) {
       throw new Error(`Invalid harness config address: ${name}`);
     }
   }
+  for (const [name, value] of Object.entries(uniV4 ?? {})) {
+    try {
+      address(value);
+    } catch {
+      throw new Error(`Invalid Uniswap V4 harness config address: ${name}`);
+    }
+  }
+  if (
+    !uniV4 ||
+    [
+      "pool_manager",
+      "quoter",
+      "state_view",
+      "router",
+      "permit2",
+      "position_manager",
+    ].some((name) => !(name in uniV4))
+  )
+    throw new Error("Malformed Uniswap V4 harness config");
   const decimals = fixtures.tokens;
+  const v4Fixture = fixtures.uniswap_v4;
   if (
     !Object.keys(decimals).length ||
     Object.keys(decimals).some((symbol) => !symbol) ||
@@ -239,10 +272,20 @@ export async function loadProfile(path) {
     ) ||
     [...fixtures.uniswap_fees, ...fixtures.pancake_fees].some(
       (fee) => !Number.isInteger(fee) || fee < 0 || fee >= 1000000,
-    )
+    ) ||
+    !Array.isArray(v4Fixture.pair) ||
+    v4Fixture.pair.length !== 2 ||
+    v4Fixture.pair[0] === v4Fixture.pair[1] ||
+    v4Fixture.pair.some((symbol) => !(symbol in decimals)) ||
+    !Number.isInteger(v4Fixture.fee) ||
+    v4Fixture.fee < 0 ||
+    v4Fixture.fee >= 1000000 ||
+    !Number.isInteger(v4Fixture.tick_spacing) ||
+    v4Fixture.tick_spacing <= 0 ||
+    v4Fixture.tick_spacing > 32767
   )
     throw new Error("Malformed harness fixture config");
-  return { chain, uni, fixtures, decimals, artifacts, engine };
+  return { chain, uni, uniV4, fixtures, decimals, artifacts, engine };
 }
 function cast(args) {
   try {
@@ -327,8 +370,76 @@ export function fixture(
   };
 }
 
+const poolKeyParameter = {
+  type: "tuple",
+  components: [
+    { name: "currency0", type: "address" },
+    { name: "currency1", type: "address" },
+    { name: "fee", type: "uint24" },
+    { name: "tickSpacing", type: "int24" },
+    { name: "hooks", type: "address" },
+  ],
+};
+
+export function v4PoolPlan(first, second, config, owner) {
+  const [token0, token1] = [first, second].sort((a, b) =>
+    a.address.toLowerCase().localeCompare(b.address.toLowerCase()),
+  );
+  const values = fixture(token0.decimals, token1.decimals, config.tick_spacing);
+  const key = {
+    currency0: token0.address,
+    currency1: token1.address,
+    fee: config.fee,
+    tickSpacing: config.tick_spacing,
+    hooks: zeroAddress,
+  };
+  const poolId = keccak256(encodeAbiParameters([poolKeyParameter], [key]));
+  const amount0Max = parseUnits("10000", token0.decimals);
+  const amount1Max = parseUnits("10000", token1.decimals);
+  const mint = encodeAbiParameters(
+    [
+      poolKeyParameter,
+      { type: "int24" },
+      { type: "int24" },
+      { type: "uint256" },
+      { type: "uint128" },
+      { type: "uint128" },
+      { type: "address" },
+      { type: "bytes" },
+    ],
+    [
+      key,
+      values.lower,
+      values.upper,
+      BigInt(values.liquidity),
+      amount0Max,
+      amount1Max,
+      owner,
+      "0x",
+    ],
+  );
+  const settle = encodeAbiParameters(
+    [{ type: "address" }, { type: "address" }],
+    [key.currency0, key.currency1],
+  );
+  const unlockData = encodeAbiParameters(
+    [{ type: "bytes" }, { type: "bytes[]" }],
+    ["0x020d", [mint, settle]],
+  );
+  return {
+    token0,
+    token1,
+    key,
+    poolId,
+    amount0Max,
+    amount1Max,
+    unlockData,
+    ...values,
+  };
+}
+
 export async function run(o) {
-  const { chain, uni, fixtures, decimals, artifacts, engine } =
+  const { chain, uni, uniV4, fixtures, decimals, artifacts, engine } =
     await loadProfile(o.config);
   const weth = chain.weth;
   const url = process.env[chain.rpc_url_env];
@@ -372,6 +483,18 @@ export async function run(o) {
     throw new Error(
       "Manifest deployment identity does not match harness config",
     );
+  const useV4 = o.command === "seed-v4" || Boolean(manifest.uniswapV4);
+  if (
+    manifest.uniswapV4 &&
+    Object.entries(uniV4).some(
+      ([name, target]) =>
+        typeof manifest.uniswapV4[name] !== "string" ||
+        !same(manifest.uniswapV4[name], target),
+    )
+  )
+    throw new Error(
+      "Manifest Uniswap V4 identity does not match harness config",
+    );
   const call = async (to, abi, functionName, args = []) =>
     decodeResult(
       abi,
@@ -391,6 +514,7 @@ export async function run(o) {
   const officialHashes = {};
   for (const [name, target] of Object.entries(uni))
     officialHashes[name] = await verifyCode(target);
+  const v4OfficialHashes = {};
   await verifyCode(weth);
   for (const name of ["quoter", "router", "npm"]) {
     if (
@@ -403,14 +527,43 @@ export async function run(o) {
     if (!same(await addr(uni[name], uniswapPeripheryStateAbi, "WETH9"), weth))
       throw new Error(`Official ${name} WETH link mismatch`);
   }
+  if (useV4) {
+    for (const [name, target] of Object.entries(uniV4))
+      v4OfficialHashes[name] = await verifyCode(target);
+    for (const [name, abi] of [
+      ["quoter", uniswapV4QuoterAbi],
+      ["state_view", uniswapV4StateViewAbi],
+      ["position_manager", uniswapV4PositionManagerAbi],
+    ]) {
+      if (
+        !same(await addr(uniV4[name], abi, "poolManager"), uniV4.pool_manager)
+      )
+        throw new Error(`Official Uniswap V4 ${name} PoolManager mismatch`);
+    }
+    if (
+      !same(
+        await addr(
+          uniV4.position_manager,
+          uniswapV4PositionManagerAbi,
+          "permit2",
+        ),
+        uniV4.permit2,
+      )
+    )
+      throw new Error("Official Uniswap V4 PositionManager Permit2 mismatch");
+  }
   console.log(
-    `${chain.key} guard and configured Uniswap bytecode/factory/WETH links verified.`,
+    `${chain.key} guard and configured Uniswap deployment links verified.`,
   );
   if (o.sender && manifest.sender && !same(o.sender, manifest.sender))
     throw new Error("Manifest signer mismatch");
   manifest.sender ??= o.sender;
   manifest.uni = uni;
   manifest.officialCodeHashes = officialHashes;
+  if (useV4) {
+    manifest.uniswapV4 ??= uniV4;
+    manifest.uniswapV4CodeHashes = v4OfficialHashes;
+  }
   const save = () => {
     if (!o.broadcast) return;
     mkdirSync(dirname(resolve(o.manifest)), { recursive: true });
@@ -598,7 +751,7 @@ export async function run(o) {
     save();
   }
   if (
-    ["seed", "config"].includes(o.command) ||
+    ["seed", "seed-v4", "config"].includes(o.command) ||
     (o.command === "check" && existsSync(o.manifest))
   ) {
     for (const symbol of Object.keys(decimals)) {
@@ -612,6 +765,11 @@ export async function run(o) {
       )
         throw new Error(`Wrong decimals: ${symbol}`);
     }
+  }
+  if (
+    ["seed", "config"].includes(o.command) ||
+    (o.command === "check" && existsSync(o.manifest))
+  ) {
     for (const name of ["deployer", "factory", "router", "quoter"])
       await verifyCode(manifest.pancake[name]);
     if (
@@ -792,6 +950,216 @@ export async function run(o) {
       save();
     }
   }
+  if (o.command === "seed-v4") {
+    const setup = fixtures.uniswap_v4;
+    const [firstSymbol, secondSymbol] = setup.pair;
+    const plan = v4PoolPlan(
+      manifest.tokens[firstSymbol],
+      manifest.tokens[secondSymbol],
+      setup,
+      o.sender,
+    );
+    const expectedFixture = {
+      pair: setup.pair,
+      fee: setup.fee,
+      tickSpacing: setup.tick_spacing,
+      poolId: plan.poolId,
+      token0: plan.token0.address,
+      token1: plan.token1.address,
+      lower: plan.lower,
+      upper: plan.upper,
+      liquidity: plan.liquidity,
+    };
+    if (
+      manifest.v4Fixture &&
+      Object.entries(expectedFixture).some(
+        ([name, value]) =>
+          JSON.stringify(manifest.v4Fixture[name]) !== JSON.stringify(value),
+      )
+    )
+      throw new Error("Manifest Uniswap V4 fixture definition changed");
+    manifest.v4Fixture ??= expectedFixture;
+
+    if (manifest.v4Fixture.positionTokenId) {
+      const tokenId = BigInt(manifest.v4Fixture.positionTokenId);
+      if (
+        !same(
+          await call(
+            uniV4.position_manager,
+            uniswapV4PositionManagerAbi,
+            "ownerOf",
+            [tokenId],
+          ),
+          o.sender,
+        )
+      )
+        throw new Error("Uniswap V4 fixture position owner mismatch");
+      const positionLiquidity = BigInt(
+        await call(
+          uniV4.position_manager,
+          uniswapV4PositionManagerAbi,
+          "getPositionLiquidity",
+          [tokenId],
+        ),
+      );
+      if (positionLiquidity !== BigInt(plan.liquidity))
+        throw new Error("Uniswap V4 fixture position liquidity mismatch");
+      console.log(
+        `Uniswap V4 fixture position ${tokenId} already has ${positionLiquidity} liquidity.`,
+      );
+    } else {
+      const mintKey = "v4-mint-position-A-C-500";
+      const recordPosition = async () => {
+        const receipt = manifest.transactions[mintKey]?.receipt;
+        const transfer = receipt?.logs?.filter(
+          (log) =>
+            same(log.address, uniV4.position_manager) &&
+            same(
+              log.topics?.[0],
+              "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            ) &&
+            same(log.topics?.[1], zeroHash) &&
+            same(`0x${log.topics?.[2]?.slice(-40)}`, o.sender) &&
+            isHash(log.topics?.[3]),
+        );
+        if (transfer?.length !== 1)
+          throw new Error("Missing unique Uniswap V4 position mint event");
+        const tokenId = BigInt(transfer[0].topics[3]);
+        const owner = await call(
+          uniV4.position_manager,
+          uniswapV4PositionManagerAbi,
+          "ownerOf",
+          [tokenId],
+        );
+        const positionLiquidity = BigInt(
+          await call(
+            uniV4.position_manager,
+            uniswapV4PositionManagerAbi,
+            "getPositionLiquidity",
+            [tokenId],
+          ),
+        );
+        if (
+          !same(owner, o.sender) ||
+          positionLiquidity !== BigInt(plan.liquidity)
+        )
+          throw new Error("Uniswap V4 fixture position verification failed");
+        manifest.v4Fixture.positionTokenId = String(tokenId);
+        save();
+      };
+      if (manifest.transactions[mintKey]) {
+        if (!manifest.v4Fixture.positionDeadline)
+          throw new Error("Missing journaled Uniswap V4 position deadline");
+        await write(
+          mintKey,
+          uniV4.position_manager,
+          uniswapV4PositionManagerAbi,
+          "modifyLiquidities",
+          [plan.unlockData, BigInt(manifest.v4Fixture.positionDeadline)],
+        );
+        await recordPosition();
+      } else {
+        for (const [token, maximum] of [
+          [plan.token0, plan.amount0Max],
+          [plan.token1, plan.amount1Max],
+        ]) {
+          const balance = BigInt(
+            await call(token.address, erc20Abi, "balanceOf", [o.sender]),
+          );
+          if (balance < maximum)
+            throw new Error(`Insufficient ${token.address} fixture balance`);
+          const allowance = BigInt(
+            await call(token.address, erc20Abi, "allowance", [
+              o.sender,
+              uniV4.permit2,
+            ]),
+          );
+          if (allowance < maximum)
+            await write(
+              `v4-approve-token-${token.address.toLowerCase()}`,
+              token.address,
+              erc20Abi,
+              "approve",
+              [uniV4.permit2, maximum],
+            );
+          const permission = await call(
+            uniV4.permit2,
+            permit2Abi,
+            "allowance",
+            [o.sender, token.address, uniV4.position_manager],
+          );
+          const permittedAmount = BigInt(permission.amount ?? permission[0]);
+          if (permittedAmount < maximum)
+            await write(
+              `v4-approve-permit2-${token.address.toLowerCase()}`,
+              uniV4.permit2,
+              permit2Abi,
+              "approve",
+              [
+                token.address,
+                uniV4.position_manager,
+                maximum,
+                (1n << 48n) - 1n,
+              ],
+            );
+        }
+        let slot = await call(
+          uniV4.state_view,
+          uniswapV4StateViewAbi,
+          "getSlot0",
+          [plan.poolId],
+        );
+        if (slot[0] === 0n) {
+          await write(
+            "v4-initialize-A-C-500",
+            uniV4.pool_manager,
+            uniswapV4PoolManagerAbi,
+            "initialize",
+            [plan.key, BigInt(plan.sqrtPriceX96)],
+          );
+          if (o.broadcast) {
+            slot = await call(
+              uniV4.state_view,
+              uniswapV4StateViewAbi,
+              "getSlot0",
+              [plan.poolId],
+            );
+            if (slot[0] !== BigInt(plan.sqrtPriceX96))
+              throw new Error("Uniswap V4 fixture initial price mismatch");
+          }
+        } else if (slot[0] !== BigInt(plan.sqrtPriceX96)) {
+          throw new Error("Existing Uniswap V4 pool has a different price");
+        }
+        const tokenId = await call(
+          uniV4.position_manager,
+          uniswapV4PositionManagerAbi,
+          "nextTokenId",
+        );
+        if (!o.broadcast)
+          console.log(`DRY v4-position: current next NFT ${tokenId}`);
+        const latestBlock = await rpc("eth_getBlockByNumber", [
+          "latest",
+          false,
+        ]);
+        const deadline =
+          manifest.v4Fixture.positionDeadline ??
+          String(BigInt(latestBlock.timestamp) + 86400n);
+        if (o.broadcast) {
+          manifest.v4Fixture.positionDeadline = deadline;
+          save();
+        }
+        await write(
+          mintKey,
+          uniV4.position_manager,
+          uniswapV4PositionManagerAbi,
+          "modifyLiquidities",
+          [plan.unlockData, BigInt(deadline)],
+        );
+        if (o.broadcast) await recordPosition();
+      }
+    }
+    save();
+  }
   if (o.command === "check") {
     for (const pool of manifest.pools) {
       await verifyCode(pool.address);
@@ -799,6 +1167,17 @@ export async function run(o) {
         pool.provider === "uni" ? uniswapV3PoolAbi : pancakeV3PoolAbi;
       const liquidity = await call(pool.address, poolAbi, "liquidity");
       console.log(`${pool.key}: active liquidity ${liquidity}`);
+    }
+    if (manifest.v4Fixture?.positionTokenId) {
+      const liquidity = await call(
+        uniV4.position_manager,
+        uniswapV4PositionManagerAbi,
+        "getPositionLiquidity",
+        [BigInt(manifest.v4Fixture.positionTokenId)],
+      );
+      console.log(
+        `uniswap-v4-${manifest.v4Fixture.pair.join("")}-${manifest.v4Fixture.fee}: position ${manifest.v4Fixture.positionTokenId}, liquidity ${liquidity}`,
+      );
     }
     console.log(
       `Read checks complete; ${manifest.pools.length} manifest pools. No writes.`,
@@ -845,6 +1224,44 @@ export async function run(o) {
           (key) => `${key} = "${deployment[key]}"`,
         ),
         `fees = ${fees}`,
+      );
+    }
+    if (manifest.v4Fixture?.positionTokenId) {
+      const slot = await call(
+        uniV4.state_view,
+        uniswapV4StateViewAbi,
+        "getSlot0",
+        [manifest.v4Fixture.poolId],
+      );
+      const positionLiquidity = BigInt(
+        await call(
+          uniV4.position_manager,
+          uniswapV4PositionManagerAbi,
+          "getPositionLiquidity",
+          [BigInt(manifest.v4Fixture.positionTokenId)],
+        ),
+      );
+      if (
+        slot[0] === 0n ||
+        positionLiquidity !== BigInt(manifest.v4Fixture.liquidity)
+      )
+        throw new Error("Uniswap V4 fixture is not active");
+      lines.push(
+        "",
+        `[chains.${chain.key}.deployments.uniswap-v4]`,
+        'kind = "uniswap-v4"',
+        `pool_manager = "${uniV4.pool_manager}"`,
+        `quoter = "${uniV4.quoter}"`,
+        `state_view = "${uniV4.state_view}"`,
+        `router = "${uniV4.router}"`,
+        `permit2 = "${uniV4.permit2}"`,
+        "",
+        `[[chains.${chain.key}.deployments.uniswap-v4.pools]]`,
+        `currency0 = "${manifest.v4Fixture.token0}"`,
+        `currency1 = "${manifest.v4Fixture.token1}"`,
+        `fee_pips = ${manifest.v4Fixture.fee}`,
+        `tick_spacing = ${manifest.v4Fixture.tickSpacing}`,
+        `hooks = "${zeroAddress}"`,
       );
     }
     const path = resolve(dirname(o.manifest), "runtime.toml");
