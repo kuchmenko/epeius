@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   GetStatusResponseSchema,
+  OnChainPermissionSchema,
   PreparationStatus,
   PrepareExecutionRequestSchema,
   type PrepareExecutionResponse,
@@ -14,6 +15,7 @@ import {
   QuotedAllocationSchema,
   QuoteFinalSchema,
   QuoteRequestSchema,
+  UniswapV4PoolKeySchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type ExecutionIO, executePrepared } from "./execution";
 import { uint256Decimal, validatePreparation } from "./execution-policy";
@@ -427,7 +429,14 @@ test("approval confirms separately, sends only exact approval and requires fresh
     data: `0x095ea7b3${router.slice(2).padStart(64, "0")}${(101).toString(16).padStart(64, "0")}`,
   };
   f.p.transaction = undefined;
-  f.io.swapOnly = true;
+  f.io.approvalPolicy = "permission-only";
+  await expect(executePrepared(f.io)).rejects.toThrow(
+    "Approval is still required",
+  );
+  expect(f.sent).toHaveLength(0);
+  expect(f.confirmations).toHaveLength(0);
+  f.reports.length = 0;
+  f.io.approvalPolicy = "none";
   await expect(executePrepared(f.io)).rejects.toThrow(
     "Approval is still required",
   );
@@ -441,7 +450,7 @@ test("approval confirms separately, sends only exact approval and requires fresh
     },
     sent: false,
   });
-  f.io.swapOnly = false;
+  f.io.approvalPolicy = undefined;
   f.requests.length = 0;
   f.reports.length = 0;
   expect(await executePrepared(f.io)).toEqual({
@@ -780,6 +789,10 @@ test("Balancer binds full pool ID and matches independent Vault.swap calldata", 
       changed.route.legs[0].selector = { case: "feePips", value: 0 };
     },
     (changed: PrepareExecutionResponse) => {
+      assert(changed.route);
+      changed.route.legs[0].uniswapV4PoolKey = create(UniswapV4PoolKeySchema);
+    },
+    (changed: PrepareExecutionResponse) => {
       assert(changed.transaction);
       changed.transaction.to = poolId.slice(0, 42);
     },
@@ -882,6 +895,25 @@ test("rejects altered target, calldata, path, amount, deadline, recipient and ap
     (p) => {
       assert(p.route);
       p.route.legs[0].selector = { case: "feePips", value: 100 };
+    },
+    (p) => {
+      assert(p.route);
+      p.route.legs[0].uniswapV4PoolKey = create(UniswapV4PoolKeySchema, {
+        currency0: input,
+        currency1: output,
+        feePips: 500,
+        tickSpacing: 10,
+        hooks: addr("0"),
+      });
+    },
+    (p) => {
+      p.onChainPermission = create(OnChainPermissionSchema, {
+        target: input,
+        token: input,
+        spender: router,
+        amountAtomic: p.amountInAtomic,
+        expirationUnix: p.deadlineUnix,
+      });
     },
     (p) => {
       p.amountInAtomic = "102";
@@ -1328,9 +1360,11 @@ console.log(args[0] === 'wallet' ? readFileSync(${JSON.stringify(accountPath)}, 
         ? ["--in", "IN", "--out", "OUT", "--amount-atomic", "101"]
         : args[0] === "status" || args[0] === "tokens"
           ? []
-          : args.includes("--allocations")
-            ? ["--quote-id", "q1"]
-            : ["--quote-id", "q1", "--route-id", "r1"]),
+          : args.includes("--preparation-id")
+            ? []
+            : args.includes("--allocations")
+              ? ["--quote-id", "q1"]
+              : ["--quote-id", "q1", "--route-id", "r1"]),
       ...(["quote", "tokens", "status"].includes(args[0])
         ? []
         : [
@@ -1422,6 +1456,33 @@ console.log(args[0] === 'wallet' ? readFileSync(${JSON.stringify(accountPath)}, 
     expect(slowPreview.code).toBe(0);
     expect(slowPreview.out).toContain('"status":"PREPARATION_STATUS_READY"');
     expect(slowPreview.out).toContain('"sent":false');
+    const requestCount = requests.length;
+    const missingResumeSlippage = await run([
+      "execute",
+      "--preparation-id",
+      "p-preview",
+    ]);
+    expect(missingResumeSlippage.code).toBe(1);
+    expect(missingResumeSlippage.err).toContain(
+      "--slippage-bps is required with --preparation-id",
+    );
+    expect(requests).toHaveLength(requestCount);
+    const existingPreview = await run([
+      "execute",
+      "--preparation-id",
+      "p-preview",
+      "--slippage-bps",
+      "50",
+    ]);
+    expect(existingPreview.code).toBe(1);
+    expect(existingPreview.out).toBe('{"sent":false,"outcome":"canceled"}\n');
+    expect(requests.at(-1)).toMatchObject({
+      preparationId: "p-preview",
+      quoteId: "",
+      routeId: "",
+      sender: "",
+      slippageBps: 0,
+    });
     remoteChainId = "84532";
     expect((await run(["execute", "--confirm-swap", "yes"])).err).toContain(
       "Engine chain ID must match configured chain ID",

@@ -49,12 +49,12 @@ Usage:
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
   bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH [--route-id ID] [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
-  bun run terminal -- prepare|execute --chain KEY --quote-id ID (--route-id ID | --allocations JSON) --keystore PATH --password-file PATH [--slippage-bps N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID | --allocations JSON) [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
 prepare previews without sending. execute displays terms and asks approval or swap confirmation.
 trade quotes, selects the engine recommendation or --route-id, and executes. Selection uses raw output, not gas-adjusted output or a global best.
-After approval, trade refreshes once, reselects the engine recommendation (or keeps --route-id), and requires a fresh interactive swap confirmation.
+After each approval, trade gets a fresh quote and asks separately for the next permission or swap. At most two permission transactions are allowed.
 Approval always requires a fresh quote afterward. Execution output is JSON lines; confirmations go to stderr.`;
 
 type Globals = {
@@ -203,6 +203,7 @@ export async function main(rawArgs: string[]) {
         "chain",
         "quote-id",
         "route-id",
+        "preparation-id",
         "allocations",
         "keystore",
         "password-file",
@@ -210,14 +211,19 @@ export async function main(rawArgs: string[]) {
         "confirm-approval",
         "confirm-swap",
       ]);
+      if (values["preparation-id"] && values["slippage-bps"] === undefined)
+        throw new Error("--slippage-bps is required with --preparation-id.");
       if (
         !values.keystore ||
         !values["password-file"] ||
-        !values["quote-id"] ||
-        !!values["route-id"] === !!values.allocations
+        (!values["quote-id"] && !values["preparation-id"]) ||
+        (!!values["quote-id"] && !!values["preparation-id"]) ||
+        (values["preparation-id"]
+          ? !!values["route-id"] || !!values.allocations
+          : !!values["route-id"] === !!values.allocations)
       )
         throw new Error(
-          "Provide --keystore, --password-file, --quote-id and either --route-id or --allocations.",
+          "Provide --keystore, --password-file, and either --preparation-id alone or --quote-id with --route-id or --allocations.",
         );
       const client = quoteClient(
         parsed.engineUrl
@@ -391,7 +397,7 @@ export async function main(rawArgs: string[]) {
           {
             quote: getQuote,
             report: (result) => console.log(JSON.stringify(result)),
-            execute: async (quote, route, afterApproval) => {
+            execute: async (quote, route, afterApproval, approvalRound) => {
               return executionCommand(
                 "trade",
                 {
@@ -412,6 +418,7 @@ export async function main(rawArgs: string[]) {
                   tokenIn: tokenIn.address,
                   tokenOut: tokenOut.address,
                   afterApproval,
+                  approvalRound,
                 },
               );
             },

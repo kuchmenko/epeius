@@ -8,6 +8,7 @@ import {
   maxUint256,
   size,
 } from "viem";
+import { permit2Abi } from "../../../generated/abi";
 import {
   PreparationStatus,
   type PrepareExecutionResponse,
@@ -20,6 +21,7 @@ export const ExecutionAction = {
   Approval: "approval",
   Swap: "swap",
 } as const;
+const permit2PermissionLifetime = 30n * 60n;
 export type ExecutionAction =
   (typeof ExecutionAction)[keyof typeof ExecutionAction];
 
@@ -30,6 +32,7 @@ export type SwapTerms = {
   quotedOutput: string;
   routeDetails: string[][];
   receipt: Pick<ReceiptObligations, "intermediate" | "touched">;
+  permission?: { target: string; spender: string };
 };
 
 export type ExecutionImplementation = {
@@ -115,7 +118,10 @@ export function validatePreparation(
     throw new Error("Requested slippage must be 0 through 9999 bps.");
   assertPreparationCurrent(p, now);
   const approval = p.status === PreparationStatus.APPROVAL_REQUIRED;
-  const tx = approval ? p.approvalTransaction : p.transaction;
+  const permission = p.onChainPermission;
+  const tx = approval
+    ? (permission?.transaction ?? p.approvalTransaction)
+    : p.transaction;
   if (
     !tx ||
     !p.preparationId ||
@@ -164,6 +170,8 @@ export function validatePreparation(
       "Route is not allowed by local token and deployment config.",
     );
   const terms = implementation.plan(p, trusted.tokens);
+  if (!approval && (permission || p.approvalTransaction || p.approvalSpender))
+    throw new Error("READY preparation must not contain approval fields.");
   const quoted = uint256Decimal(terms.quotedOutput, "Aggregate output");
   if (quoted <= 0n) throw new Error("Route quoted output must be positive.");
   if (minimum !== (quoted * BigInt(10000 - slippageBps)) / 10000n)
@@ -171,12 +179,55 @@ export function validatePreparation(
       "Prepared slippage minimum does not match saved route quote.",
     );
   if (approval) {
+    if (permission) {
+      const expiration = uint256Decimal(
+        permission.expirationUnix,
+        "Permission expiration",
+      );
+      const deadline = uint256Decimal(p.deadlineUnix, "Deadline");
+      const expected = encodeFunctionData({
+        abi: permit2Abi,
+        functionName: "approve",
+        args: [
+          p.tokenIn as Address,
+          terms.target as Address,
+          amountIn,
+          Number(expiration),
+        ],
+      });
+      if (
+        p.approvalTransaction ||
+        p.approvalSpender ||
+        !terms.permission ||
+        !same(terms.permission.target, terms.spender) ||
+        !same(terms.permission.spender, terms.target) ||
+        !same(permission.target, terms.permission.target) ||
+        !same(permission.token, p.tokenIn) ||
+        !same(permission.spender, terms.permission.spender) ||
+        permission.amountAtomic !== p.amountInAtomic ||
+        expiration !== deadline + permit2PermissionLifetime ||
+        expiration >= 1n << 48n ||
+        !same(tx.to, permission.target) ||
+        !same(tx.data, expected) ||
+        p.transaction
+      )
+        throw new Error(
+          "Permit2 permission must authorize only the displayed token, amount, spender, and expiration.",
+        );
+      return {
+        action: ExecutionAction.Approval,
+        transaction: tx,
+        spender: permission.target,
+        routeDetails: terms.routeDetails,
+      };
+    }
     const expected = encodeFunctionData({
       abi: erc20Abi,
       functionName: "approve",
       args: [terms.spender as Address, amountIn],
     });
     if (
+      p.onChainPermission ||
       !isAddress(p.approvalSpender, { strict: false }) ||
       !same(p.approvalSpender, terms.spender) ||
       !same(tx.to, p.tokenIn) ||

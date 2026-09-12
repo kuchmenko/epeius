@@ -4,12 +4,21 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { erc20Abi } from "viem";
+import {
+  decodeAbiParameters,
+  encodeFunctionData,
+  encodeFunctionResult,
+  erc20Abi,
+  keccak256,
+  toFunctionSelector,
+} from "viem";
 import {
   pancakeV3PoolAbi,
   uniswapPeripheryStateAbi,
   uniswapV3FactoryAbi,
   uniswapV3PoolAbi,
+  uniswapV4PositionManagerAbi,
+  uniswapV4StateViewAbi,
 } from "../../generated/abi/index.ts";
 import {
   address,
@@ -22,11 +31,17 @@ import {
   options,
   run,
   sqrt,
+  v4PoolPlan,
 } from "./harness.mjs";
 
 const sender = "0x0000000000000000000000000000000000000001";
 const defaultProfilePath = new URL("./harness.toml", import.meta.url).pathname;
-const { uni } = await loadProfile(defaultProfilePath);
+const { uni, uniV4 } = await loadProfile(defaultProfilePath);
+const v4TestProfile = async () =>
+  (await Bun.file(defaultProfilePath).text())
+    .replace("BASE_SEPOLIA_RPC_URL", "HARNESS_ISOLATED_RPC")
+    .replace(uniV4.permit2_code_hash, keccak256("0x6000"))
+    .replace(uniV4.router_code_hash, keccak256("0x6000"));
 test("pinned Uniswap artifacts are deployable without external library links", async () => {
   for (const [name, version, contract] of [
     ["@uniswap/v3-core", "1.0.1", "UniswapV3Factory"],
@@ -157,6 +172,7 @@ test("canonical receipt hash changes and block disagreement are rejected", async
 
 test("only explicit broadcast with explicit encrypted signer is accepted", () => {
   assert.equal(options(["deploy", "--sender", sender]).broadcast, false);
+  assert.equal(options(["seed-v4", "--sender", sender]).broadcast, false);
   assert.equal(
     options([
       "deploy",
@@ -201,6 +217,19 @@ test("checked-in profile owns chain, contracts, fixture tokens and fee limits", 
   assert.deepEqual(profile.decimals, { A: 18, B: 6, C: 8 });
   assert.deepEqual(profile.fixtures.uniswap_fees, [500, 3000]);
   assert.deepEqual(profile.fixtures.pancake_fees, [500, 2500]);
+  assert.deepEqual(profile.fixtures.uniswap_v4, {
+    pair: ["A", "C"],
+    fee: 500,
+    tick_spacing: 10,
+  });
+  assert.equal(
+    profile.uniV4.pool_manager,
+    "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408",
+  );
+  assert.equal(
+    profile.uniV4.position_manager,
+    "0x4B2C77d209D3405F41a037Ec6c77F7F5b8e2ca80",
+  );
 });
 
 test("profile reads custom quote concurrency and rejects absent or zero values", async () => {
@@ -314,6 +343,514 @@ test("equal-decimal V3 fixture stays valid and derives each bound independently"
   assert.ok(BigInt(result.liquidity) <= (1n << 128n) - 1n);
 });
 
+test("V4 fixture derives canonical pool ID and PositionManager action payload", () => {
+  const owner = "0x22D8382B5B49Bb0cc8156EC572CC581F154e042E";
+  const tokenA = {
+    address: "0x14ddd6cca49ed2ff37ede2d2ea336812eef51434",
+    decimals: 18,
+  };
+  const tokenC = {
+    address: "0xca7ad770c3ca045aed82e0669d0246c069675311",
+    decimals: 8,
+  };
+  const plan = v4PoolPlan(
+    tokenC,
+    tokenA,
+    { fee: 500, tick_spacing: 10 },
+    owner,
+  );
+  // Independently derived with Cast abi-encode plus keccak.
+  assert.equal(
+    plan.poolId,
+    "0xd5c73e110d9b56bad25071372c615a08f5c34636b6b92a82088297b95ea71ba3",
+  );
+  assert.deepEqual(plan.key, {
+    currency0: tokenA.address,
+    currency1: tokenC.address,
+    fee: 500,
+    tickSpacing: 10,
+    hooks: "0x0000000000000000000000000000000000000000",
+  });
+  assert.equal(plan.amount0Max, 10000n * 10n ** 18n);
+  assert.equal(plan.amount1Max, 10000n * 10n ** 8n);
+  const [actions, params] = decodeAbiParameters(
+    [{ type: "bytes" }, { type: "bytes[]" }],
+    plan.unlockData,
+  );
+  assert.equal(actions, "0x020d");
+  assert.equal(params.length, 2);
+  const [mintKey, lower, upper, liquidity, max0, max1, recipient, hookData] =
+    decodeAbiParameters(
+      [
+        {
+          type: "tuple",
+          components: [
+            { name: "currency0", type: "address" },
+            { name: "currency1", type: "address" },
+            { name: "fee", type: "uint24" },
+            { name: "tickSpacing", type: "int24" },
+            { name: "hooks", type: "address" },
+          ],
+        },
+        { type: "int24" },
+        { type: "int24" },
+        { type: "uint256" },
+        { type: "uint128" },
+        { type: "uint128" },
+        { type: "address" },
+        { type: "bytes" },
+      ],
+      params[0],
+    );
+  assert.deepEqual(
+    {
+      currency0: mintKey.currency0.toLowerCase(),
+      currency1: mintKey.currency1.toLowerCase(),
+      fee: mintKey.fee,
+      tickSpacing: mintKey.tickSpacing,
+      hooks: mintKey.hooks.toLowerCase(),
+    },
+    plan.key,
+  );
+  assert.equal(lower, plan.lower);
+  assert.equal(upper, plan.upper);
+  assert.ok(lower < upper);
+  assert.equal(liquidity, BigInt(plan.liquidity));
+  assert.equal(max0, plan.amount0Max);
+  assert.equal(max1, plan.amount1Max);
+  assert.equal(recipient.toLowerCase(), owner.toLowerCase());
+  assert.equal(hookData, "0x");
+  const [settle0, settle1] = decodeAbiParameters(
+    [{ type: "address" }, { type: "address" }],
+    params[1],
+  );
+  assert.equal(settle0.toLowerCase(), tokenA.address);
+  assert.equal(settle1.toLowerCase(), tokenC.address);
+});
+
+test("V4 seed validates existing pool before estimating approvals", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-v4-preflight-"));
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.HARNESS_ISOLATED_RPC;
+  const token = (digit, decimals) => ({
+    address: `0x${digit.repeat(40)}`,
+    decimals,
+  });
+  const tokens = { A: token("1", 18), B: token("2", 6), C: token("3", 8) };
+  const plan = v4PoolPlan(
+    tokens.A,
+    tokens.C,
+    { fee: 500, tick_spacing: 10 },
+    sender,
+  );
+  let poolChecked = false;
+  let routerLinked = false;
+  let estimated = false;
+  let validPool = false;
+  process.env.HARNESS_ISOLATED_RPC = "https://isolated.invalid/rpc";
+  globalThis.fetch = async (_url, request) => {
+    const { method, params } = JSON.parse(request.body);
+    let result;
+    if (method === "eth_chainId") result = "0x14a34";
+    else if (method === "eth_getCode") result = "0x6000";
+    else if (method === "eth_getTransactionCount") result = "0x0";
+    else if (method === "eth_getBlockByNumber") result = { timestamp: "0x64" };
+    else if (method === "eth_estimateGas") {
+      estimated = true;
+      assert.ok(
+        poolChecked,
+        "pool state must be checked before approval estimate",
+      );
+      result = "0x10000";
+    } else if (method === "eth_call") {
+      const { to, data } = params[0];
+      const selector = data.slice(0, 10);
+      const word = (value) => `0x${value.replace(/^0x/, "").padStart(64, "0")}`;
+      if (selector === toFunctionSelector("factory()"))
+        result = word(uni.factory);
+      else if (selector === toFunctionSelector("WETH9()"))
+        result = word("0x4200000000000000000000000000000000000006");
+      else if (selector === toFunctionSelector("poolManager()")) {
+        if (to.toLowerCase() === uniV4.router.toLowerCase())
+          routerLinked = true;
+        result = word(uniV4.pool_manager);
+      } else if (selector === toFunctionSelector("permit2()"))
+        result = word(uniV4.permit2);
+      else if (selector === toFunctionSelector("decimals()"))
+        result = word(
+          BigInt(
+            Object.values(tokens).find((candidate) => candidate.address === to)
+              .decimals,
+          ).toString(16),
+        );
+      else if (selector === toFunctionSelector("getSlot0(bytes32)")) {
+        assert.equal(to.toLowerCase(), uniV4.state_view.toLowerCase());
+        poolChecked = true;
+        result = encodeFunctionResult({
+          abi: uniswapV4StateViewAbi,
+          functionName: "getSlot0",
+          result: [validPool ? BigInt(plan.sqrtPriceX96) : 1n, 0, 0, 0],
+        });
+      } else if (selector === toFunctionSelector("balanceOf(address)"))
+        result = word((to === tokens.C.address ? 0n : 1n << 255n).toString(16));
+      else if (selector === toFunctionSelector("allowance(address,address)"))
+        result = word("0");
+      else if (
+        selector === toFunctionSelector("allowance(address,address,address)")
+      )
+        result = `${word("0")}${word("0").slice(2)}${word("0").slice(2)}`;
+      else throw new Error(`Unexpected eth_call selector ${selector}`);
+    } else throw new Error(`Unexpected method ${method}`);
+    return Response.json({ result });
+  };
+  try {
+    const config = resolve(dir, "profile.toml");
+    const manifestPath = resolve(dir, "manifest.json");
+    writeFileSync(
+      config,
+      (await Bun.file(defaultProfilePath).text()).replace(
+        "BASE_SEPOLIA_RPC_URL",
+        "HARNESS_ISOLATED_RPC",
+      ),
+    );
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 1,
+        chainId: 84532,
+        sender,
+        transactions: {},
+        tokens,
+        pancake: {},
+        pools: [],
+        uni,
+      }),
+    );
+    await assert.rejects(
+      run(
+        options([
+          "seed-v4",
+          "--sender",
+          sender,
+          "--config",
+          config,
+          "--manifest",
+          manifestPath,
+        ]),
+      ),
+      /router code hash mismatch/,
+    );
+    assert.equal(routerLinked, true);
+    assert.equal(estimated, false);
+    writeFileSync(config, await v4TestProfile());
+    await assert.rejects(
+      run(
+        options([
+          "seed-v4",
+          "--sender",
+          sender,
+          "--config",
+          config,
+          "--manifest",
+          manifestPath,
+        ]),
+      ),
+      /different price/,
+    );
+    assert.equal(poolChecked, true);
+    assert.equal(estimated, false);
+    validPool = true;
+    await assert.rejects(
+      run(
+        options([
+          "seed-v4",
+          "--sender",
+          sender,
+          "--config",
+          config,
+          "--manifest",
+          manifestPath,
+        ]),
+      ),
+      /Insufficient .* fixture balance/,
+    );
+    assert.equal(estimated, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.HARNESS_ISOLATED_RPC;
+    else process.env.HARNESS_ISOLATED_RPC = previousURL;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("V4 seed refreshes sufficient Permit2 allowance that expires before mint deadline", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-v4-permission-"));
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.HARNESS_ISOLATED_RPC;
+  const token = (digit, decimals) => ({
+    address: `0x${digit.repeat(40)}`,
+    decimals,
+  });
+  const tokens = { A: token("1", 18), B: token("2", 6), C: token("3", 8) };
+  const plan = v4PoolPlan(
+    tokens.A,
+    tokens.C,
+    { fee: 500, tick_spacing: 10 },
+    sender,
+  );
+  const estimates = [];
+  process.env.HARNESS_ISOLATED_RPC = "https://isolated.invalid/rpc";
+  globalThis.fetch = async (_url, request) => {
+    const { method, params } = JSON.parse(request.body);
+    const word = (value) => `0x${BigInt(value).toString(16).padStart(64, "0")}`;
+    let result;
+    if (method === "eth_chainId") result = "0x14a34";
+    else if (method === "eth_getCode") result = "0x6000";
+    else if (method === "eth_getTransactionCount") result = "0x0";
+    else if (method === "eth_gasPrice") result = "0x1";
+    else if (method === "eth_getBlockByNumber") result = { timestamp: "0x64" };
+    else if (method === "eth_estimateGas") {
+      estimates.push(params[0]);
+      result = "0x10000";
+    } else if (method === "eth_call") {
+      const { to, data } = params[0];
+      const selector = data.slice(0, 10);
+      if (selector === toFunctionSelector("factory()"))
+        result = `0x${uni.factory.slice(2).padStart(64, "0")}`;
+      else if (selector === toFunctionSelector("WETH9()"))
+        result = `0x${"4200000000000000000000000000000000000006".padStart(64, "0")}`;
+      else if (selector === toFunctionSelector("poolManager()"))
+        result = `0x${uniV4.pool_manager.slice(2).padStart(64, "0")}`;
+      else if (selector === toFunctionSelector("permit2()"))
+        result = `0x${uniV4.permit2.slice(2).padStart(64, "0")}`;
+      else if (selector === toFunctionSelector("decimals()"))
+        result = word(
+          Object.values(tokens).find((candidate) => candidate.address === to)
+            .decimals,
+        );
+      else if (selector === toFunctionSelector("getSlot0(bytes32)"))
+        result = encodeFunctionResult({
+          abi: uniswapV4StateViewAbi,
+          functionName: "getSlot0",
+          result: [BigInt(plan.sqrtPriceX96), 0, 0, 0],
+        });
+      else if (selector === toFunctionSelector("balanceOf(address)"))
+        result = word(1n << 255n);
+      else if (selector === toFunctionSelector("allowance(address,address)"))
+        result = word(1n << 255n);
+      else if (
+        selector === toFunctionSelector("allowance(address,address,address)")
+      )
+        result = `${word((1n << 160n) - 1n)}${word(99).slice(2)}${word(0).slice(2)}`;
+      else if (selector === toFunctionSelector("nextTokenId()"))
+        result = word(1);
+      else throw new Error(`Unexpected eth_call selector ${selector}`);
+    } else throw new Error(`Unexpected method ${method}`);
+    return Response.json({ result });
+  };
+  try {
+    const config = resolve(dir, "profile.toml");
+    const manifestPath = resolve(dir, "manifest.json");
+    writeFileSync(config, await v4TestProfile());
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 1,
+        chainId: 84532,
+        sender,
+        transactions: {},
+        tokens,
+        pancake: {},
+        pools: [],
+        uni,
+      }),
+    );
+    await run(
+      options([
+        "seed-v4",
+        "--sender",
+        sender,
+        "--config",
+        config,
+        "--manifest",
+        manifestPath,
+      ]),
+    );
+    const permissionWrites = estimates.filter(
+      ({ to, data }) =>
+        to.toLowerCase() === uniV4.permit2.toLowerCase() &&
+        data.startsWith(
+          toFunctionSelector("approve(address,address,uint160,uint48)"),
+        ),
+    );
+    assert.equal(permissionWrites.length, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.HARNESS_ISOLATED_RPC;
+    else process.env.HARNESS_ISOLATED_RPC = previousURL;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("V4 seed recovers a journaled mint after the pool price moves", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-v4-recovery-"));
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.HARNESS_ISOLATED_RPC;
+  const previousPath = process.env.PATH;
+  const token = (digit, decimals) => ({
+    address: `0x${digit.repeat(40)}`,
+    decimals,
+  });
+  const tokens = { A: token("1", 18), B: token("2", 6), C: token("3", 8) };
+  const plan = v4PoolPlan(
+    tokens.A,
+    tokens.C,
+    { fee: 500, tick_spacing: 10 },
+    sender,
+  );
+  const hash = `0x${"a".repeat(64)}`;
+  const blockHash = `0x${"b".repeat(64)}`;
+  const deadline = "1000";
+  const data = encodeFunctionData({
+    abi: uniswapV4PositionManagerAbi,
+    functionName: "modifyLiquidities",
+    args: [plan.unlockData, BigInt(deadline)],
+  });
+  const receipt = {
+    transactionHash: hash,
+    status: "0x1",
+    blockNumber: "0x42",
+    blockHash,
+    logs: [
+      {
+        address: uniV4.position_manager,
+        topics: [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          `0x${"0".repeat(64)}`,
+          `0x${sender.slice(2).padStart(64, "0")}`,
+          `0x${"1".padStart(64, "0")}`,
+        ],
+        data: "0x",
+      },
+    ],
+  };
+  process.env.HARNESS_ISOLATED_RPC = "https://isolated.invalid/rpc";
+  globalThis.fetch = async (_url, request) => {
+    const { method, params } = JSON.parse(request.body);
+    const word = (value) => `0x${BigInt(value).toString(16).padStart(64, "0")}`;
+    let result;
+    if (method === "eth_chainId") result = "0x14a34";
+    else if (method === "eth_getCode") result = "0x6000";
+    else if (method === "eth_getTransactionCount") result = "0x0";
+    else if (method === "eth_getTransactionReceipt") result = receipt;
+    else if (method === "eth_getBlockByNumber") result = { hash: blockHash };
+    else if (method === "eth_call") {
+      const { to, data: callData } = params[0];
+      const selector = callData.slice(0, 10);
+      if (selector === toFunctionSelector("factory()"))
+        result = word(uni.factory);
+      else if (selector === toFunctionSelector("WETH9()"))
+        result = word("0x4200000000000000000000000000000000000006");
+      else if (selector === toFunctionSelector("poolManager()"))
+        result = word(uniV4.pool_manager);
+      else if (selector === toFunctionSelector("permit2()"))
+        result = word(uniV4.permit2);
+      else if (selector === toFunctionSelector("decimals()"))
+        result = word(
+          Object.values(tokens).find((candidate) => candidate.address === to)
+            .decimals,
+        );
+      else if (selector === toFunctionSelector("getSlot0(bytes32)"))
+        result = encodeFunctionResult({
+          abi: uniswapV4StateViewAbi,
+          functionName: "getSlot0",
+          result: [BigInt(plan.sqrtPriceX96) + 1n, 0, 0, 0],
+        });
+      else if (selector === toFunctionSelector("ownerOf(uint256)"))
+        result = word(sender);
+      else if (selector === toFunctionSelector("getPositionLiquidity(uint256)"))
+        result = word(plan.liquidity);
+      else throw new Error(`Unexpected eth_call selector ${selector}`);
+    } else throw new Error(`Unexpected method ${method}`);
+    return Response.json({ result });
+  };
+  try {
+    const config = resolve(dir, "profile.toml");
+    const manifestPath = resolve(dir, "manifest.json");
+    const keystore = resolve(dir, "keystore");
+    const password = resolve(dir, "password");
+    writeFileSync(config, await v4TestProfile());
+    writeFileSync(keystore, "{}");
+    writeFileSync(password, "test-only", { mode: 0o600 });
+    writeFileSync(
+      resolve(dir, "cast"),
+      `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+if (args[0] === "wallet" && args[1] === "address") console.log(${JSON.stringify(sender)});
+else throw new Error("Only signer identity should be requested");
+`,
+      { mode: 0o700 },
+    );
+    process.env.PATH = `${dir}:${previousPath}`;
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 1,
+        chainId: 84532,
+        sender,
+        transactions: {
+          "v4-mint-position-A-C-500": {
+            to: uniV4.position_manager,
+            data,
+            hash,
+            receipt,
+          },
+        },
+        tokens,
+        pancake: {},
+        pools: [],
+        uni,
+        v4Fixture: {
+          pair: ["A", "C"],
+          fee: 500,
+          tickSpacing: 10,
+          poolId: plan.poolId,
+          token0: plan.token0.address,
+          token1: plan.token1.address,
+          lower: plan.lower,
+          upper: plan.upper,
+          liquidity: plan.liquidity,
+          positionDeadline: deadline,
+        },
+      }),
+    );
+    await run(
+      options([
+        "seed-v4",
+        "--sender",
+        sender,
+        "--config",
+        config,
+        "--manifest",
+        manifestPath,
+        "--keystore",
+        keystore,
+        "--password-file",
+        password,
+        "--broadcast",
+      ]),
+    );
+    const saved = JSON.parse(await Bun.file(manifestPath).text());
+    assert.equal(saved.v4Fixture.positionTokenId, "1");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.HARNESS_ISOLATED_RPC;
+    else process.env.HARNESS_ISOLATED_RPC = previousURL;
+    process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test("V3 fixture rejects 0/255 decimals whose generated values exceed protocol bounds", () => {
   assert.throws(() => fixture(0, 255, 10), /V3|bound|decimal/i);
 });
@@ -418,6 +955,7 @@ test("seed preflights every pool before estimating an earlier createPool", async
         'AB = ["A", "B"]\nBC = ["B", "C"]\nAC = ["A", "C"]',
         'AB = ["A", "B"]',
       )
+      .replace('pair = ["A", "C"]', 'pair = ["A", "B"]')
       .replace("pancake_fees = [500, 2500]", "pancake_fees = []");
     const manifest = {
       version: 1,

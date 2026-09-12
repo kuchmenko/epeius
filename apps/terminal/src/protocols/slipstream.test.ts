@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { create } from "@bufbuild/protobuf";
 import { maxInt24, minInt24 } from "viem";
-import { PrepareExecutionResponseSchema } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
+import {
+  PrepareExecutionResponseSchema,
+  UniswapV4PoolKeySchema,
+} from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { configureExecution } from "./index";
 import { slipstream, slipstreamData, slipstreamPath } from "./slipstream";
 
@@ -146,6 +149,13 @@ test("Slipstream independently admits config and exact router calldata", () => {
 
   const wrongToken = route(100);
   expect(() => implementation.plan(wrongToken, [address("1")])).toThrow();
+
+  const v4Key = route(100);
+  if (v4Key.route)
+    v4Key.route.legs[0].uniswapV4PoolKey = create(UniswapV4PoolKeySchema);
+  expect(() =>
+    implementation.plan(v4Key, [address("1"), address("2")]),
+  ).toThrow();
 });
 
 test("provider registry rejects inherited object properties", () => {

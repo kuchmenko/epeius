@@ -120,14 +120,10 @@ func (c Config) normalizeAddresses() {
 			}
 		}
 		for id, deployment := range chain.Deployments {
-			if common.IsHexAddress(deployment.Factory) {
-				deployment.Factory = common.HexToAddress(deployment.Factory).Hex()
-			}
-			if common.IsHexAddress(deployment.Quoter) {
-				deployment.Quoter = common.HexToAddress(deployment.Quoter).Hex()
-			}
-			if common.IsHexAddress(deployment.Router) {
-				deployment.Router = common.HexToAddress(deployment.Router).Hex()
+			for _, address := range []*string{&deployment.Factory, &deployment.Quoter, &deployment.Router} {
+				if common.IsHexAddress(*address) {
+					*address = common.HexToAddress(*address).Hex()
+				}
 			}
 			chain.Deployments[id] = deployment
 		}

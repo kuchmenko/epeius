@@ -43,12 +43,12 @@ func (s chainJSON) MarshalJSON() ([]byte, error) {
 }
 
 func run(ctx context.Context, args []string, getenv func(string) string, output io.Writer) error {
-	command, key, path, help, err := parseArgs(args)
+	command, key, path, help, anvilSimulation, err := parseArgs(args)
 	if err != nil {
 		return err
 	}
 	if help {
-		_, err := fmt.Fprintln(output, "usage: epeius-engine [--config PATH]\n       epeius-engine chains [--config PATH]\n       epeius-engine chain check KEY [--config PATH]")
+		_, err := fmt.Fprintln(output, "usage: epeius-engine [--config PATH] [--anvil-simulation]\n       epeius-engine chains [--config PATH]\n       epeius-engine chain check KEY [--config PATH]")
 		return err
 	}
 	settings, err := config.Load(path, config.ValidateChain)
@@ -83,19 +83,21 @@ func run(ctx context.Context, args []string, getenv func(string) string, output 
 		}
 		return nil
 	}
-	return serve(ctx, settings, getenv, output)
+	return serve(ctx, settings, getenv, output, anvilSimulation)
 }
 
-func parseArgs(args []string) (command, key, path string, help bool, err error) {
+func parseArgs(args []string) (command, key, path string, help, anvilSimulation bool, err error) {
 	path = config.DefaultPath
 	positional := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-h", "--help":
 			help = true
+		case "--anvil-simulation":
+			anvilSimulation = true
 		case "--config":
 			if i+1 == len(args) {
-				return "", "", "", false, errors.New("--config requires a path")
+				return "", "", "", false, false, errors.New("--config requires a path")
 			}
 			i++
 			path = args[i]
@@ -104,17 +106,17 @@ func parseArgs(args []string) (command, key, path string, help bool, err error) 
 		}
 	}
 	if help {
-		return "", "", path, true, nil
+		return "", "", path, true, anvilSimulation, nil
 	}
 	switch {
 	case len(positional) == 0:
-		return "serve", "", path, false, nil
+		return "serve", "", path, false, anvilSimulation, nil
 	case len(positional) == 1 && positional[0] == "chains":
-		return "chains", "", path, false, nil
+		return "chains", "", path, false, anvilSimulation, nil
 	case len(positional) == 3 && positional[0] == "chain" && positional[1] == "check":
-		return "check", positional[2], path, false, nil
+		return "check", positional[2], path, false, anvilSimulation, nil
 	default:
-		return "", "", "", false, errors.New("invalid command; use --help")
+		return "", "", "", false, false, errors.New("invalid command; use --help")
 	}
 }
 
@@ -136,7 +138,7 @@ func printChains(output io.Writer, settings config.Config, getenv func(string) s
 	}{items})
 }
 
-func serve(ctx context.Context, settings config.Config, getenv func(string) string, output io.Writer) error {
+func serve(ctx context.Context, settings config.Config, getenv func(string) string, output io.Writer, anvilSimulation bool) error {
 	chains := openChains(ctx, settings.Chains, getenv)
 	defer closeChains(chains)
 	connected := 0
@@ -156,8 +158,22 @@ func serve(ctx context.Context, settings config.Config, getenv func(string) stri
 		return errors.New("could not bind engine address; check engine.listen_addr and whether the port is in use")
 	}
 	defer listener.Close()
+	simulator := quote.Simulator(quote.NewTenderly(getenv))
+	if anvilSimulation {
+		if len(settings.Chains) != 1 {
+			return errors.New("Anvil simulation requires exactly one configured chain")
+		}
+		for _, chain := range settings.Chains {
+			local, err := quote.NewAnvilSimulator(ctx, getenv(chain.RPCURLEnv), strconv.FormatInt(chain.ChainID, 10))
+			if err != nil {
+				return err
+			}
+			defer local.Close()
+			simulator = local
+		}
+	}
 	mux := http.NewServeMux()
-	path, handler := quotev1connect.NewQuoteServiceHandler(quote.Handler{Chains: chains, Store: quote.NewStore(), Simulator: quote.NewTenderly(getenv), QuoteConcurrency: settings.Engine.QuoteConcurrency})
+	path, handler := quotev1connect.NewQuoteServiceHandler(quote.Handler{Chains: chains, Store: quote.NewStore(), Simulator: simulator, QuoteConcurrency: settings.Engine.QuoteConcurrency})
 	mux.Handle(path, handler)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	served := make(chan error, 1)

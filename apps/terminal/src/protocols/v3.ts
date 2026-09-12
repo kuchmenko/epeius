@@ -48,6 +48,7 @@ export function admitV3Route(
     !route.legs.every(
       (leg) =>
         leg.selector.case === "feePips" &&
+        leg.uniswapV4PoolKey === undefined &&
         Number.isInteger(leg.selector.value) &&
         leg.selector.value >= 0 &&
         leg.selector.value < 1_000_000 &&
