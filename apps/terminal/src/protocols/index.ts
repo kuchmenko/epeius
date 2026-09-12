@@ -6,7 +6,6 @@ import { pancake } from "./pancake-v3";
 import { slipstream } from "./slipstream";
 import { uniswap } from "./uniswap-v3";
 import { uniswapV4 } from "./uniswap-v4";
-import type { V3Deployment } from "./v3";
 
 type RawDeployment = {
   kind?: string;
@@ -91,14 +90,7 @@ export function configureExecution(config: {
     deployments,
     ...(config.executor
       ? {
-          executor: fixedExecutor(
-            config.executor,
-            Object.fromEntries(
-              Object.entries(deployments).filter(
-                ([, deployment]) => deployment.kind !== "uniswap-v4",
-              ),
-            ) as Record<string, V3Deployment>,
-          ),
+          executor: fixedExecutor(config.executor, deployments),
         }
       : {}),
   };

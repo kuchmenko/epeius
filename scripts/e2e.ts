@@ -253,6 +253,7 @@ async function main(args: string[]) {
     const execute = async (
       quoteId: string,
       routeId: string,
+      preparationId: string,
       kind: "approval" | "swap",
     ) => {
       const child = Bun.spawn(
@@ -268,6 +269,8 @@ async function main(args: string[]) {
           quoteId,
           "--route-id",
           routeId,
+          "--preparation-id",
+          preparationId,
           "--slippage-bps",
           "50",
           `--confirm-${kind}`,
@@ -309,7 +312,12 @@ async function main(args: string[]) {
         prepared,
       });
       if (prepared.status === PreparationStatus.READY) {
-        await execute(selected.quote.quoteId, selected.route.routeId, "swap");
+        await execute(
+          selected.quote.quoteId,
+          selected.route.routeId,
+          prepared.preparationId,
+          "swap",
+        );
         swapped = true;
         break;
       }
@@ -321,7 +329,12 @@ async function main(args: string[]) {
         throw new Error(
           "A third permission is still required; nothing else sent.",
         );
-      await execute(selected.quote.quoteId, selected.route.routeId, "approval");
+      await execute(
+        selected.quote.quoteId,
+        selected.route.routeId,
+        prepared.preparationId,
+        "approval",
+      );
       selected = await freshQuote();
     }
     if (!swapped) throw new Error("Scenario did not produce a swap.");

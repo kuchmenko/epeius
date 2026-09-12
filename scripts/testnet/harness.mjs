@@ -773,7 +773,7 @@ export async function run(o) {
   }
   if (
     ["seed", "seed-v4", "config"].includes(o.command) ||
-    (o.command === "check" && existsSync(o.manifest))
+    (o.command === "check" && manifestExists)
   ) {
     for (const symbol of Object.keys(decimals)) {
       const token = manifest.tokens[symbol];
@@ -789,7 +789,7 @@ export async function run(o) {
   }
   if (
     ["seed", "config"].includes(o.command) ||
-    (o.command === "check" && existsSync(o.manifest))
+    (o.command === "check" && manifestExists)
   ) {
     for (const name of ["deployer", "factory", "router", "quoter"])
       await verifyCode(manifest.pancake[name]);

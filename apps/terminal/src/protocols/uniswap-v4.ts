@@ -179,6 +179,7 @@ export function uniswapV4(raw: {
           fee_pips?: number;
           tick_spacing?: number;
           hooks?: string;
+          [key: string]: unknown;
         }>;
       }
     | undefined;
@@ -210,13 +211,22 @@ export function uniswapV4(raw: {
     kind: "uniswap-v4",
     router: address(raw.router),
     permit2,
-    pools: (options.pools ?? []).map((pool) => ({
-      currency0: address(pool.currency0),
-      currency1: address(pool.currency1),
-      feePips: pool.fee_pips ?? -1,
-      tickSpacing: pool.tick_spacing ?? 0,
-      hooks: address(pool.hooks),
-    })),
+    pools: (options.pools ?? []).map((pool) => {
+      if (
+        Object.keys(pool).length !== 5 ||
+        !["currency0", "currency1", "fee_pips", "tick_spacing", "hooks"].every(
+          (field) => Object.hasOwn(pool, field),
+        )
+      )
+        throw new Error("Local execution deployment is invalid.");
+      return {
+        currency0: address(pool.currency0),
+        currency1: address(pool.currency1),
+        feePips: pool.fee_pips ?? -1,
+        tickSpacing: pool.tick_spacing ?? 0,
+        hooks: address(pool.hooks),
+      };
+    }),
   };
   if (
     deployment.pools.length === 0 ||

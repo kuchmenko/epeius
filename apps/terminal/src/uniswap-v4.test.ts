@@ -211,6 +211,20 @@ test("V4 config rejects missing, unknown, misplaced, and inapplicable provider o
       options: {
         ...rawDeployment.options,
         pools: [
+          {
+            ...rawDeployment.options.pools[0],
+            unknown: true,
+          },
+        ],
+      },
+    }),
+  ).toThrow();
+  expect(
+    config({
+      ...rawDeployment,
+      options: {
+        ...rawDeployment.options,
+        pools: [
           ...rawDeployment.options.pools,
           { ...rawDeployment.options.pools[0] },
         ],
@@ -232,6 +246,24 @@ test("V4 config rejects missing, unknown, misplaced, and inapplicable provider o
       options: rawDeployment.options,
     }),
   ).toThrow();
+  expect(() =>
+    configureExecution({
+      tokens: [weth, usdc],
+      deployments: {
+        v4: rawDeployment,
+        pancake: {
+          kind: "pancake-v3",
+          router: "0x5555555555555555555555555555555555555555",
+          fees: [2500],
+        },
+      },
+      executor: {
+        address: "0x6666666666666666666666666666666666666666",
+        uniswapDeployment: "v4",
+        pancakeDeployment: "pancake",
+      },
+    }),
+  ).toThrow('Local executor deployment "v4" must use uniswap-v3.');
   expect(
     config({
       kind: "uniswap-v3",

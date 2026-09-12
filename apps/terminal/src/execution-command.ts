@@ -148,9 +148,10 @@ export async function executionCommand(
       trusted,
       chainId: rpc.chainId,
       prepare: async (preparationId) => {
+        const existingPreparationId = preparationId ?? values["preparation-id"];
         const response = await client.prepareExecution(
-          preparationId
-            ? { preparationId }
+          existingPreparationId
+            ? { preparationId: existingPreparationId }
             : {
                 quoteId: values["quote-id"],
                 routeId: values["route-id"],

@@ -1450,6 +1450,20 @@ console.log(args[0] === 'wallet' ? readFileSync(${JSON.stringify(accountPath)}, 
     expect(slowPreview.code).toBe(0);
     expect(slowPreview.out).toContain('"status":"PREPARATION_STATUS_READY"');
     expect(slowPreview.out).toContain('"sent":false');
+    const existingPreview = await run([
+      "execute",
+      "--preparation-id",
+      "p-preview",
+    ]);
+    expect(existingPreview.code).toBe(1);
+    expect(existingPreview.out).toBe('{"sent":false,"outcome":"canceled"}\n');
+    expect(requests.at(-1)).toMatchObject({
+      preparationId: "p-preview",
+      quoteId: "",
+      routeId: "",
+      sender: "",
+      slippageBps: 0,
+    });
     remoteChainId = "84532";
     expect((await run(["execute", "--confirm-swap", "yes"])).err).toContain(
       "Engine chain ID must match configured chain ID",
