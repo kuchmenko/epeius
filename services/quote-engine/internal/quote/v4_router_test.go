@@ -19,7 +19,7 @@ import (
 )
 
 func TestUniswapV4RouterCalldataMatchesIndependentCastVector(t *testing.T) {
-	pool := config.UniswapV4Pool{Currency0: "0x4200000000000000000000000000000000000006", Currency1: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", FeePips: 500, TickSpacing: 10, Hooks: "0x0000000000000000000000000000000000000000"}
+	pool := uniswapv4.Pool{Currency0: "0x4200000000000000000000000000000000000006", Currency1: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", FeePips: 500, TickSpacing: 10, Hooks: "0x0000000000000000000000000000000000000000"}
 	data, err := uniswapV4RouterData(pool, pool.Currency0, big.NewInt(1_000_000_000_000_000_000), big.NewInt(2_000_000_000), 1777777777)
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +38,7 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 	erc20Amount := uint64(123456789)
 	permissionAmount := uint64(0)
 	timestamp := uint64(1777777000)
-	pool := config.UniswapV4Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: "0x0000000000000000000000000000000000000000"}
+	pool := uniswapv4.Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: "0x0000000000000000000000000000000000000000"}
 	poolID, _ := v4PoolID(pool)
 	route := &quotev1.RouteQuote{RouteId: "v4:" + poolID.Hex(), DeploymentId: "v4", Provider: "uniswap-v4", AmountOutAtomic: "10003", Legs: []*quotev1.RouteLeg{{Pool: poolID.Hex(), TokenIn: tokenA, TokenOut: tokenB, UniswapV4PoolKey: &quotev1.UniswapV4PoolKey{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: pool.Hooks}}}}
 	reader := executionFake{readerFake: readerFake{snapshot: func(context.Context) (rpc.Snapshot, error) {
@@ -64,7 +64,7 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 		}
 	}}, canonical: func(context.Context, rpc.Snapshot) error { return nil }}
 	simulations := 0
-	deployment := config.Deployment{Kind: "uniswap-v4", Router: router, Permit2: permit2, Pools: []config.UniswapV4Pool{pool}}
+	deployment := config.Deployment{Kind: "uniswap-v4", Router: router, ProviderConfig: uniswapv4.Options{Permit2: permit2, Pools: []uniswapv4.Pool{pool}}}
 	h := Handler{Store: NewStore(), Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: config.Chain{ExecutionEnabled: true, Deployments: map[string]config.Deployment{"v4": deployment}}}}, Simulator: simulationFake(func(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (string, error) {
 		simulations++
 		return "10000", nil
@@ -111,6 +111,7 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 	stateView := common.HexToAddress(tokenC)
 	permit2 := common.HexToAddress(wallet)
 	routerAddress := common.HexToAddress(router)
+	pool := uniswapv4.Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: common.Address{}.Hex()}
 	for _, failure := range []string{"none", "router pool manager", "router Permit2"} {
 		t.Run(failure, func(t *testing.T) {
 			reader := codeFake{code: func(_ context.Context, target common.Address, hash common.Hash) ([]byte, error) {
@@ -130,8 +131,9 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 				}
 				return poolResponse(poolManager), nil
 			}}}
-			deployment := config.Deployment{Kind: "uniswap-v4", PoolManager: poolManager.Hex(), Quoter: quoter.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), Router: routerAddress.Hex()}
-			err := (v4Quoter{reader: reader, id: "v4", deployment: deployment}).Verify(context.Background(), common.HexToHash(blockHash))
+			deployment := config.Deployment{Kind: "uniswap-v4", Quoter: quoter.Hex(), Router: routerAddress.Hex()}
+			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), Pools: []uniswapv4.Pool{pool}}
+			err := (v4Quoter{reader: reader, id: "v4", deployment: deployment, options: options}).Verify(context.Background(), common.HexToHash(blockHash))
 			if failure == "none" && err != nil || failure != "none" && err == nil {
 				t.Fatalf("failure=%s error=%v", failure, err)
 			}
@@ -139,6 +141,25 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 	}
 }
 
-func v4PoolID(pool config.UniswapV4Pool) (common.Hash, error) {
+func TestUniswapV4MissingPoolIsNoRouteAtPinnedBlock(t *testing.T) {
+	pool := uniswapv4.Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: common.Address{}.Hex()}
+	reader := readerFake{call: func(_ context.Context, target common.Address, data []byte, hash common.Hash) ([]byte, error) {
+		if target != common.HexToAddress(tokenC) || hash != common.HexToHash(blockHash) || !bytes.Equal(data[:4], crypto.Keccak256([]byte("getSlot0(bytes32)"))[:4]) {
+			t.Fatalf("missing-pool check was not pinned: target=%s hash=%s data=%x", target, hash, data)
+		}
+		return make([]byte, 128), nil
+	}}
+	q := v4Quoter{reader: reader, id: "v4", deployment: config.Deployment{Kind: "uniswap-v4", Quoter: tokenB}, options: uniswapv4.Options{StateView: tokenC, Pools: []uniswapv4.Pool{pool}}}
+	candidate, ok := q.Candidates(&quotev1.QuoteRequest{TokenIn: tokenA, TokenOut: tokenB, AmountInAtomic: "1"}, &quotev1.BlockContext{Hash: blockHash})(context.Background())
+	if !ok {
+		t.Fatal("configured pool candidate missing")
+	}
+	route, err := candidate.Quote(context.Background())
+	if route != nil || err != nil {
+		t.Fatalf("missing pool returned route=%+v error=%v", route, err)
+	}
+}
+
+func v4PoolID(pool uniswapv4.Pool) (common.Hash, error) {
 	return uniswapv4.PoolID(v4PoolKey(pool))
 }

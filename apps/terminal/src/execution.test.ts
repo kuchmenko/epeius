@@ -14,6 +14,7 @@ import {
   QuotedAllocationSchema,
   QuoteFinalSchema,
   QuoteRequestSchema,
+  UniswapV4PoolKeySchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type ExecutionIO, executePrepared } from "./execution";
 import { uint256Decimal, validatePreparation } from "./execution-policy";
@@ -889,6 +890,16 @@ test("rejects altered target, calldata, path, amount, deadline, recipient and ap
     (p) => {
       assert(p.route);
       p.route.legs[0].selector = { case: "feePips", value: 100 };
+    },
+    (p) => {
+      assert(p.route);
+      p.route.legs[0].uniswapV4PoolKey = create(UniswapV4PoolKeySchema, {
+        currency0: input,
+        currency1: output,
+        feePips: 500,
+        tickSpacing: 10,
+        hooks: addr("0"),
+      });
     },
     (p) => {
       p.amountInAtomic = "102";

@@ -26,17 +26,22 @@ const pool = {
 };
 const rawDeployment = {
   kind: "uniswap-v4" as const,
+  quoter: "0x2222222222222222222222222222222222222222",
   router,
-  permit2,
-  pools: [
-    {
-      currency0: weth,
-      currency1: usdc,
-      fee_pips: 500,
-      tick_spacing: 10,
-      hooks: pool.hooks,
-    },
-  ],
+  options: {
+    pool_manager: "0x3333333333333333333333333333333333333333",
+    state_view: "0x4444444444444444444444444444444444444444",
+    permit2,
+    pools: [
+      {
+        currency0: weth,
+        currency1: usdc,
+        fee_pips: 500,
+        tick_spacing: 10,
+        hooks: pool.hooks,
+      },
+    ],
+  },
 };
 
 function prepared() {
@@ -85,7 +90,7 @@ test("terminal reconstructs reviewed V4 action bytes and Permit2 permission", ()
       .update(Buffer.from(data.slice(2), "hex"))
       .digest("hex"),
   ).toBe("db25857dd02bc68ee7c058200a182fee1c552394b4208135792021fde1661de1");
-  const expiration = 1777779000;
+  const expiration = 1777779577;
   p.status = PreparationStatus.APPROVAL_REQUIRED;
   const permission = create(OnChainPermissionSchema, {
     target: permit2,
@@ -122,6 +127,33 @@ test("terminal reconstructs reviewed V4 action bytes and Permit2 permission", ()
   );
   expect(plan.action).toBe("approval");
   expect(plan.transaction).toBe(permission.transaction);
+
+  permission.expirationUnix = "1777779578";
+  permission.transaction.data = encodeFunctionData({
+    abi: permit2Abi,
+    functionName: "approve",
+    args: [weth, router, 1_000_000_000_000_000_000n, 1777779578],
+  });
+  expect(() =>
+    validatePreparation(
+      p,
+      sender,
+      "8453",
+      175,
+      configureExecution({
+        tokens: [weth, usdc],
+        deployments: { v4: rawDeployment },
+      }),
+      1777777000,
+    ),
+  ).toThrow("Permit2 permission");
+
+  permission.expirationUnix = String(expiration);
+  permission.transaction.data = encodeFunctionData({
+    abi: permit2Abi,
+    functionName: "approve",
+    args: [weth, router, 1_000_000_000_000_000_000n, expiration],
+  });
   permission.spender = permit2;
   expect(() =>
     validatePreparation(
@@ -136,4 +168,40 @@ test("terminal reconstructs reviewed V4 action bytes and Permit2 permission", ()
       1777777000,
     ),
   ).toThrow("Permit2 permission");
+});
+
+test("V4 config rejects missing, unknown, misplaced, and inapplicable provider options", () => {
+  const config = (deployment: Record<string, unknown>) => () =>
+    configureExecution({
+      tokens: [weth, usdc],
+      deployments: {
+        v4: deployment as Parameters<
+          typeof configureExecution
+        >[0]["deployments"][string],
+      },
+    });
+  expect(config(rawDeployment)).not.toThrow();
+  expect(config({ kind: "uniswap-v4", router })).toThrow();
+  expect(
+    config({
+      ...rawDeployment,
+      options: { ...rawDeployment.options, unknown: true },
+    }),
+  ).toThrow();
+  expect(
+    config({
+      kind: "uniswap-v4",
+      router,
+      permit2,
+      options: rawDeployment.options,
+    }),
+  ).toThrow();
+  expect(
+    config({
+      kind: "uniswap-v3",
+      router,
+      fees: [500],
+      options: rawDeployment.options,
+    }),
+  ).toThrow();
 });

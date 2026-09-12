@@ -489,6 +489,121 @@ test("V4 seed validates existing pool before estimating approvals", async () => 
   }
 });
 
+test("V4 seed refreshes sufficient Permit2 allowance that expires before mint deadline", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-v4-permission-"));
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.HARNESS_ISOLATED_RPC;
+  const token = (digit, decimals) => ({
+    address: `0x${digit.repeat(40)}`,
+    decimals,
+  });
+  const tokens = { A: token("1", 18), B: token("2", 6), C: token("3", 8) };
+  const plan = v4PoolPlan(
+    tokens.A,
+    tokens.C,
+    { fee: 500, tick_spacing: 10 },
+    sender,
+  );
+  const estimates = [];
+  process.env.HARNESS_ISOLATED_RPC = "https://isolated.invalid/rpc";
+  globalThis.fetch = async (_url, request) => {
+    const { method, params } = JSON.parse(request.body);
+    const word = (value) => `0x${BigInt(value).toString(16).padStart(64, "0")}`;
+    let result;
+    if (method === "eth_chainId") result = "0x14a34";
+    else if (method === "eth_getCode") result = "0x6000";
+    else if (method === "eth_getTransactionCount") result = "0x0";
+    else if (method === "eth_gasPrice") result = "0x1";
+    else if (method === "eth_getBlockByNumber") result = { timestamp: "0x64" };
+    else if (method === "eth_estimateGas") {
+      estimates.push(params[0]);
+      result = "0x10000";
+    } else if (method === "eth_call") {
+      const { to, data } = params[0];
+      const selector = data.slice(0, 10);
+      if (selector === toFunctionSelector("factory()"))
+        result = `0x${uni.factory.slice(2).padStart(64, "0")}`;
+      else if (selector === toFunctionSelector("WETH9()"))
+        result = `0x${"4200000000000000000000000000000000000006".padStart(64, "0")}`;
+      else if (selector === toFunctionSelector("poolManager()"))
+        result = `0x${uniV4.pool_manager.slice(2).padStart(64, "0")}`;
+      else if (selector === toFunctionSelector("permit2()"))
+        result = `0x${uniV4.permit2.slice(2).padStart(64, "0")}`;
+      else if (selector === toFunctionSelector("decimals()"))
+        result = word(
+          Object.values(tokens).find((candidate) => candidate.address === to)
+            .decimals,
+        );
+      else if (selector === toFunctionSelector("getSlot0(bytes32)"))
+        result = encodeFunctionResult({
+          abi: uniswapV4StateViewAbi,
+          functionName: "getSlot0",
+          result: [BigInt(plan.sqrtPriceX96), 0, 0, 0],
+        });
+      else if (selector === toFunctionSelector("balanceOf(address)"))
+        result = word(1n << 255n);
+      else if (selector === toFunctionSelector("allowance(address,address)"))
+        result = word(1n << 255n);
+      else if (
+        selector === toFunctionSelector("allowance(address,address,address)")
+      )
+        result = `${word((1n << 160n) - 1n)}${word(99).slice(2)}${word(0).slice(2)}`;
+      else if (selector === toFunctionSelector("nextTokenId()"))
+        result = word(1);
+      else throw new Error(`Unexpected eth_call selector ${selector}`);
+    } else throw new Error(`Unexpected method ${method}`);
+    return Response.json({ result });
+  };
+  try {
+    const config = resolve(dir, "profile.toml");
+    const manifestPath = resolve(dir, "manifest.json");
+    writeFileSync(
+      config,
+      (await Bun.file(defaultProfilePath).text()).replace(
+        "BASE_SEPOLIA_RPC_URL",
+        "HARNESS_ISOLATED_RPC",
+      ),
+    );
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 1,
+        chainId: 84532,
+        sender,
+        transactions: {},
+        tokens,
+        pancake: {},
+        pools: [],
+        uni,
+      }),
+    );
+    await run(
+      options([
+        "seed-v4",
+        "--sender",
+        sender,
+        "--config",
+        config,
+        "--manifest",
+        manifestPath,
+      ]),
+    );
+    const permissionWrites = estimates.filter(
+      ({ to, data }) =>
+        to.toLowerCase() === uniV4.permit2.toLowerCase() &&
+        data.startsWith(
+          toFunctionSelector("approve(address,address,uint160,uint48)"),
+        ),
+    );
+    assert.equal(permissionWrites.length, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.HARNESS_ISOLATED_RPC;
+    else process.env.HARNESS_ISOLATED_RPC = previousURL;
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test("V3 fixture rejects 0/255 decimals whose generated values exceed protocol bounds", () => {
   assert.throws(() => fixture(0, 255, 10), /V3|bound|decimal/i);
 });

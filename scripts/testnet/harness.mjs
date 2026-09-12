@@ -1069,6 +1069,13 @@ export async function run(o) {
         );
         await recordPosition();
       } else {
+        const latestBlock = await rpc("eth_getBlockByNumber", [
+          "latest",
+          false,
+        ]);
+        const deadline =
+          manifest.v4Fixture.positionDeadline ??
+          String(BigInt(latestBlock.timestamp) + 86400n);
         for (const [token, maximum] of [
           [plan.token0, plan.amount0Max],
           [plan.token1, plan.amount1Max],
@@ -1099,7 +1106,13 @@ export async function run(o) {
             [o.sender, token.address, uniV4.position_manager],
           );
           const permittedAmount = BigInt(permission.amount ?? permission[0]);
-          if (permittedAmount < maximum)
+          const permittedExpiration = BigInt(
+            permission.expiration ?? permission[1],
+          );
+          if (
+            permittedAmount < maximum ||
+            permittedExpiration <= BigInt(deadline)
+          )
             await write(
               `v4-approve-permit2-${token.address.toLowerCase()}`,
               uniV4.permit2,
@@ -1141,13 +1154,6 @@ export async function run(o) {
         );
         if (!o.broadcast)
           console.log(`DRY v4-position: current next NFT ${tokenId}`);
-        const latestBlock = await rpc("eth_getBlockByNumber", [
-          "latest",
-          false,
-        ]);
-        const deadline =
-          manifest.v4Fixture.positionDeadline ??
-          String(BigInt(latestBlock.timestamp) + 86400n);
         if (o.broadcast) {
           manifest.v4Fixture.positionDeadline = deadline;
           save();
@@ -1254,13 +1260,15 @@ export async function run(o) {
         "",
         `[chains.${chain.key}.deployments.uniswap-v4]`,
         'kind = "uniswap-v4"',
-        `pool_manager = "${uniV4.pool_manager}"`,
         `quoter = "${uniV4.quoter}"`,
-        `state_view = "${uniV4.state_view}"`,
         `router = "${uniV4.router}"`,
+        "",
+        `[chains.${chain.key}.deployments.uniswap-v4.options]`,
+        `pool_manager = "${uniV4.pool_manager}"`,
+        `state_view = "${uniV4.state_view}"`,
         `permit2 = "${uniV4.permit2}"`,
         "",
-        `[[chains.${chain.key}.deployments.uniswap-v4.pools]]`,
+        `[[chains.${chain.key}.deployments.uniswap-v4.options.pools]]`,
         `currency0 = "${manifest.v4Fixture.token0}"`,
         `currency1 = "${manifest.v4Fixture.token1}"`,
         `fee_pips = ${manifest.v4Fixture.fee}`,

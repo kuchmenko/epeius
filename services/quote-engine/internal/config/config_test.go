@@ -252,21 +252,31 @@ symbol = "B"
 decimals = 6
 [chains.test-net.deployments.v4]
 kind = "uniswap-v4"
-pool_manager = "0x3333333333333333333333333333333333333333"
 quoter = "0x4444444444444444444444444444444444444444"
-state_view = "0x5555555555555555555555555555555555555555"
 router = "0x6666666666666666666666666666666666666666"
+[chains.test-net.deployments.v4.options]
+pool_manager = "0x3333333333333333333333333333333333333333"
+state_view = "0x5555555555555555555555555555555555555555"
 permit2 = "0x7777777777777777777777777777777777777777"
-[[chains.test-net.deployments.v4.pools]]
+[[chains.test-net.deployments.v4.options.pools]]
 currency0 = "0x1111111111111111111111111111111111111111"
 currency1 = "0x2222222222222222222222222222222222222222"
 fee_pips = 500
 tick_spacing = 10
 hooks = "0x0000000000000000000000000000000000000000"
 `
-	got, err := loadText(t, text)
-	if err != nil || got.Chains["test-net"].Deployments["v4"].Pools[0].TickSpacing != 10 {
+	_, err := loadText(t, text)
+	if err != nil {
 		t.Fatalf("valid V4 deployment rejected: %v", err)
+	}
+	for _, changed := range []string{
+		strings.Replace(text, "[chains.test-net.deployments.v4.options]\n", "", 1),
+		strings.Replace(text, "permit2 = \"0x7777777777777777777777777777777777777777\"", "permit2 = \"0x7777777777777777777777777777777777777777\"\nunknown = true", 1),
+		strings.Replace(text, "[chains.test-net.deployments.v4.options]", "pool_manager = \"0x3333333333333333333333333333333333333333\"\n[chains.test-net.deployments.v4.options]", 1),
+	} {
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatal("accepted missing, unknown, or misplaced V4 options")
+		}
 	}
 	for _, change := range [][2]string{
 		{"fee_pips = 500", "fee_pips = 8388608"},

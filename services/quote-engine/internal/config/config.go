@@ -62,18 +62,6 @@ type Deployment struct {
 	Options          *map[string]any `toml:"options"`
 	ProviderConfig   any             `toml:"-"`
 	configuredFields map[string]bool
-	PoolManager      string          `toml:"pool_manager"`
-	StateView        string          `toml:"state_view"`
-	Permit2          string          `toml:"permit2"`
-	Pools            []UniswapV4Pool `toml:"pools"`
-}
-
-type UniswapV4Pool struct {
-	Currency0   string `toml:"currency0"`
-	Currency1   string `toml:"currency1"`
-	FeePips     uint32 `toml:"fee_pips"`
-	TickSpacing int32  `toml:"tick_spacing"`
-	Hooks       string `toml:"hooks"`
 }
 
 var chainKey = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -132,21 +120,9 @@ func (c Config) normalizeAddresses() {
 			}
 		}
 		for id, deployment := range chain.Deployments {
-			for _, address := range []*string{&deployment.Factory, &deployment.Quoter, &deployment.Router, &deployment.PoolManager, &deployment.StateView, &deployment.Permit2} {
+			for _, address := range []*string{&deployment.Factory, &deployment.Quoter, &deployment.Router} {
 				if common.IsHexAddress(*address) {
 					*address = common.HexToAddress(*address).Hex()
-				}
-			}
-			for i := range deployment.Pools {
-				pool := &deployment.Pools[i]
-				if common.IsHexAddress(pool.Currency0) {
-					pool.Currency0 = common.HexToAddress(pool.Currency0).Hex()
-				}
-				if common.IsHexAddress(pool.Currency1) {
-					pool.Currency1 = common.HexToAddress(pool.Currency1).Hex()
-				}
-				if common.IsHexAddress(pool.Hooks) {
-					pool.Hooks = common.HexToAddress(pool.Hooks).Hex()
 				}
 			}
 			chain.Deployments[id] = deployment

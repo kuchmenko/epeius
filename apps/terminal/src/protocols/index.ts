@@ -15,16 +15,6 @@ type RawDeployment = {
   router?: string;
   fees?: number[];
   options?: unknown;
-  pool_manager?: string;
-  state_view?: string;
-  permit2?: string;
-  pools?: Array<{
-    currency0?: string;
-    currency1?: string;
-    fee_pips?: number;
-    tick_spacing?: number;
-    hooks?: string;
-  }>;
 };
 
 type ParsedDeployment = TrustedExecution["deployments"][string] & {
@@ -51,10 +41,6 @@ const deploymentFields = new Set([
   "router",
   "fees",
   "options",
-  "pool_manager",
-  "state_view",
-  "permit2",
-  "pools",
 ]);
 
 export const configureChain: Parameters<typeof readExecutionConfig>[3] = (

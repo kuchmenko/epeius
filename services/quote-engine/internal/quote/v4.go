@@ -22,18 +22,19 @@ type v4Quoter struct {
 	reader     Reader
 	id         string
 	deployment config.Deployment
+	options    uniswapv4.Options
 }
 
 type v4Candidate struct {
 	id   string
-	pool config.UniswapV4Pool
+	pool uniswapv4.Pool
 }
 
 func (q v4Quoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.BlockContext) func(context.Context) (QuoteCandidate, bool) {
 	in, out := common.HexToAddress(r.TokenIn), common.HexToAddress(r.TokenOut)
 	amount, _ := new(big.Int).SetString(r.AmountInAtomic, 10)
 	var candidates []v4Candidate
-	for _, pool := range q.deployment.Pools {
+	for _, pool := range q.options.Pools {
 		currency0, currency1 := common.HexToAddress(pool.Currency0), common.HexToAddress(pool.Currency1)
 		if in != currency0 && in != currency1 || out != currency0 && out != currency1 {
 			continue
@@ -54,14 +55,18 @@ func (q v4Quoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.BlockContex
 	}
 }
 
-func (q v4Quoter) quote(ctx context.Context, id string, pool config.UniswapV4Pool, in, out common.Address, amount *big.Int, block *quotev1.BlockContext) (*quotev1.RouteQuote, error) {
+func (q v4Quoter) quote(ctx context.Context, id string, pool uniswapv4.Pool, in, out common.Address, amount *big.Int, block *quotev1.BlockContext) (*quotev1.RouteQuote, error) {
 	start := time.Now()
 	key := v4PoolKey(pool)
 	poolID, err := uniswapv4.PoolID(key)
 	if err != nil {
 		return nil, err
 	}
-	provider := uniswapv4.Provider{Client: q.reader, Quoter: common.HexToAddress(q.deployment.Quoter), StateView: common.HexToAddress(q.deployment.StateView)}
+	provider := uniswapv4.Provider{Client: q.reader, Quoter: common.HexToAddress(q.deployment.Quoter), StateView: common.HexToAddress(q.options.StateView)}
+	initialized, err := provider.PoolInitialized(ctx, key, common.HexToHash(block.Hash))
+	if err != nil || !initialized {
+		return nil, err
+	}
 	output, err := provider.Quote(ctx, key, in == key.Currency0, amount, common.HexToHash(block.Hash))
 	if err != nil {
 		return nil, err
@@ -86,19 +91,19 @@ func (q v4Quoter) Requote(ctx context.Context, route *quotev1.RouteQuote, amount
 	return q.quote(ctx, route.RouteId, pool, common.HexToAddress(route.Legs[0].TokenIn), common.HexToAddress(route.Legs[0].TokenOut), amount, block)
 }
 
-func (q v4Quoter) admit(route *quotev1.RouteQuote) (config.UniswapV4Pool, bool) {
+func (q v4Quoter) admit(route *quotev1.RouteQuote) (uniswapv4.Pool, bool) {
 	if route == nil || route.Provider != "uniswap-v4" || route.DeploymentId != q.id || len(route.Legs) != 1 || route.Legs[0].UniswapV4PoolKey == nil || route.Legs[0].Selector != nil {
-		return config.UniswapV4Pool{}, false
+		return uniswapv4.Pool{}, false
 	}
 	leg := route.Legs[0]
-	for _, pool := range q.deployment.Pools {
+	for _, pool := range q.options.Pools {
 		key := leg.UniswapV4PoolKey
 		id, _ := uniswapv4.PoolID(v4PoolKey(pool))
 		if strings.EqualFold(leg.Pool, id.Hex()) && strings.EqualFold(key.Currency0, pool.Currency0) && strings.EqualFold(key.Currency1, pool.Currency1) && key.FeePips == pool.FeePips && key.TickSpacing == pool.TickSpacing && strings.EqualFold(key.Hooks, pool.Hooks) && (strings.EqualFold(leg.TokenIn, pool.Currency0) && strings.EqualFold(leg.TokenOut, pool.Currency1) || strings.EqualFold(leg.TokenIn, pool.Currency1) && strings.EqualFold(leg.TokenOut, pool.Currency0)) {
 			return pool, true
 		}
 	}
-	return config.UniswapV4Pool{}, false
+	return uniswapv4.Pool{}, false
 }
 
 func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
@@ -107,7 +112,7 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 		return errors.New("deployment code unavailable")
 	}
 	var routerCode []byte
-	for _, address := range []string{q.deployment.PoolManager, q.deployment.Quoter, q.deployment.StateView, q.deployment.Permit2, q.deployment.Router} {
+	for _, address := range []string{q.options.PoolManager, q.deployment.Quoter, q.options.StateView, q.options.Permit2, q.deployment.Router} {
 		code, err := reader.Code(ctx, common.HexToAddress(address), hash)
 		if err != nil || len(code) == 0 {
 			return errors.New("Uniswap V4 deployment verification failed")
@@ -118,9 +123,9 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 	}
 	for target, contract := range map[string]struct {
 		method string
-	}{q.deployment.Quoter: {"poolManager"}, q.deployment.StateView: {"poolManager"}, q.deployment.Router: {"poolManager"}} {
+	}{q.deployment.Quoter: {"poolManager"}, q.options.StateView: {"poolManager"}, q.deployment.Router: {"poolManager"}} {
 		var method = contractabi.UniswapV4Quoter.Methods[contract.method]
-		if target == q.deployment.StateView {
+		if target == q.options.StateView {
 			method = contractabi.UniswapV4StateView.Methods[contract.method]
 		} else if target == q.deployment.Router {
 			method = contractabi.UniswapUniversalRouter.Methods[contract.method]
@@ -130,25 +135,19 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 			return errors.New("Uniswap V4 deployment verification failed")
 		}
 		values, err := evm.Unpack(method, data)
-		if err != nil || values[0].(common.Address) != common.HexToAddress(q.deployment.PoolManager) {
+		if err != nil || values[0].(common.Address) != common.HexToAddress(q.options.PoolManager) {
 			return errors.New("Uniswap V4 deployment verification failed")
 		}
 	}
 	// Universal Router keeps Permit2 as an internal immutable, so there is no
 	// getter. Require the configured address in its pinned runtime bytecode.
 	// https://github.com/Uniswap/universal-router/blob/3663f6db6e2fe121753cd2d899699c2dc75dca86/contracts/modules/PaymentsImmutables.sol
-	if !bytes.Contains(routerCode, common.HexToAddress(q.deployment.Permit2).Bytes()) {
+	if !bytes.Contains(routerCode, common.HexToAddress(q.options.Permit2).Bytes()) {
 		return errors.New("Uniswap V4 deployment verification failed")
-	}
-	provider := uniswapv4.Provider{Client: q.reader, Quoter: common.HexToAddress(q.deployment.Quoter), StateView: common.HexToAddress(q.deployment.StateView)}
-	for _, pool := range q.deployment.Pools {
-		if err := provider.VerifyPool(ctx, v4PoolKey(pool), hash); err != nil {
-			return err
-		}
 	}
 	return nil
 }
 
-func v4PoolKey(pool config.UniswapV4Pool) uniswapv4.PoolKey {
+func v4PoolKey(pool uniswapv4.Pool) uniswapv4.PoolKey {
 	return uniswapv4.NewPoolKey(common.HexToAddress(pool.Currency0), common.HexToAddress(pool.Currency1), pool.FeePips, pool.TickSpacing, common.HexToAddress(pool.Hooks))
 }

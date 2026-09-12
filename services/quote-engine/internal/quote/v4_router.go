@@ -10,7 +10,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
-	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 )
@@ -18,9 +17,9 @@ import (
 const permit2PermissionLifetime = 30 * 60
 
 type v4RouterPreparation struct {
-	id, chainID string
-	deployment  config.Deployment
-	admit       func(*quotev1.RouteQuote) (config.UniswapV4Pool, bool)
+	id, chainID     string
+	router, permit2 string
+	admit           func(*quotev1.RouteQuote) (uniswapv4.Pool, bool)
 }
 
 func (s v4RouterPreparation) Select(_ context.Context, _ storedQuote, _ *quotev1.PrepareExecutionRequest, route *quotev1.RouteQuote) (executionSelection, string) {
@@ -46,7 +45,7 @@ func (s v4RouterPreparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 	if err != nil {
 		return executionPlan{}, "unsupported Uniswap V4 route"
 	}
-	tx := &quotev1.UnsignedTransaction{ChainId: s.chainID, To: common.HexToAddress(s.deployment.Router).Hex(), From: p.Recipient, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1500000"}
+	tx := &quotev1.UnsignedTransaction{ChainId: s.chainID, To: common.HexToAddress(s.router).Hex(), From: p.Recipient, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1500000"}
 	checks := directChecks(p.Route, tx)
 	checks.Preserve = append(checks.Preserve,
 		BalanceProbe{p.TokenIn, tx.To},
@@ -54,9 +53,9 @@ func (s v4RouterPreparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 	)
 	return executionPlan{
 		transaction: tx,
-		spender:     common.HexToAddress(s.deployment.Permit2).Hex(),
+		spender:     common.HexToAddress(s.permit2).Hex(),
 		permission: &permissionPlan{
-			target: common.HexToAddress(s.deployment.Permit2).Hex(), token: p.TokenIn,
+			target: common.HexToAddress(s.permit2).Hex(), token: p.TokenIn,
 			spender: tx.To, amount: amount, expiration: deadline + permit2PermissionLifetime,
 		},
 		checks: checks,
@@ -84,7 +83,7 @@ func mustABIType(name string, components []abi.ArgumentMarshaling) abi.Type {
 	return typeOf
 }
 
-func uniswapV4RouterData(pool config.UniswapV4Pool, tokenIn string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
+func uniswapV4RouterData(pool uniswapv4.Pool, tokenIn string, amount, minimum *big.Int, deadline uint64) ([]byte, error) {
 	key := v4PoolKey(pool)
 	type exactInputSingle struct {
 		PoolKey          uniswapv4.PoolKey

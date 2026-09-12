@@ -149,21 +149,46 @@ export function uniswapV4Data(p: PrepareExecutionResponse, pool: Pool) {
 }
 
 export function uniswapV4(raw: {
+  factory?: string;
+  quoter?: string;
   router?: string;
-  permit2?: string;
-  pools?: Array<{
-    currency0?: string;
-    currency1?: string;
-    fee_pips?: number;
-    tick_spacing?: number;
-    hooks?: string;
-  }>;
+  fees?: number[];
+  options?: unknown;
 }) {
+  const options = raw.options as
+    | {
+        pool_manager?: string;
+        state_view?: string;
+        permit2?: string;
+        pools?: Array<{
+          currency0?: string;
+          currency1?: string;
+          fee_pips?: number;
+          tick_spacing?: number;
+          hooks?: string;
+        }>;
+      }
+    | undefined;
+  if (
+    raw.factory !== undefined ||
+    raw.fees !== undefined ||
+    !options ||
+    typeof options !== "object" ||
+    Array.isArray(options) ||
+    Object.keys(options).length !== 4 ||
+    !["pool_manager", "state_view", "permit2", "pools"].every((field) =>
+      Object.hasOwn(options, field),
+    )
+  )
+    throw new Error("Local execution deployment is invalid.");
+  address(raw.quoter);
+  address(options.pool_manager);
+  address(options.state_view);
   const deployment: Deployment = {
     kind: "uniswap-v4",
     router: address(raw.router),
-    permit2: address(raw.permit2),
-    pools: (raw.pools ?? []).map((pool) => ({
+    permit2: address(options.permit2),
+    pools: (options.pools ?? []).map((pool) => ({
       currency0: address(pool.currency0),
       currency1: address(pool.currency1),
       feePips: pool.fee_pips ?? -1,

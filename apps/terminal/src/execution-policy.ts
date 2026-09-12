@@ -21,6 +21,7 @@ export const ExecutionAction = {
   Approval: "approval",
   Swap: "swap",
 } as const;
+const permit2PermissionLifetime = 30n * 60n;
 export type ExecutionAction =
   (typeof ExecutionAction)[keyof typeof ExecutionAction];
 
@@ -181,6 +182,7 @@ export function validatePreparation(
         permission.expirationUnix,
         "Permission expiration",
       );
+      const deadline = uint256Decimal(p.deadlineUnix, "Deadline");
       const expected = encodeFunctionData({
         abi: permit2Abi,
         functionName: "approve",
@@ -200,7 +202,7 @@ export function validatePreparation(
         !same(permission.token, p.tokenIn) ||
         !same(permission.spender, terms.permission.spender) ||
         permission.amountAtomic !== p.amountInAtomic ||
-        expiration <= uint256Decimal(p.deadlineUnix, "Deadline") ||
+        expiration !== deadline + permit2PermissionLifetime ||
         expiration >= 1n << 48n ||
         !same(tx.to, permission.target) ||
         !same(tx.data, expected) ||

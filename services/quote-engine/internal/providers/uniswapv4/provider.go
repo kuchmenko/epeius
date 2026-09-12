@@ -89,22 +89,22 @@ func (p Provider) Quote(ctx context.Context, key PoolKey, zeroForOne bool, amoun
 	return output, nil
 }
 
-func (p Provider) VerifyPool(ctx context.Context, key PoolKey, block common.Hash) error {
+func (p Provider) PoolInitialized(ctx context.Context, key PoolKey, block common.Hash) (bool, error) {
 	id, err := PoolID(key)
 	if err != nil {
-		return err
+		return false, err
 	}
 	data, err := contractabi.UniswapV4StateView.Pack("getSlot0", id)
 	if err != nil {
-		return err
+		return false, err
 	}
 	result, err := p.Client.Call(ctx, p.StateView, data, block)
 	if err != nil {
-		return errors.New("Uniswap V4 pool state unavailable")
+		return false, errors.New("Uniswap V4 pool state unavailable")
 	}
 	values, err := evm.Unpack(contractabi.UniswapV4StateView.Methods["getSlot0"], result)
-	if err != nil || values[0].(*big.Int).Sign() == 0 {
-		return errors.New("Uniswap V4 pool is not initialized")
+	if err != nil {
+		return false, errors.New("invalid Uniswap V4 pool state response")
 	}
-	return nil
+	return values[0].(*big.Int).Sign() != 0, nil
 }
