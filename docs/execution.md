@@ -97,7 +97,7 @@ Terminal validation independently checks local executor/deployment/token/fee con
 
 A revert rolls back that transaction's swaps and token transfers. Gas is still paid, and an earlier approval transaction remains confirmed. The same executor call will be used for simulation and actual execution; a simulation-only wrapper would not establish the same guarantee.
 
-Local proofs cover independent Go/TypeScript/cast encoding vectors, exact-size quote and rounding fixtures, CLI request/recheck/refusal paths, Tenderly token-owner/allowance mutations, and authentic-router Foundry tests. [Dated Base Sepolia evidence](base-sepolia-acceptance.md) separately records four live executor scenarios with exact Tenderly simulation and canonical receipts. [Aerodrome Slipstream Initial acceptance](aerodrome-slipstream-acceptance.md) records a canonical Base end-of-block simulation and exact local-fork execution without a mainnet submission. Live direct-route coverage and selected-route commands in [testnet checks](testnet.md) do not by themselves establish executor acceptance.
+Local proofs cover independent Go/TypeScript/cast encoding vectors, exact-size quote and rounding fixtures, CLI request/recheck/refusal paths, Tenderly token-owner/allowance mutations, and authentic-router Foundry tests. [Dated Base Sepolia evidence](base-sepolia-acceptance.md) separately records four live executor scenarios with exact Tenderly simulation and canonical receipts. Live direct-route coverage and selected-route commands in [testnet checks](testnet.md) do not by themselves establish executor acceptance.
 
 ## Public testnet checks
 

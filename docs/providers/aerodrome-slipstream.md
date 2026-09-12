@@ -116,8 +116,6 @@ cast send --rpc-url http://127.0.0.1:28545 --unlocked \
 
 Before and after the local send, query sender and router token balances and require the exact input decrease, output increase of at least the prepared minimum, and no new router residue. Verify that the fork block hash equals the quote block hash. The impersonated address must already have the required balance and allowance at that block unless the test explicitly records fork-only state changes.
 
-The dated [Initial deployment acceptance](../aerodrome-slipstream-acceptance.md) records the pinned setup and resulting balance evidence for one Base deployment; it is not a reusable address allowlist or mainnet execution proof.
-
 ## Official references
 
 - [Slipstream repository](https://github.com/aerodrome-finance/slipstream)
