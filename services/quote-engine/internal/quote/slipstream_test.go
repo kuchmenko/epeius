@@ -12,6 +12,7 @@ import (
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
 func TestSlipstreamQuotesTwoHopsSequentially(t *testing.T) {
@@ -54,7 +55,9 @@ func TestSlipstreamQuotesTwoHopsSequentially(t *testing.T) {
 	}}
 	q := slipstreamQuoter{reader: reader, deployment: config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex()}}
 	legs, output, err := q.quote(context.Background(), tokens, []int32{100, 100}, big.NewInt(17), common.HexToHash(blockHash))
-	if err != nil || output.Uint64() != 47 || poolCall != 2 || len(legs) != 2 || legs[0].Pool != firstPool.Hex() || legs[1].Pool != secondPool.Hex() || legs[0].GetTickSpacing() != 100 || legs[0].GetFeePips() != 0 {
+	if err != nil || output.Uint64() != 47 || poolCall != 2 || len(legs) != 2 ||
+		legs[0].TokenIn != tokenA || legs[0].TokenOut != tokenB || legs[0].Pool != firstPool.Hex() || legs[0].GetTickSpacing() != 100 || legs[0].GetFeePips() != 0 ||
+		legs[1].TokenIn != tokenB || legs[1].TokenOut != tokenC || legs[1].Pool != secondPool.Hex() || legs[1].GetTickSpacing() != 100 || legs[1].GetFeePips() != 0 {
 		t.Fatalf("legs=%+v output=%v err=%v", legs, output, err)
 	}
 }
@@ -92,21 +95,28 @@ func TestSlipstreamRouterCalldataUsesSignedPathAndExactTuple(t *testing.T) {
 	}
 }
 
-func TestSlipstreamDiscountCheckFailsClosedAndRejectsDiscount(t *testing.T) {
+func TestSlipstreamDiscountCheckHandlesModuleCapabilitiesAndRejectsDiscount(t *testing.T) {
 	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	module := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	hash := common.HexToHash(blockHash)
+	// The portable fee-module interface does not include discounted(address),
+	// so canonical static modules revert this optional capability probe.
+	// https://github.com/aerodrome-finance/slipstream/blob/main/contracts/core/interfaces/fees/IFeeModule.sol#L6-L15
 	for _, test := range []struct {
 		name        string
 		discount    uint64
 		wrongLink   bool
 		missingCode bool
+		static      bool
+		rpcFailure  bool
 		want        string
 	}{
-		{"undiscounted", 0, false, false, ""},
-		{"discounted", 1, false, false, "Signer has a Slipstream tx.origin fee discount"},
-		{"wrong module factory", 0, true, false, "Slipstream fee discount check failed"},
-		{"missing module code", 0, false, true, "Slipstream fee discount check failed"},
+		{name: "undiscounted"},
+		{name: "discounted", discount: 1, want: "Signer has a Slipstream tx.origin fee discount"},
+		{name: "static fee module", static: true},
+		{name: "discount lookup failure", rpcFailure: true, want: "Slipstream fee discount check failed"},
+		{name: "wrong module factory", wrongLink: true, want: "Slipstream fee discount check failed"},
+		{name: "missing module code", missingCode: true, want: "Slipstream fee discount check failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reader := codeFake{code: func(_ context.Context, target common.Address, gotHash common.Hash) ([]byte, error) {
@@ -128,6 +138,15 @@ func TestSlipstreamDiscountCheckFailsClosedAndRejectsDiscount(t *testing.T) {
 					}
 					return poolResponse(factory), nil
 				case target == module && signature("discounted(address)"):
+					if common.BytesToAddress(data[4:36]) != common.HexToAddress(wallet) {
+						t.Fatal("discount lookup used wrong signer")
+					}
+					if test.static {
+						return nil, rpc.ErrExecutionReverted
+					}
+					if test.rpcFailure {
+						return nil, errors.New("rpc unavailable")
+					}
 					return uintWord(test.discount), nil
 				default:
 					return nil, errors.New("unexpected call")

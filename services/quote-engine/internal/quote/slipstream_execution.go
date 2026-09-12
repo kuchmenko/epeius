@@ -10,6 +10,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
 func verifySlipstreamDeployment(ctx context.Context, reader codeReader, deployment config.Deployment, hash common.Hash) error {
@@ -76,9 +77,11 @@ func verifiedSlipstreamFeeModule(ctx context.Context, reader Reader, hash common
 	return module, nil
 }
 
-// Slipstream's FeeModule can vary fees by tx.origin. Informational quotes have
-// no signer, so execution rejects discounted signers rather than presenting
-// account-independent output as executable output.
+// Dynamic fee modules can vary fees by tx.origin, while IFeeModule does not
+// require the optional discounted(address) getter used to detect that policy.
+// https://github.com/aerodrome-finance/slipstream/blob/main/contracts/core/interfaces/fees/IFeeModule.sol#L6-L15
+// Informational quotes have no signer, so execution rejects known discounts;
+// canonical static modules revert the optional getter and remain executable.
 func verifySlipstreamSignerDiscount(ctx context.Context, reader Reader, hash common.Hash, factory common.Address, signer string) string {
 	const fail = "Slipstream fee discount check failed"
 	module, err := verifiedSlipstreamFeeModule(ctx, reader, hash, factory)
@@ -91,6 +94,9 @@ func verifySlipstreamSignerDiscount(ctx context.Context, reader Reader, hash com
 	}
 	data, err := reader.Call(ctx, module, call, hash)
 	if err != nil {
+		if errors.Is(err, rpc.ErrExecutionReverted) {
+			return ""
+		}
 		return fail
 	}
 	values, err := evm.Unpack(contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["discounted"], data)

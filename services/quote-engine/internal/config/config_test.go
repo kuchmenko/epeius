@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -165,7 +166,7 @@ tick_spacings = [-8388608, -1, 1, 100, 8388607]
 `
 	got, err := loadText(t, text)
 	options, ok := got.Chains["base"].Deployments["slipstream"].ProviderConfig.(slipstream.Options)
-	if err != nil || !ok || len(options.TickSpacings) != 5 {
+	if err != nil || !ok || !slices.Equal(options.TickSpacings, []int32{-8388608, -1, 1, 100, 8388607}) {
 		t.Fatalf("Slipstream config rejected: %+v %v", got, err)
 	}
 	for _, replacement := range []string{

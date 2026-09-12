@@ -7,7 +7,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +25,15 @@ func Verify(ctx context.Context, key string, chainID int64, endpoint string) (Sn
 }
 
 func TestPinnedCall(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		code int
+	}{
+		{name: "success"},
+		{name: "provider failure", code: -32000},
+		{name: "execution reverted", code: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			calls := 0
 			hash := common.HexToHash("0x1234")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,9 +62,9 @@ func TestPinnedCall(t *testing.T) {
 					t.Error(args)
 				}
 				response := map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": "0x0405"}
-				if fail {
+				if test.code != 0 {
 					delete(response, "result")
-					response["error"] = map[string]any{"code": -32000, "message": "secret canonical block unavailable"}
+					response["error"] = map[string]any{"code": test.code, "message": "secret canonical block unavailable"}
 				}
 				json.NewEncoder(w).Encode(response)
 			}))
@@ -70,8 +76,8 @@ func TestPinnedCall(t *testing.T) {
 			client := &Client{Client: eth}
 			defer client.Close()
 			got, err := client.Call(context.Background(), common.HexToAddress("0xabcd"), []byte{1, 2, 3}, hash)
-			if fail {
-				if err == nil || strings.Contains(err.Error(), "secret") {
+			if test.code != 0 {
+				if err == nil || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrExecutionReverted) != (test.code == 3) {
 					t.Fatal(err)
 				}
 			} else if err != nil || string(got) != string([]byte{4, 5}) {

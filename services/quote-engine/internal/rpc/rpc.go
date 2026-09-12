@@ -15,6 +15,8 @@ import (
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
 )
 
+var ErrExecutionReverted = errors.New("contract call reverted")
+
 type Snapshot struct {
 	Key         string `json:"key"`
 	ChainID     string `json:"chainId"`
@@ -85,6 +87,10 @@ func (c *Client) Call(ctx context.Context, to common.Address, data []byte, hash 
 	err := c.Client.Client().CallContext(ctx, &result, "eth_call",
 		map[string]any{"to": to, "data": hexutil.Bytes(data)}, gethrpc.BlockNumberOrHashWithHash(hash, true))
 	if err != nil {
+		var rpcError gethrpc.Error
+		if errors.As(err, &rpcError) && rpcError.ErrorCode() == 3 {
+			return nil, ErrExecutionReverted
+		}
 		return nil, readError(ctx, "contract call at the pinned block")
 	}
 	return result, nil

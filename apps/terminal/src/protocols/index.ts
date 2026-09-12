@@ -20,14 +20,14 @@ type ParsedDeployment = TrustedExecution["deployments"][string] & {
   fees?: number[];
 };
 
-const providerParsers: Record<
+const providerParsers = new Map<
   string,
   (raw: RawDeployment) => ParsedDeployment
-> = {
-  "uniswap-v3": uniswap,
-  "pancake-v3": pancake,
-  "aerodrome-slipstream": slipstream,
-};
+>([
+  ["uniswap-v3", uniswap],
+  ["pancake-v3", pancake],
+  ["aerodrome-slipstream", slipstream],
+]);
 
 const deploymentFields = new Set([
   "kind",
@@ -73,7 +73,9 @@ export function configureExecution(config: {
       if (Object.keys(raw).some((field) => !deploymentFields.has(field)))
         throw new Error("Local execution deployment is invalid.");
       const provider =
-        typeof raw.kind === "string" ? providerParsers[raw.kind] : undefined;
+        typeof raw.kind === "string"
+          ? providerParsers.get(raw.kind)
+          : undefined;
       if (!provider)
         throw new Error(`Unsupported provider: ${raw.kind ?? "missing"}.`);
       return [id, provider(raw)];

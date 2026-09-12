@@ -43,14 +43,14 @@ test("Slipstream path uses signed three-byte two's-complement tick spacing", () 
         ReturnType<typeof route>["route"]
       >,
     ),
-  ).toContain("800000");
+  ).toBe(`${address("1")}800000${address("2").slice(2)}` as `0x${string}`);
   expect(
     slipstreamPath(
       route(Number(maxInt24)).route as NonNullable<
         ReturnType<typeof route>["route"]
       >,
     ),
-  ).toContain("7fffff");
+  ).toBe(`${address("1")}7fffff${address("2").slice(2)}` as `0x${string}`);
   expect(() =>
     slipstreamPath(
       route(Number(minInt24) - 1).route as NonNullable<
@@ -140,4 +140,15 @@ test("Slipstream independently admits config and exact router calldata", () => {
 
   const wrongToken = route(100);
   expect(() => implementation.plan(wrongToken, [address("1")])).toThrow();
+});
+
+test("provider registry rejects inherited object properties", () => {
+  expect(() =>
+    configureExecution({
+      tokens: [address("1"), address("2")],
+      deployments: {
+        inherited: { kind: "constructor", router: address("9") },
+      },
+    }),
+  ).toThrow("Unsupported provider: constructor.");
 });

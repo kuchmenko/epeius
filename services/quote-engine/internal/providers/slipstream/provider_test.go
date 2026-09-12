@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 type callerFunc func(context.Context, common.Address, []byte, common.Hash) ([]byte, error)
@@ -39,12 +40,12 @@ func TestQuoteUsesSignedSpacingTupleAndPinnedSequentialAmount(t *testing.T) {
 		}
 		calls++
 		if calls == 1 {
-			if to != factory || len(data) != 100 || !bytes.Equal(data[4:36], addressWord(inputToken)) || !bytes.Equal(data[36:68], addressWord(outputToken)) || !bytes.Equal(data[68:100], bytes.Repeat([]byte{0xff}, 32)) {
+			if to != factory || len(data) != 100 || !bytes.Equal(data[:4], crypto.Keccak256([]byte("getPool(address,address,int24)"))[:4]) || !bytes.Equal(data[4:36], addressWord(inputToken)) || !bytes.Equal(data[36:68], addressWord(outputToken)) || !bytes.Equal(data[68:100], bytes.Repeat([]byte{0xff}, 32)) {
 				t.Fatalf("wrong signed pool lookup: %x", data)
 			}
 			return addressWord(pool), nil
 		}
-		if to != quoter || len(data) != 164 || !bytes.Equal(data[68:100], word(amount)) || !bytes.Equal(data[100:132], bytes.Repeat([]byte{0xff}, 32)) || new(big.Int).SetBytes(data[132:164]).Sign() != 0 {
+		if to != quoter || len(data) != 164 || !bytes.Equal(data[:4], crypto.Keccak256([]byte("quoteExactInputSingle((address,address,uint256,int24,uint160))"))[:4]) || !bytes.Equal(data[4:36], addressWord(inputToken)) || !bytes.Equal(data[36:68], addressWord(outputToken)) || !bytes.Equal(data[68:100], word(amount)) || !bytes.Equal(data[100:132], bytes.Repeat([]byte{0xff}, 32)) || new(big.Int).SetBytes(data[132:164]).Sign() != 0 {
 			t.Fatalf("wrong quote tuple: %x", data)
 		}
 		return quoteWords(big.NewInt(29), big.NewInt(1000)), nil

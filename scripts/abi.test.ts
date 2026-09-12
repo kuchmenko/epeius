@@ -105,25 +105,29 @@ test("Slipstream ABIs retain signed spacing and Initial tuple order", () => {
     "address",
     "int24",
   ]);
-  expect(quote.inputs[0].components?.map((input) => input.type)).toEqual([
-    "address",
-    "address",
-    "uint256",
-    "int24",
-    "uint160",
+  expect(
+    quote.inputs[0].components?.map(({ name, type }) => [name, type]),
+  ).toEqual([
+    ["tokenIn", "address"],
+    ["tokenOut", "address"],
+    ["amountIn", "uint256"],
+    ["tickSpacing", "int24"],
+    ["sqrtPriceLimitX96", "uint160"],
   ]);
-  expect(quote.outputs.map((output) => output.type)).toEqual([
-    "uint256",
-    "uint160",
-    "uint32",
-    "uint256",
+  expect(quote.outputs.map(({ name, type }) => [name, type])).toEqual([
+    ["amountOut", "uint256"],
+    ["sqrtPriceX96After", "uint160"],
+    ["initializedTicksCrossed", "uint32"],
+    ["gasEstimate", "uint256"],
   ]);
-  expect(swap.inputs[0].components?.map((input) => input.type)).toEqual([
-    "bytes",
-    "address",
-    "uint256",
-    "uint256",
-    "uint256",
+  expect(
+    swap.inputs[0].components?.map(({ name, type }) => [name, type]),
+  ).toEqual([
+    ["path", "bytes"],
+    ["recipient", "address"],
+    ["deadline", "uint256"],
+    ["amountIn", "uint256"],
+    ["amountOutMinimum", "uint256"],
   ]);
   expect(toFunctionSelector(swap)).toBe("0xc04b8d59");
 });
