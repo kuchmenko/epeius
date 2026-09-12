@@ -789,6 +789,10 @@ test("Balancer binds full pool ID and matches independent Vault.swap calldata", 
       changed.route.legs[0].selector = { case: "feePips", value: 0 };
     },
     (changed: PrepareExecutionResponse) => {
+      assert(changed.route);
+      changed.route.legs[0].uniswapV4PoolKey = create(UniswapV4PoolKeySchema);
+    },
+    (changed: PrepareExecutionResponse) => {
       assert(changed.transaction);
       changed.transaction.to = poolId.slice(0, 42);
     },
