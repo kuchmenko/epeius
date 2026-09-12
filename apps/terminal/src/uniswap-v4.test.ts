@@ -262,6 +262,20 @@ test("V4 config rejects missing, unknown, misplaced, and inapplicable provider o
   expect(
     config({
       ...rawDeployment,
+      options: {
+        ...rawDeployment.options,
+        pools: [
+          {
+            ...rawDeployment.options.pools[0],
+            currency1: "0x7777777777777777777777777777777777777777",
+          },
+        ],
+      },
+    }),
+  ).toThrow();
+  expect(
+    config({
+      ...rawDeployment,
       options: { ...rawDeployment.options, permit2: weth },
     }),
   ).toThrow();

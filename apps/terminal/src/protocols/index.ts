@@ -24,7 +24,7 @@ type ParsedDeployment = TrustedExecution["deployments"][string] & {
 
 const providerParsers = new Map<
   string,
-  (raw: RawDeployment) => ParsedDeployment
+  (raw: RawDeployment, tokens: string[]) => ParsedDeployment
 >([
   ["uniswap-v3", uniswap],
   ["pancake-v3", pancake],
@@ -82,7 +82,7 @@ export function configureExecution(config: {
           : undefined;
       if (!provider)
         throw new Error(`Unsupported provider: ${raw.kind ?? "missing"}.`);
-      return [id, provider(raw)];
+      return [id, provider(raw, config.tokens)];
     }),
   );
   return {

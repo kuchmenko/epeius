@@ -163,13 +163,16 @@ export function uniswapV4Data(p: PrepareExecutionResponse, pool: Pool) {
   });
 }
 
-export function uniswapV4(raw: {
-  factory?: string;
-  quoter?: string;
-  router?: string;
-  fees?: number[];
-  options?: unknown;
-}) {
+export function uniswapV4(
+  raw: {
+    factory?: string;
+    quoter?: string;
+    router?: string;
+    fees?: number[];
+    options?: unknown;
+  },
+  tokens: string[],
+) {
   const options = raw.options as
     | {
         pool_manager?: string;
@@ -231,12 +234,15 @@ export function uniswapV4(raw: {
       };
     }),
   };
+  const configuredTokens = new Set(tokens.map((token) => token.toLowerCase()));
   if (
     deployment.pools.length === 0 ||
     new Set(deployment.pools.map((pool) => JSON.stringify(pool))).size !==
       deployment.pools.length ||
     deployment.pools.some(
       (pool) =>
+        !configuredTokens.has(pool.currency0) ||
+        !configuredTokens.has(pool.currency1) ||
         pool.currency0 >= pool.currency1 ||
         !Number.isInteger(pool.feePips) ||
         pool.feePips < 0 ||
