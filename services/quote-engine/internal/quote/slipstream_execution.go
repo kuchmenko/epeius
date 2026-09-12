@@ -95,7 +95,7 @@ func slipstreamDiscount(ctx context.Context, reader Reader, hash common.Hash, mo
 	}
 	data, err := reader.Call(ctx, module, call, hash)
 	if err != nil {
-		if errors.Is(err, rpc.ErrExecutionReverted) {
+		if errors.Is(err, rpc.ErrEmptyExecutionRevert) {
 			return nil, nil
 		}
 		return nil, err

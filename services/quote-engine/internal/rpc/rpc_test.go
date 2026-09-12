@@ -30,12 +30,13 @@ func TestPinnedCall(t *testing.T) {
 		code         int
 		data         string
 		wantReverted bool
+		wantMessage  string
 	}{
 		{name: "success"},
 		{name: "provider failure", code: -32000},
-		{name: "execution reverted without data", code: 3, wantReverted: true},
-		{name: "execution reverted with empty data", code: 3, data: "0x", wantReverted: true},
-		{name: "execution reverted with reason data", code: 3, data: "0x08c379a0"},
+		{name: "execution reverted without data", code: 3, wantReverted: true, wantMessage: "contract call reverted"},
+		{name: "execution reverted with empty data", code: 3, data: "0x", wantReverted: true, wantMessage: "contract call reverted"},
+		{name: "execution reverted with reason data", code: 3, data: "0x08c379a0", wantMessage: "contract call reverted"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
@@ -85,7 +86,7 @@ func TestPinnedCall(t *testing.T) {
 			defer client.Close()
 			got, err := client.Call(context.Background(), common.HexToAddress("0xabcd"), []byte{1, 2, 3}, hash)
 			if test.code != 0 {
-				if err == nil || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrExecutionReverted) != test.wantReverted {
+				if err == nil || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrEmptyExecutionRevert) != test.wantReverted || test.wantMessage != "" && err.Error() != test.wantMessage {
 					t.Fatal(err)
 				}
 			} else if err != nil || string(got) != string([]byte{4, 5}) {

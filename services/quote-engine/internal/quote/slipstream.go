@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -54,6 +55,10 @@ func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 		}
 	}
 	amount, _ := new(big.Int).SetString(r.AmountInAtomic, 10)
+	factory := common.HexToAddress(q.deployment.Factory)
+	hash := common.HexToHash(block.Hash)
+	var checkOrigin sync.Once
+	var checkOriginErr error
 	index := 0
 	return func(ctx context.Context) (QuoteCandidate, bool) {
 		if index >= len(paths) || ctx.Err() != nil {
@@ -63,7 +68,15 @@ func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 		index++
 		return QuoteCandidate{ID: p.id, Quote: func(ctx context.Context) (*quotev1.RouteQuote, error) {
 			start := time.Now()
-			legs, out, err := q.quote(ctx, p.tokens, p.spacings, amount, common.HexToHash(block.Hash))
+			// The fee module and zero-origin discount are immutable at the pinned
+			// block, so every candidate in this search shares one verification.
+			checkOrigin.Do(func() {
+				checkOriginErr = verifySlipstreamQuoteOrigin(ctx, q.reader, hash, factory)
+			})
+			if checkOriginErr != nil {
+				return nil, checkOriginErr
+			}
+			legs, out, err := q.quote(ctx, p.tokens, p.spacings, amount, hash)
 			if err != nil || out == nil {
 				return nil, err
 			}
@@ -74,9 +87,6 @@ func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 
 func (q slipstreamQuoter) quote(ctx context.Context, tokens []common.Address, spacings []int32, amount *big.Int, hash common.Hash) ([]*quotev1.RouteLeg, *big.Int, error) {
 	factory := common.HexToAddress(q.deployment.Factory)
-	if err := verifySlipstreamQuoteOrigin(ctx, q.reader, hash, factory); err != nil {
-		return nil, nil, err
-	}
 	p := slipstream.Provider{Client: q.reader, FactoryAddress: factory, QuoterAddress: common.HexToAddress(q.deployment.Quoter)}
 	out := new(big.Int).Set(amount)
 	legs := []*quotev1.RouteLeg{}

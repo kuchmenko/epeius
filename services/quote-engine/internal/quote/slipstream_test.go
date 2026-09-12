@@ -135,10 +135,73 @@ func TestSlipstreamQuoteRejectsDiscountedCallOrigin(t *testing.T) {
 			return nil, errors.New("unexpected call")
 		}
 	}}
-	q := slipstreamQuoter{reader: reader, deployment: config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex()}}
-	legs, output, err := q.quote(context.Background(), []common.Address{common.HexToAddress(tokenA), common.HexToAddress(tokenB)}, []int32{100}, big.NewInt(17), hash)
-	if err == nil || legs != nil || output != nil || discountCalls != 1 {
-		t.Fatalf("legs=%+v output=%v discountCalls=%d error=%v", legs, output, discountCalls, err)
+	q := slipstreamQuoter{
+		reader:     reader,
+		id:         "slip",
+		deployment: config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex()},
+		options:    slipstream.Options{TickSpacings: []int32{100}},
+	}
+	next := q.Candidates(
+		&quotev1.QuoteRequest{TokenIn: tokenA, TokenOut: tokenB, AmountInAtomic: "17"},
+		&quotev1.BlockContext{Hash: blockHash},
+	)
+	candidate, ok := next(context.Background())
+	if !ok {
+		t.Fatal("missing candidate")
+	}
+	route, err := candidate.Quote(context.Background())
+	if err == nil || route != nil || discountCalls != 1 {
+		t.Fatalf("route=%+v discountCalls=%d error=%v", route, discountCalls, err)
+	}
+}
+
+func TestSlipstreamChecksQuoteOriginOncePerSearch(t *testing.T) {
+	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	quoter := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	module := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	pool := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	moduleChecks := 0
+	originChecks := 0
+	reader := readerFake{call: func(_ context.Context, target common.Address, data []byte, _ common.Hash) ([]byte, error) {
+		signature := func(value string) bool { return bytes.Equal(data[:4], crypto.Keccak256([]byte(value))[:4]) }
+		switch {
+		case target == factory && signature("swapFeeModule()"):
+			moduleChecks++
+			return poolResponse(module), nil
+		case target == module && signature("discounted(address)"):
+			originChecks++
+			return uintWord(0), nil
+		case target == factory && signature("getPool(address,address,int24)"):
+			return poolResponse(pool), nil
+		case target == quoter:
+			return quoteResponse(47), nil
+		default:
+			return nil, errors.New("unexpected call")
+		}
+	}}
+	q := slipstreamQuoter{
+		reader:     reader,
+		id:         "slip",
+		deployment: config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex()},
+		options:    slipstream.Options{TickSpacings: []int32{100, 200}},
+	}
+	next := q.Candidates(
+		&quotev1.QuoteRequest{TokenIn: tokenA, TokenOut: tokenB, AmountInAtomic: "17"},
+		&quotev1.BlockContext{Hash: blockHash},
+	)
+	quoted := 0
+	for {
+		candidate, ok := next(context.Background())
+		if !ok {
+			break
+		}
+		if _, err := candidate.Quote(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		quoted++
+	}
+	if quoted != 2 || moduleChecks != 1 || originChecks != 1 {
+		t.Fatalf("quoted=%d moduleChecks=%d originChecks=%d", quoted, moduleChecks, originChecks)
 	}
 }
 
@@ -189,7 +252,7 @@ func TestSlipstreamDiscountCheckHandlesModuleCapabilitiesAndRejectsDiscount(t *t
 						t.Fatal("discount lookup used wrong signer")
 					}
 					if test.static {
-						return nil, rpc.ErrExecutionReverted
+						return nil, rpc.ErrEmptyExecutionRevert
 					}
 					if test.rpcFailure {
 						return nil, errors.New("rpc unavailable")

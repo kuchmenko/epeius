@@ -86,6 +86,12 @@ test("Slipstream independently admits config and exact router calldata", () => {
     slipstream({ router, fees: [100], options: { tick_spacings: [100] } }),
   ).toThrow();
   expect(() =>
+    slipstream({
+      router: address("0"),
+      options: { tick_spacings: [100] },
+    }),
+  ).toThrow();
+  expect(() =>
     slipstream({ router, fees: [], options: { tick_spacings: [100] } }),
   ).toThrow();
   expect(() =>

@@ -15,7 +15,9 @@ import (
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
 )
 
-var ErrExecutionReverted = errors.New("contract call reverted")
+// ErrEmptyExecutionRevert lets optional ABI probes distinguish an absent
+// selector from a contract failure that returned revert data.
+var ErrEmptyExecutionRevert = errors.New("contract call reverted")
 
 type Snapshot struct {
 	Key         string `json:"key"`
@@ -92,11 +94,12 @@ func (c *Client) Call(ctx context.Context, to common.Address, data []byte, hash 
 		if errors.As(err, &rpcError) && rpcError.ErrorCode() == 3 {
 			var dataError gethrpc.DataError
 			if !errors.As(err, &dataError) || dataError.ErrorData() == nil {
-				return nil, ErrExecutionReverted
+				return nil, ErrEmptyExecutionRevert
 			}
 			if data, ok := dataError.ErrorData().(string); ok && data == "0x" {
-				return nil, ErrExecutionReverted
+				return nil, ErrEmptyExecutionRevert
 			}
+			return nil, errors.New("contract call reverted")
 		}
 		return nil, readError(ctx, "contract call at the pinned block")
 	}

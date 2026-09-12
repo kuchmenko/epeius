@@ -5,6 +5,7 @@ import {
   isAddress,
   maxInt24,
   minInt24,
+  zeroAddress,
 } from "viem";
 import { aerodromeSlipstreamRouterAbi } from "../../../../generated/abi";
 import type {
@@ -78,6 +79,7 @@ export function slipstream(raw: {
   const tickSpacings = options?.tick_spacings;
   if (
     !isAddress(router, { strict: false }) ||
+    router === zeroAddress ||
     raw.fees !== undefined ||
     !options ||
     Object.keys(options).length !== 1 ||
