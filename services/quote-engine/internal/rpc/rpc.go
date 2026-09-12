@@ -83,13 +83,20 @@ func (c *Client) Canonical(ctx context.Context, snapshot Snapshot) error {
 
 func (c *Client) Call(ctx context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
 	var result hexutil.Bytes
-	// EIP-1898 pins every read and rejects a block that is no longer canonical.
+	// EIP-1898 pins every read and rejects a block that is no longer canonical;
+	// an explicit zero sender makes account-sensitive read semantics deterministic.
 	err := c.Client.Client().CallContext(ctx, &result, "eth_call",
-		map[string]any{"to": to, "data": hexutil.Bytes(data)}, gethrpc.BlockNumberOrHashWithHash(hash, true))
+		map[string]any{"from": common.Address{}, "to": to, "data": hexutil.Bytes(data)}, gethrpc.BlockNumberOrHashWithHash(hash, true))
 	if err != nil {
 		var rpcError gethrpc.Error
 		if errors.As(err, &rpcError) && rpcError.ErrorCode() == 3 {
-			return nil, ErrExecutionReverted
+			var dataError gethrpc.DataError
+			if !errors.As(err, &dataError) || dataError.ErrorData() == nil {
+				return nil, ErrExecutionReverted
+			}
+			if data, ok := dataError.ErrorData().(string); ok && data == "0x" {
+				return nil, ErrExecutionReverted
+			}
 		}
 		return nil, readError(ctx, "contract call at the pinned block")
 	}

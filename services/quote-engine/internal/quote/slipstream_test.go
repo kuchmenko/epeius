@@ -18,6 +18,7 @@ import (
 func TestSlipstreamQuotesTwoHopsSequentially(t *testing.T) {
 	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	quoter := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	module := common.HexToAddress("0x3333333333333333333333333333333333333333")
 	firstPool := common.HexToAddress("0x4444444444444444444444444444444444444444")
 	secondPool := common.HexToAddress("0x5555555555555555555555555555555555555555")
 	tokens := []common.Address{common.HexToAddress(tokenA), common.HexToAddress(tokenB), common.HexToAddress(tokenC)}
@@ -26,6 +27,16 @@ func TestSlipstreamQuotesTwoHopsSequentially(t *testing.T) {
 	reader := readerFake{call: func(_ context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
 		if hash != common.HexToHash(blockHash) {
 			t.Fatal("call was not pinned")
+		}
+		signature := func(value string) bool { return bytes.Equal(data[:4], crypto.Keccak256([]byte(value))[:4]) }
+		if to == factory && signature("swapFeeModule()") {
+			return poolResponse(module), nil
+		}
+		if to == module && signature("discounted(address)") {
+			if common.BytesToAddress(data[4:36]) != (common.Address{}) {
+				t.Fatal("quote-origin check used wrong account")
+			}
+			return uintWord(0), nil
 		}
 		if to == factory {
 			if common.BytesToAddress(data[4:36]) != tokens[poolCall] || common.BytesToAddress(data[36:68]) != tokens[poolCall+1] {
@@ -92,6 +103,42 @@ func TestSlipstreamRouterCalldataUsesSignedPathAndExactTuple(t *testing.T) {
 		if _, err := slipstreamPath(route); err == nil {
 			t.Fatalf("accepted spacing %d", spacing)
 		}
+	}
+}
+
+func TestSlipstreamQuoteRejectsDiscountedCallOrigin(t *testing.T) {
+	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	quoter := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	module := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	pool := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	hash := common.HexToHash(blockHash)
+	discountCalls := 0
+	reader := readerFake{call: func(_ context.Context, target common.Address, data []byte, gotHash common.Hash) ([]byte, error) {
+		if gotHash != hash {
+			t.Fatal("quote-origin check was not pinned")
+		}
+		signature := func(value string) bool { return bytes.Equal(data[:4], crypto.Keccak256([]byte(value))[:4]) }
+		switch {
+		case target == factory && signature("swapFeeModule()"):
+			return poolResponse(module), nil
+		case target == module && signature("discounted(address)"):
+			discountCalls++
+			if common.BytesToAddress(data[4:36]) != (common.Address{}) {
+				t.Fatal("discount lookup did not use the quote-call origin")
+			}
+			return uintWord(1), nil
+		case target == factory && signature("getPool(address,address,int24)"):
+			return poolResponse(pool), nil
+		case target == quoter:
+			return quoteResponse(47), nil
+		default:
+			return nil, errors.New("unexpected call")
+		}
+	}}
+	q := slipstreamQuoter{reader: reader, deployment: config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex()}}
+	legs, output, err := q.quote(context.Background(), []common.Address{common.HexToAddress(tokenA), common.HexToAddress(tokenB)}, []int32{100}, big.NewInt(17), hash)
+	if err == nil || legs != nil || output != nil || discountCalls != 1 {
+		t.Fatalf("legs=%+v output=%v discountCalls=%d error=%v", legs, output, discountCalls, err)
 	}
 }
 

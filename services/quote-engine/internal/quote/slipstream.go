@@ -73,7 +73,11 @@ func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 }
 
 func (q slipstreamQuoter) quote(ctx context.Context, tokens []common.Address, spacings []int32, amount *big.Int, hash common.Hash) ([]*quotev1.RouteLeg, *big.Int, error) {
-	p := slipstream.Provider{Client: q.reader, FactoryAddress: common.HexToAddress(q.deployment.Factory), QuoterAddress: common.HexToAddress(q.deployment.Quoter)}
+	factory := common.HexToAddress(q.deployment.Factory)
+	if err := verifySlipstreamQuoteOrigin(ctx, q.reader, hash, factory); err != nil {
+		return nil, nil, err
+	}
+	p := slipstream.Provider{Client: q.reader, FactoryAddress: factory, QuoterAddress: common.HexToAddress(q.deployment.Quoter)}
 	out := new(big.Int).Set(amount)
 	legs := []*quotev1.RouteLeg{}
 	for i, s := range spacings {

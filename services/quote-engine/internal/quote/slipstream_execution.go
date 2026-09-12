@@ -51,6 +51,27 @@ func verifiedSlipstreamFeeModule(ctx context.Context, reader Reader, hash common
 	if !ok {
 		return common.Address{}, errors.New("contract code unavailable")
 	}
+	module, err := slipstreamFeeModule(ctx, reader, hash, factory)
+	if err != nil {
+		return common.Address{}, err
+	}
+	deployed, err := code.Code(ctx, module, hash)
+	if err != nil || len(deployed) == 0 {
+		return common.Address{}, errors.New("fee module code unavailable")
+	}
+	moduleFactory := contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["factory"]
+	data, err := reader.Call(ctx, module, moduleFactory.ID, hash)
+	if err != nil {
+		return common.Address{}, err
+	}
+	values, err := evm.Unpack(moduleFactory, data)
+	if err != nil || values[0].(common.Address) != factory {
+		return common.Address{}, errors.New("fee module factory linkage failed")
+	}
+	return module, nil
+}
+
+func slipstreamFeeModule(ctx context.Context, reader Reader, hash common.Hash, factory common.Address) (common.Address, error) {
 	getter := contractabi.AerodromeSlipstreamFactory.Methods["swapFeeModule"]
 	data, err := reader.Call(ctx, factory, getter.ID, hash)
 	if err != nil {
@@ -61,20 +82,47 @@ func verifiedSlipstreamFeeModule(ctx context.Context, reader Reader, hash common
 		return common.Address{}, err
 	}
 	module := values[0].(common.Address)
-	deployed, err := code.Code(ctx, module, hash)
-	if module == (common.Address{}) || err != nil || len(deployed) == 0 {
+	if module == (common.Address{}) {
 		return common.Address{}, errors.New("fee module code unavailable")
 	}
-	moduleFactory := contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["factory"]
-	data, err = reader.Call(ctx, module, moduleFactory.ID, hash)
-	if err != nil {
-		return common.Address{}, err
-	}
-	values, err = evm.Unpack(moduleFactory, data)
-	if err != nil || values[0].(common.Address) != factory {
-		return common.Address{}, errors.New("fee module factory linkage failed")
-	}
 	return module, nil
+}
+
+func slipstreamDiscount(ctx context.Context, reader Reader, hash common.Hash, module, account common.Address) (*big.Int, error) {
+	call, err := contractabi.AerodromeSlipstreamDynamicFeeModule.Pack("discounted", account)
+	if err != nil {
+		return nil, err
+	}
+	data, err := reader.Call(ctx, module, call, hash)
+	if err != nil {
+		if errors.Is(err, rpc.ErrExecutionReverted) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	values, err := evm.Unpack(contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["discounted"], data)
+	if err != nil {
+		return nil, err
+	}
+	return values[0].(*big.Int), nil
+}
+
+func verifySlipstreamQuoteOrigin(ctx context.Context, reader Reader, hash common.Hash, factory common.Address) error {
+	// DynamicSwapFeeModule applies discounted[tx.origin], so the explicit zero
+	// eth_call origin must be undiscounted at the same block as the quote.
+	// https://github.com/aerodrome-finance/slipstream/blob/main/contracts/core/fees/DynamicSwapFeeModule.sol#L182-L191
+	module, err := slipstreamFeeModule(ctx, reader, hash, factory)
+	if err != nil {
+		return errors.New("Slipstream quote-origin fee check failed")
+	}
+	discount, err := slipstreamDiscount(ctx, reader, hash, module, common.Address{})
+	if err != nil {
+		return errors.New("Slipstream quote-origin fee check failed")
+	}
+	if discount != nil && discount.Sign() != 0 {
+		return errors.New("Slipstream quote origin has a fee discount")
+	}
+	return nil
 }
 
 // Dynamic fee modules can vary fees by tx.origin, while IFeeModule does not
@@ -88,22 +136,11 @@ func verifySlipstreamSignerDiscount(ctx context.Context, reader Reader, hash com
 	if err != nil {
 		return fail
 	}
-	call, err := contractabi.AerodromeSlipstreamDynamicFeeModule.Pack("discounted", common.HexToAddress(signer))
+	discount, err := slipstreamDiscount(ctx, reader, hash, module, common.HexToAddress(signer))
 	if err != nil {
 		return fail
 	}
-	data, err := reader.Call(ctx, module, call, hash)
-	if err != nil {
-		if errors.Is(err, rpc.ErrExecutionReverted) {
-			return ""
-		}
-		return fail
-	}
-	values, err := evm.Unpack(contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["discounted"], data)
-	if err != nil {
-		return fail
-	}
-	if values[0].(*big.Int).Sign() != 0 {
+	if discount != nil && discount.Sign() != 0 {
 		return "Signer has a Slipstream tx.origin fee discount"
 	}
 	return ""

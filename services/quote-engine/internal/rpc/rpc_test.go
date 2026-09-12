@@ -26,12 +26,16 @@ func Verify(ctx context.Context, key string, chainID int64, endpoint string) (Sn
 
 func TestPinnedCall(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		code int
+		name         string
+		code         int
+		data         string
+		wantReverted bool
 	}{
 		{name: "success"},
 		{name: "provider failure", code: -32000},
-		{name: "execution reverted", code: 3},
+		{name: "execution reverted without data", code: 3, wantReverted: true},
+		{name: "execution reverted with empty data", code: 3, data: "0x", wantReverted: true},
+		{name: "execution reverted with reason data", code: 3, data: "0x08c379a0"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
@@ -58,13 +62,17 @@ func TestPinnedCall(t *testing.T) {
 				}
 				var args map[string]string
 				json.Unmarshal(request.Params[0], &args)
-				if args["data"] != "0x010203" || common.HexToAddress(args["to"]) != common.HexToAddress("0xabcd") {
+				if args["data"] != "0x010203" || common.HexToAddress(args["to"]) != common.HexToAddress("0xabcd") || args["from"] != (common.Address{}).Hex() {
 					t.Error(args)
 				}
 				response := map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": "0x0405"}
 				if test.code != 0 {
 					delete(response, "result")
-					response["error"] = map[string]any{"code": test.code, "message": "secret canonical block unavailable"}
+					rpcError := map[string]any{"code": test.code, "message": "secret canonical block unavailable"}
+					if test.data != "" {
+						rpcError["data"] = test.data
+					}
+					response["error"] = rpcError
 				}
 				json.NewEncoder(w).Encode(response)
 			}))
@@ -77,7 +85,7 @@ func TestPinnedCall(t *testing.T) {
 			defer client.Close()
 			got, err := client.Call(context.Background(), common.HexToAddress("0xabcd"), []byte{1, 2, 3}, hash)
 			if test.code != 0 {
-				if err == nil || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrExecutionReverted) != (test.code == 3) {
+				if err == nil || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrExecutionReverted) != test.wantReverted {
 					t.Fatal(err)
 				}
 			} else if err != nil || string(got) != string([]byte{4, 5}) {
