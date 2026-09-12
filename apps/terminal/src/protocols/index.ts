@@ -1,5 +1,6 @@
 import type { readExecutionConfig } from "../config";
 import type { TrustedExecution } from "../execution-policy";
+import { balancer } from "./balancer-v2";
 import { fixedExecutor } from "./fixed-executor";
 import { pancake } from "./pancake-v3";
 import { slipstream } from "./slipstream";
@@ -16,7 +17,7 @@ type RawDeployment = {
 
 type ParsedDeployment = TrustedExecution["deployments"][string] & {
   kind: string;
-  router: string;
+  router?: string;
   fees?: number[];
 };
 
@@ -27,6 +28,7 @@ const providerParsers = new Map<
   ["uniswap-v3", uniswap],
   ["pancake-v3", pancake],
   ["aerodrome-slipstream", slipstream],
+  ["balancer-v2", balancer],
 ]);
 
 const deploymentFields = new Set([

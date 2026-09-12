@@ -134,7 +134,7 @@ test("execution config rereads independently and validates executor only for all
     });
     await expect(
       readExecutionConfig(path, "test", true, configureChain),
-    ).rejects.toThrow("Local executor needs");
+    ).rejects.toThrow("Local executor address is invalid.");
   } finally {
     await rm(directory, { recursive: true });
   }

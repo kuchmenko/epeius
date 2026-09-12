@@ -1,7 +1,9 @@
 import {
   type Address,
   encodeFunctionData,
+  getAddress,
   isAddress,
+  isAddressEqual,
   isHash,
   zeroAddress,
 } from "viem";
@@ -9,6 +11,41 @@ import { executorAbi } from "../../../../generated/abi";
 import type { PrepareExecutionResponse } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type SwapTerms, uint256Decimal } from "../execution-policy";
 import { admitV3Route, type V3Deployment, v3Review } from "./v3";
+
+type ExecutorDeployment = {
+  kind: string;
+  router?: string;
+  fees?: number[];
+};
+
+function executorVenue(
+  id: string | undefined,
+  expectedKind: string,
+  deployments: Record<string, ExecutorDeployment>,
+) {
+  if (!id)
+    throw new Error(`Local executor ${expectedKind} deployment ID is missing.`);
+  const deployment = deployments[id];
+  if (!deployment)
+    throw new Error(`Local executor deployment "${id}" is not configured.`);
+  if (deployment.kind !== expectedKind)
+    throw new Error(
+      `Local executor deployment "${id}" must use ${expectedKind}.`,
+    );
+  if (
+    typeof deployment.router !== "string" ||
+    !isAddress(deployment.router, { strict: false })
+  )
+    throw new Error(`Local executor deployment "${id}" has an invalid router.`);
+  if (!Array.isArray(deployment.fees))
+    throw new Error(`Local executor deployment "${id}" has no fee list.`);
+  return {
+    id,
+    kind: deployment.kind,
+    router: getAddress(deployment.router).toLowerCase(),
+    fees: deployment.fees,
+  };
+}
 
 export function expectedExecutorData(p: PrepareExecutionResponse): string {
   const allocations = p.allocations.map((allocation) => {
@@ -46,33 +83,23 @@ export function fixedExecutor(
     uniswapDeployment?: string;
     pancakeDeployment?: string;
   },
-  deployments: Record<
-    string,
-    { kind: string; router: string; fees?: number[] }
-  >,
+  deployments: Record<string, ExecutorDeployment>,
 ) {
-  const address = `0x${raw.address?.replace(/^0x/i, "") ?? ""}`.toLowerCase();
-  const uni = raw.uniswapDeployment && deployments[raw.uniswapDeployment];
-  const pan = raw.pancakeDeployment && deployments[raw.pancakeDeployment];
-  if (
-    !isAddress(address, { strict: false }) ||
-    address === zeroAddress ||
-    !raw.uniswapDeployment ||
-    !raw.pancakeDeployment ||
-    !uni ||
-    !pan ||
-    uni.kind !== "uniswap-v3" ||
-    pan.kind !== "pancake-v3" ||
-    !Array.isArray(uni.fees) ||
-    !Array.isArray(pan.fees) ||
-    uni.router === pan.router
-  )
-    throw new Error(
-      "Local executor needs an address and distinct Uniswap/Pancake deployments.",
-    );
+  const configuredAddress = `0x${raw.address?.replace(/^0x/i, "") ?? ""}`;
+  if (!isAddress(configuredAddress, { strict: false }))
+    throw new Error("Local executor address is invalid.");
+  const address = getAddress(configuredAddress).toLowerCase();
+  if (address === zeroAddress)
+    throw new Error("Local executor address must not be zero.");
+
+  const uni = executorVenue(raw.uniswapDeployment, "uniswap-v3", deployments);
+  const pan = executorVenue(raw.pancakeDeployment, "pancake-v3", deployments);
+  if (isAddressEqual(uni.router as Address, pan.router as Address))
+    throw new Error("Local executor venues must use distinct routers.");
+
   const venues = new Map<string, V3Deployment>([
-    [raw.uniswapDeployment, { ...uni, fees: uni.fees }],
-    [raw.pancakeDeployment, { ...pan, fees: pan.fees }],
+    [uni.id, uni],
+    [pan.id, pan],
   ]);
   return {
     plan(p: PrepareExecutionResponse, tokens: string[]): SwapTerms {

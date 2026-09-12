@@ -101,7 +101,7 @@ kind = "alternate"
 	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := config.Load(path, config.ValidateV3Chain); err == nil {
+	if _, err := config.Load(path, config.ValidateChain); err == nil {
 		t.Fatal("shipped composition admitted an unknown protocol")
 	}
 	cfg, err := config.Load(path, func(c config.Chain) error {

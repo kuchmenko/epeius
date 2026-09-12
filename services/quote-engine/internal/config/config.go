@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pelletier/go-toml/v2"
@@ -53,13 +54,14 @@ type Token struct {
 }
 
 type Deployment struct {
-	Kind           string          `toml:"kind"`
-	Factory        string          `toml:"factory"`
-	Quoter         string          `toml:"quoter"`
-	Router         string          `toml:"router"`
-	Fees           []uint32        `toml:"fees"`
-	Options        *map[string]any `toml:"options"`
-	ProviderConfig any             `toml:"-"`
+	Kind             string          `toml:"kind"`
+	Factory          string          `toml:"factory"`
+	Quoter           string          `toml:"quoter"`
+	Router           string          `toml:"router"`
+	Fees             []uint32        `toml:"fees"`
+	Options          *map[string]any `toml:"options"`
+	ProviderConfig   any             `toml:"-"`
+	configuredFields map[string]bool
 }
 
 var chainKey = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -75,6 +77,28 @@ func Load(path string, validateProtocols func(Chain) error) (Config, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil {
 		return Config{}, errors.New("could not parse config file")
+	}
+	// String zero values do not preserve whether an inapplicable field was
+	// omitted or explicitly empty. Keep that distinction for provider checks.
+	var presence struct {
+		Chains map[string]struct {
+			Deployments map[string]map[string]any `toml:"deployments"`
+		} `toml:"chains"`
+	}
+	if err := toml.Unmarshal(data, &presence); err != nil {
+		return Config{}, errors.New("could not parse config file")
+	}
+	for chainID, rawChain := range presence.Chains {
+		chain := result.Chains[chainID]
+		for id, fields := range rawChain.Deployments {
+			deployment := chain.Deployments[id]
+			deployment.configuredFields = make(map[string]bool, len(fields))
+			for field := range fields {
+				deployment.configuredFields[strings.ToLower(field)] = true
+			}
+			chain.Deployments[id] = deployment
+		}
+		result.Chains[chainID] = chain
 	}
 	result.normalizeAddresses()
 	if err := result.validate(); err != nil {

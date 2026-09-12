@@ -12,6 +12,8 @@ const goNames = new Set([
   "AerodromeSlipstreamFeeModule",
   "AerodromeSlipstreamQuoterV2",
   "AerodromeSlipstreamRouter",
+  "BalancerPool",
+  "BalancerVault",
   "ERC20",
   "Executor",
   "UniswapRouter02",

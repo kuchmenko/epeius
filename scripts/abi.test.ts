@@ -7,6 +7,8 @@ import {
   aerodromeSlipstreamFactoryAbi,
   aerodromeSlipstreamQuoterV2Abi,
   aerodromeSlipstreamRouterAbi,
+  balancerPoolAbi,
+  balancerVaultAbi,
   erc20Abi as canonicalERC20,
   pancakeV3RouterAbi,
   uniswapRouter02Abi,
@@ -130,4 +132,25 @@ test("Slipstream ABIs retain signed spacing and Initial tuple order", () => {
     ["amountOutMinimum", "uint256"],
   ]);
   expect(toFunctionSelector(swap)).toBe("0xc04b8d59");
+});
+
+test("Balancer ABI retains reviewed pool identity, quote, and swap selectors", () => {
+  const selectors = new Map<string, `0x${string}`>([
+    ["getPool", "0xf6c00927"],
+    ["getPoolTokens", "0xf94d4668"],
+    ["queryBatchSwap", "0xf84d066e"],
+    ["swap", "0x52bbbe29"],
+  ]);
+  for (const [name, selector] of selectors) {
+    const item = balancerVaultAbi.find(
+      (entry) => entry.type === "function" && entry.name === name,
+    );
+    if (item?.type !== "function") throw new Error(`Missing ${name}`);
+    expect(toFunctionSelector(item)).toBe(selector);
+  }
+  const getPoolId = balancerPoolAbi.find(
+    (entry) => entry.type === "function" && entry.name === "getPoolId",
+  );
+  if (getPoolId?.type !== "function") throw new Error("Missing getPoolId");
+  expect(toFunctionSelector(getPoolId)).toBe("0x38fff2d0");
 });

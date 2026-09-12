@@ -18,6 +18,7 @@ import {
 import { type ExecutionIO, executePrepared } from "./execution";
 import { uint256Decimal, validatePreparation } from "./execution-policy";
 import { configureExecution } from "./protocols";
+import { balancerData } from "./protocols/balancer-v2";
 import { expectedExecutorData } from "./protocols/fixed-executor";
 import { pancakeData } from "./protocols/pancake-v3";
 import { uniswapData } from "./protocols/uniswap-v3";
@@ -690,6 +691,121 @@ test("swap calldata matches independent router ABI fixtures", () => {
       .digest("hex");
     expect(digest).toBe(expectedDigest);
   }
+});
+
+test("Balancer binds full pool ID and matches independent Vault.swap calldata", () => {
+  const vault = "0xba12222222228d8ba445958a75a0704d566bf2c8";
+  const poolId =
+    "0x06df3b2bbb68adc8b0e302443692037ed9f91b42000000000000000000000063";
+  const tokenIn = "0x6b175474e89094c44da98b954eedeac495271d0f";
+  const tokenOut = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+  const p = create(PrepareExecutionResponseSchema, {
+    status: PreparationStatus.READY,
+    preparationId: "balancer-preparation",
+    expiresAtUnix: "1700000100",
+    deadlineUnix: "1700000000",
+    amountInAtomic: "1000000000000000000",
+    amountOutMinimumAtomic: "995022",
+    tokenIn,
+    tokenOut,
+    recipient: sender,
+    transaction: {
+      chainId: "1",
+      from: sender,
+      to: vault,
+      data: "0x00",
+      valueAtomic: "0",
+      gasLimit: "1500000",
+    },
+    route: {
+      routeId: `balancer:${poolId}`,
+      provider: "balancer-v2",
+      deploymentId: "balancer",
+      amountOutAtomic: "1000023",
+      legs: [{ pool: poolId, tokenIn, tokenOut }],
+    },
+  });
+  assert(p.transaction && p.route);
+  p.transaction.data = balancerData(p);
+  const castCalldata =
+    "0x52bbbe2900000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000000000000000000000000000000001111111111111111111111111111111111111111000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f2ece000000000000000000000000000000000000000000000000000000006553f10006df3b2bbb68adc8b0e302443692037ed9f91b4200000000000000000000006300000000000000000000000000000000000000000000000000000000000000000000000000000000000000006b175474e89094c44da98b954eedeac495271d0f000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000000";
+  expect(p.transaction.data).toBe(castCalldata);
+  const local = configureExecution({
+    tokens: [tokenIn, tokenOut],
+    deployments: {
+      balancer: { kind: "balancer-v2", options: { vault, pools: [poolId] } },
+    },
+  });
+  for (const field of ["factory", "quoter", "router", "fees"] as const) {
+    const deployment: Record<string, unknown> = {
+      kind: "balancer-v2",
+      options: { vault, pools: [poolId] },
+      [field]: field === "fees" ? [] : "",
+    };
+    expect(() =>
+      configureExecution({
+        tokens: [tokenIn, tokenOut],
+        deployments: { balancer: deployment },
+      }),
+    ).toThrow("Local execution deployment is invalid.");
+  }
+  const plan = validatePreparation(p, sender, "1", 50, local, 1699999999);
+  expect(plan.spender).toBe(vault);
+  expect(plan.routeDetails).toEqual([
+    [`Pool ID: ${poolId}; pool address: ${poolId.slice(0, 42)}`],
+  ]);
+  if (plan.action !== "swap") throw new Error("Expected swap plan");
+  expect(plan.receipt.intermediate).toEqual([]);
+  expect(plan.receipt.touched).toEqual([]);
+
+  for (const mutate of [
+    (changed: PrepareExecutionResponse) => {
+      assert(changed.route);
+      changed.route.provider = "uniswap-v3";
+    },
+    (changed: PrepareExecutionResponse) => {
+      assert(changed.route);
+      changed.route.deploymentId = "other";
+    },
+    (changed: PrepareExecutionResponse) => {
+      assert(changed.route);
+      changed.route.legs[0].tokenIn = tokenOut;
+    },
+    (changed: PrepareExecutionResponse) => {
+      assert(changed.route);
+      changed.route.legs[0].pool = `${poolId.slice(0, -1)}4`;
+    },
+    (changed: PrepareExecutionResponse) => {
+      assert(changed.route);
+      changed.route.legs[0].selector = { case: "feePips", value: 0 };
+    },
+    (changed: PrepareExecutionResponse) => {
+      assert(changed.transaction);
+      changed.transaction.to = poolId.slice(0, 42);
+    },
+  ]) {
+    const changed = structuredClone(p);
+    mutate(changed);
+    expect(() =>
+      validatePreparation(changed, sender, "1", 50, local, 1699999999),
+    ).toThrow();
+  }
+
+  const bpt = poolId.slice(0, 42);
+  const bptSwap = structuredClone(p);
+  assert(bptSwap.route && bptSwap.transaction);
+  bptSwap.tokenIn = bpt;
+  bptSwap.route.legs[0].tokenIn = bpt;
+  bptSwap.transaction.data = balancerData(bptSwap);
+  const bptLocal = configureExecution({
+    tokens: [bpt, tokenOut],
+    deployments: {
+      balancer: { kind: "balancer-v2", options: { vault, pools: [poolId] } },
+    },
+  });
+  expect(() =>
+    validatePreparation(bptSwap, sender, "1", 50, bptLocal, 1699999999),
+  ).toThrow("Balancer BPT swaps are not supported.");
 });
 
 test("fee boundaries match independent Cast calldata and local admission", () => {

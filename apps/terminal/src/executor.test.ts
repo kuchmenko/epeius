@@ -9,7 +9,10 @@ import { executePrepared } from "./execution";
 import { parseAllocations } from "./execution-command";
 import { validatePreparation } from "./execution-policy";
 import { configureExecution } from "./protocols";
-import { expectedExecutorData } from "./protocols/fixed-executor";
+import {
+  expectedExecutorData,
+  fixedExecutor,
+} from "./protocols/fixed-executor";
 import { type Receipt, verifyReceipt } from "./receipt";
 
 const addr = (digit: string) => `0x${digit.repeat(40)}`;
@@ -112,6 +115,42 @@ test("executor encoder matches independent single/two-hop/split golden vectors",
   expect(fixture.vectors).toHaveLength(3);
   for (const vector of fixture.vectors)
     expect(expectedExecutorData(preparation(vector))).toBe(vector.calldata);
+});
+
+test("executor config errors identify the invalid term", () => {
+  const raw = {
+    address: executor,
+    uniswapDeployment: "uni",
+    pancakeDeployment: "pan",
+  };
+  const deployments = {
+    uni: { kind: "uniswap-v3", router: uni, fees: [500] },
+    pan: { kind: "pancake-v3", router: pan, fees: [2500] },
+  };
+  expect(() => fixedExecutor({ ...raw, address: "bad" }, deployments)).toThrow(
+    "Local executor address is invalid.",
+  );
+  expect(() =>
+    fixedExecutor({ ...raw, uniswapDeployment: undefined }, deployments),
+  ).toThrow("Local executor uniswap-v3 deployment ID is missing.");
+  expect(() =>
+    fixedExecutor({ ...raw, uniswapDeployment: "missing" }, deployments),
+  ).toThrow('Local executor deployment "missing" is not configured.');
+  expect(() =>
+    fixedExecutor(raw, {
+      ...deployments,
+      uni: { ...deployments.uni, kind: "pancake-v3" },
+    }),
+  ).toThrow('Local executor deployment "uni" must use uniswap-v3.');
+  expect(() =>
+    fixedExecutor(raw, {
+      ...deployments,
+      pan: {
+        ...deployments.pan,
+        router: uni.toUpperCase().replace("0X", "0x"),
+      },
+    }),
+  ).toThrow("Local executor venues must use distinct routers.");
 });
 
 test("executor local validation sums outputs before rounding and rejects altered plans", () => {

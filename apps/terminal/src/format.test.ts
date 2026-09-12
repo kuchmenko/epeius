@@ -164,6 +164,18 @@ test("quote output includes chain, block, exact amounts, tiers, and partial warn
           },
         ],
       },
+      {
+        routeId: "balancer",
+        provider: "balancer-v2",
+        amountOutAtomic: "1234567",
+        legs: [
+          {
+            pool: "0x06df3b2bbb68adc8b0e302443692037ed9f91b42000000000000000000000063",
+            tokenIn: input.address,
+            tokenOut: output.address,
+          },
+        ],
+      },
     ],
   });
   const text = formatQuote(quote, chain, input, output, "1000000000000000000");
@@ -173,6 +185,10 @@ test("quote output includes chain, block, exact amounts, tiers, and partial warn
   expect(text).toContain("1.234567 USDC (1234567 atomic)");
   expect(text).toContain("fee 500 pips");
   expect(text).toContain("Leg 2: pool pool2; tick spacing 200");
+  expect(text).toContain(
+    "pool address 0x06df3b2bbb68adc8b0e302443692037ed9f91b42",
+  );
+  expect(text).not.toContain("unknown selector");
   expect(text).toContain("Search was partial");
   expect(text).toContain("Engine recommendation: 500");
   expect(text).toContain(

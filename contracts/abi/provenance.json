@@ -42,6 +42,20 @@
     "abiSha256": "79de636b8e5a72b7f05c5e8188a676c962124401d09b68896c238e592c0d7346"
   },
   {
+    "name": "BalancerPool",
+    "origin": "https://github.com/balancer/balancer-deployments/blob/b55dc2b8a46bce8f27aed5a3b03f719f662f860a/v2/deprecated/20211202-no-protocol-fee-lbp/artifact/LiquidityBootstrappingPool.json (getPoolId only)",
+    "license": "GPL-3.0-or-later",
+    "sourceSha256": "babbfcc79d3f8d3d87956a8ae28d6c7c6bd9920877ebc1e51ee2436c12231584",
+    "abiSha256": "05c2f1ee5fb54ba3d214faf3f7201774372e194b6769f733275a4317b06de42c"
+  },
+  {
+    "name": "BalancerVault",
+    "origin": "https://github.com/balancer/balancer-deployments/blob/b55dc2b8a46bce8f27aed5a3b03f719f662f860a/v2/tasks/20210418-vault/artifact/Vault.json (getPool, getPoolTokens, queryBatchSwap, swap, and Swap only)",
+    "license": "GPL-3.0-or-later",
+    "sourceSha256": "b0d5fe0a2562c96b0226042d1370e4533c3a1641450c5e47d9dff0d16845976a",
+    "abiSha256": "e148706cacfc85f243b8e5cc5bae60299b42555c0c85dd0abc76551d9d9c8bd0"
+  },
+  {
     "name": "ERC20",
     "origin": "https://unpkg.com/@openzeppelin/contracts@5.0.2/build/contracts/IERC20.json",
     "license": "MIT",

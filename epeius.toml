@@ -7,6 +7,47 @@ search_budget_ms = 2000
 listen_addr = "127.0.0.1:8080"
 quote_concurrency = 4
 
+[chains.ethereum]
+chain_id = 1
+rpc_url_env = "ETHEREUM_RPC_URL"
+execution_enabled = false
+
+[[chains.ethereum.tokens]]
+address = "0xba100000625a3754423978a60c9317c58a424e3D"
+symbol = "BAL"
+decimals = 18
+
+[[chains.ethereum.tokens]]
+address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+symbol = "WETH"
+decimals = 18
+
+[[chains.ethereum.tokens]]
+address = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+symbol = "DAI"
+decimals = 18
+
+[[chains.ethereum.tokens]]
+address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+symbol = "USDC"
+decimals = 6
+
+[[chains.ethereum.tokens]]
+address = "0x7f39C581F595B53c5cb19BD0B3f8dA6c935E2Ca0"
+symbol = "wstETH"
+decimals = 18
+
+[chains.ethereum.deployments.balancer-v2]
+kind = "balancer-v2"
+
+[chains.ethereum.deployments.balancer-v2.options]
+vault = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+pools = [
+  "0x5c6ee304399dbdb9c8ef030ab642b10820db8f56000200000000000000000014",
+  "0x06df3b2bbb68adc8b0e302443692037ed9f91b42000000000000000000000063",
+  "0x93d199263632a4ef4bb438f1feb99e57b4b5f0bd0000000000000000000005c2",
+]
+
 [chains.base]
 chain_id = 8453
 rpc_url_env = "BASE_RPC_URL"

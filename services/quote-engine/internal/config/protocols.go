@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 )
 
@@ -13,10 +14,11 @@ var deploymentValidators = map[string]deploymentValidator{
 	"uniswap-v3":           validateFeeDeployment,
 	"pancake-v3":           validateFeeDeployment,
 	"aerodrome-slipstream": validateSlipstreamDeployment,
+	"balancer-v2":          validateBalancerDeployment,
 }
 
 func validateFeeDeployment(d Deployment) (any, error) {
-	if len(d.Fees) == 0 || d.Options != nil {
+	if !validDeploymentAddresses(d) || len(d.Fees) == 0 || d.Options != nil {
 		return nil, errors.New("fee deployment must configure fees and no provider options")
 	}
 	fees := map[uint32]bool{}
@@ -30,7 +32,7 @@ func validateFeeDeployment(d Deployment) (any, error) {
 }
 
 func validateSlipstreamDeployment(d Deployment) (any, error) {
-	if d.Fees != nil {
+	if !validDeploymentAddresses(d) || d.Fees != nil {
 		return nil, errors.New("Slipstream deployment does not accept fees")
 	}
 	if d.Options == nil {
@@ -39,9 +41,25 @@ func validateSlipstreamDeployment(d Deployment) (any, error) {
 	return slipstream.ParseOptions(*d.Options)
 }
 
-// ValidateV3Chain is the shipped provider and fixed-executor config
+func validateBalancerDeployment(d Deployment) (any, error) {
+	if d.configuredFields["factory"] || d.configuredFields["quoter"] || d.configuredFields["router"] || d.Fees != nil || d.Options == nil {
+		return nil, errors.New("Balancer V2 deployment accepts only provider options")
+	}
+	return balancer.ParseOptions(*d.Options)
+}
+
+func validDeploymentAddresses(d Deployment) bool {
+	for _, address := range []string{d.Factory, d.Quoter, d.Router} {
+		if !common.IsHexAddress(address) || common.HexToAddress(address) == (common.Address{}) {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateChain is the shipped provider and fixed-executor config
 // composition. Load owns TOML and chain validation, not protocol admission.
-func ValidateV3Chain(chain Chain) error {
+func ValidateChain(chain Chain) error {
 	if e := chain.Executor; e != nil {
 		uni, uniOK := chain.Deployments[e.UniswapDeployment]
 		pancake, pancakeOK := chain.Deployments[e.PancakeDeployment]
@@ -53,11 +71,6 @@ func ValidateV3Chain(chain Chain) error {
 		validate, ok := deploymentValidators[d.Kind]
 		if !ok {
 			return errors.New("unsupported provider: " + d.Kind)
-		}
-		for _, a := range []string{d.Factory, d.Quoter, d.Router} {
-			if !common.IsHexAddress(a) || common.HexToAddress(a) == (common.Address{}) {
-				return errors.New("deployment addresses must be nonzero EVM addresses")
-			}
 		}
 		providerConfig, err := validate(d)
 		if err != nil {
