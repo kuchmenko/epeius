@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pelletier/go-toml/v2"
@@ -93,9 +94,16 @@ func Load(path string, validateProtocols func(Chain) error) (Config, error) {
 		chain := result.Chains[chainID]
 		for id, fields := range rawChain.Deployments {
 			deployment := chain.Deployments[id]
-			_, deployment.factorySet = fields["factory"]
-			_, deployment.quoterSet = fields["quoter"]
-			_, deployment.routerSet = fields["router"]
+			for field := range fields {
+				switch strings.ToLower(field) {
+				case "factory":
+					deployment.factorySet = true
+				case "quoter":
+					deployment.quoterSet = true
+				case "router":
+					deployment.routerSet = true
+				}
+			}
 			chain.Deployments[id] = deployment
 		}
 		result.Chains[chainID] = chain

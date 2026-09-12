@@ -230,6 +230,9 @@ pools = ["` + pool + `"]
 		`quoter = ""`,
 		`router = ""`,
 		"fees = []",
+		`Factory = "0x1111111111111111111111111111111111111111"`,
+		`QuOtEr = ""`,
+		`ROUTER = "0x1111111111111111111111111111111111111111"`,
 	} {
 		changed := strings.Replace(text, "kind = \"balancer-v2\"", "kind = \"balancer-v2\"\n"+field, 1)
 		if _, err := loadText(t, changed); err == nil {
