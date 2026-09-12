@@ -40,6 +40,7 @@ import {
   permit2Abi,
   testTokenAbi,
   uniswapPeripheryStateAbi,
+  uniswapUniversalRouterAbi,
   uniswapV3FactoryAbi,
   uniswapV3PoolAbi,
   uniswapV4PoolManagerAbi,
@@ -231,9 +232,16 @@ export async function loadProfile(path) {
       throw new Error(`Invalid harness config address: ${name}`);
     }
   }
-  for (const [name, value] of Object.entries(uniV4 ?? {})) {
+  for (const name of [
+    "pool_manager",
+    "quoter",
+    "state_view",
+    "router",
+    "permit2",
+    "position_manager",
+  ]) {
     try {
-      address(value);
+      address(uniV4?.[name]);
     } catch {
       throw new Error(`Invalid Uniswap V4 harness config address: ${name}`);
     }
@@ -246,10 +254,13 @@ export async function loadProfile(path) {
       "state_view",
       "router",
       "permit2",
+      "router_code_hash",
       "position_manager",
     ].some((name) => !(name in uniV4))
   )
     throw new Error("Malformed Uniswap V4 harness config");
+  if (!isHash(uniV4.router_code_hash))
+    throw new Error("Malformed Uniswap V4 router code hash");
   const decimals = fixtures.tokens;
   const v4Fixture = fixtures.uniswap_v4;
   if (
@@ -528,11 +539,19 @@ export async function run(o) {
       throw new Error(`Official ${name} WETH link mismatch`);
   }
   if (useV4) {
-    for (const [name, target] of Object.entries(uniV4))
-      v4OfficialHashes[name] = await verifyCode(target);
+    for (const name of [
+      "pool_manager",
+      "quoter",
+      "state_view",
+      "router",
+      "permit2",
+      "position_manager",
+    ])
+      v4OfficialHashes[name] = await verifyCode(uniV4[name]);
     for (const [name, abi] of [
       ["quoter", uniswapV4QuoterAbi],
       ["state_view", uniswapV4StateViewAbi],
+      ["router", uniswapUniversalRouterAbi],
       ["position_manager", uniswapV4PositionManagerAbi],
     ]) {
       if (
@@ -551,6 +570,8 @@ export async function run(o) {
       )
     )
       throw new Error("Official Uniswap V4 PositionManager Permit2 mismatch");
+    if (!same(v4OfficialHashes.router, uniV4.router_code_hash))
+      throw new Error("Official Uniswap V4 router code hash mismatch");
   }
   console.log(
     `${chain.key} guard and configured Uniswap deployment links verified.`,
@@ -1267,7 +1288,7 @@ export async function run(o) {
         `pool_manager = "${uniV4.pool_manager}"`,
         `state_view = "${uniV4.state_view}"`,
         `permit2 = "${uniV4.permit2}"`,
-        `router_code_hash = "${manifest.uniswapV4CodeHashes.router}"`,
+        `router_code_hash = "${uniV4.router_code_hash}"`,
         "",
         `[[chains.${chain.key}.deployments.uniswap-v4.options.pools]]`,
         `currency0 = "${manifest.v4Fixture.token0}"`,

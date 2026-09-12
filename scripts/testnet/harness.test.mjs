@@ -8,6 +8,7 @@ import {
   decodeAbiParameters,
   encodeFunctionResult,
   erc20Abi,
+  keccak256,
   toFunctionSelector,
 } from "viem";
 import {
@@ -34,6 +35,10 @@ import {
 const sender = "0x0000000000000000000000000000000000000001";
 const defaultProfilePath = new URL("./harness.toml", import.meta.url).pathname;
 const { uni, uniV4 } = await loadProfile(defaultProfilePath);
+const v4TestProfile = async () =>
+  (await Bun.file(defaultProfilePath).text())
+    .replace("BASE_SEPOLIA_RPC_URL", "HARNESS_ISOLATED_RPC")
+    .replace(uniV4.router_code_hash, keccak256("0x6000"));
 test("pinned Uniswap artifacts are deployable without external library links", async () => {
   for (const [name, version, contract] of [
     ["@uniswap/v3-core", "1.0.1", "UniswapV3Factory"],
@@ -389,6 +394,7 @@ test("V4 seed validates existing pool before estimating approvals", async () => 
   });
   const tokens = { A: token("1", 18), B: token("2", 6), C: token("3", 8) };
   let poolChecked = false;
+  let routerLinked = false;
   let estimated = false;
   process.env.HARNESS_ISOLATED_RPC = "https://isolated.invalid/rpc";
   globalThis.fetch = async (_url, request) => {
@@ -412,9 +418,11 @@ test("V4 seed validates existing pool before estimating approvals", async () => 
         result = word(uni.factory);
       else if (selector === toFunctionSelector("WETH9()"))
         result = word("0x4200000000000000000000000000000000000006");
-      else if (selector === toFunctionSelector("poolManager()"))
+      else if (selector === toFunctionSelector("poolManager()")) {
+        if (to.toLowerCase() === uniV4.router.toLowerCase())
+          routerLinked = true;
         result = word(uniV4.pool_manager);
-      else if (selector === toFunctionSelector("permit2()"))
+      } else if (selector === toFunctionSelector("permit2()"))
         result = word(uniV4.permit2);
       else if (selector === toFunctionSelector("decimals()"))
         result = word(
@@ -466,6 +474,23 @@ test("V4 seed validates existing pool before estimating approvals", async () => 
         uni,
       }),
     );
+    await assert.rejects(
+      run(
+        options([
+          "seed-v4",
+          "--sender",
+          sender,
+          "--config",
+          config,
+          "--manifest",
+          manifestPath,
+        ]),
+      ),
+      /router code hash mismatch/,
+    );
+    assert.equal(routerLinked, true);
+    assert.equal(estimated, false);
+    writeFileSync(config, await v4TestProfile());
     await assert.rejects(
       run(
         options([
@@ -558,13 +583,7 @@ test("V4 seed refreshes sufficient Permit2 allowance that expires before mint de
   try {
     const config = resolve(dir, "profile.toml");
     const manifestPath = resolve(dir, "manifest.json");
-    writeFileSync(
-      config,
-      (await Bun.file(defaultProfilePath).text()).replace(
-        "BASE_SEPOLIA_RPC_URL",
-        "HARNESS_ISOLATED_RPC",
-      ),
-    );
+    writeFileSync(config, await v4TestProfile());
     writeFileSync(
       manifestPath,
       JSON.stringify({

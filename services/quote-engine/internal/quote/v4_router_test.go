@@ -181,6 +181,11 @@ func TestUniswapV4MissingPoolIsNoRouteAtPinnedBlock(t *testing.T) {
 	if route != nil || err != nil {
 		t.Fatalf("missing pool returned route=%+v error=%v", route, err)
 	}
+	poolID, _ := v4PoolID(pool)
+	configuredRoute := &quotev1.RouteQuote{RouteId: "v4:" + poolID.Hex(), DeploymentId: "v4", Provider: "uniswap-v4", AmountOutAtomic: "1", Block: &quotev1.BlockContext{Hash: blockHash}, Legs: []*quotev1.RouteLeg{{Pool: poolID.Hex(), TokenIn: tokenA, TokenOut: tokenB, UniswapV4PoolKey: &quotev1.UniswapV4PoolKey{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: pool.Hooks}}}}
+	if route, err = q.Requote(context.Background(), configuredRoute, big.NewInt(1), configuredRoute.Block); route != nil || err == nil {
+		t.Fatalf("missing pool requote returned route=%+v error=%v", route, err)
+	}
 }
 
 func v4PoolID(pool uniswapv4.Pool) (common.Hash, error) {

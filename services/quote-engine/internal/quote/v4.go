@@ -88,7 +88,11 @@ func (q v4Quoter) Requote(ctx context.Context, route *quotev1.RouteQuote, amount
 	if !ok {
 		return nil, errors.New("Uniswap V4 route is not configured")
 	}
-	return q.quote(ctx, route.RouteId, pool, common.HexToAddress(route.Legs[0].TokenIn), common.HexToAddress(route.Legs[0].TokenOut), amount, block)
+	result, err := q.quote(ctx, route.RouteId, pool, common.HexToAddress(route.Legs[0].TokenIn), common.HexToAddress(route.Legs[0].TokenOut), amount, block)
+	if err == nil && result == nil {
+		return nil, errors.New("Uniswap V4 pool is unavailable")
+	}
+	return result, err
 }
 
 func (q v4Quoter) admit(route *quotev1.RouteQuote) (uniswapv4.Pool, bool) {
