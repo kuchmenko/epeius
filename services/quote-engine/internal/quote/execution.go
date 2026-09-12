@@ -141,6 +141,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		}
 		response.SimulationBlock = &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
 		p.approval = true
+		p.response = response
 		h.Store.savePreparation(p)
 		return connect.NewResponse(response), nil
 	}
@@ -157,7 +158,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		}
 		permissionAmount := values[0].(*big.Int)
 		expiration := values[1].(*big.Int).Uint64()
-		required := permissionAmount.Cmp(permission.amount) < 0 || expiration <= deadline
+		required := permissionAmount.Cmp(permission.amount) < 0 || expiration < deadline
 		if !recheck {
 			previous, exists := h.Store.markApproval(r.QuoteId, response.Recipient+permission.target+permission.spender, required, time.Now())
 			p.approval = p.approval || previous
@@ -167,6 +168,11 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		}
 		if required {
 			if !recheck && p.approval {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Approval state changed; request a fresh quote.")
+			}
+			if recheck && p.response.GetApprovalTransaction() != nil && p.response.GetOnChainPermission() == nil {
+				// One quote may authorize only one transaction. This preparation already
+				// authorized ERC20 approval, so Permit2 needs a fresh quote and consent.
 				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Approval state changed; request a fresh quote.")
 			}
 			if recheck && !p.approval {
@@ -188,6 +194,7 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 			}
 			response.SimulationBlock = &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
 			p.approval = true
+			p.response = response
 			h.Store.savePreparation(p)
 			return connect.NewResponse(response), nil
 		}

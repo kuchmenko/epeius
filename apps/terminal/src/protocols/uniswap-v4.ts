@@ -28,6 +28,18 @@ type Deployment = {
 };
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+// Bind reviewed Universal Router runtime generations to their Permit2 immutable.
+// https://docs.uniswap.org/contracts/v4/deployments
+const reviewedRouterPermit2 = new Map([
+  [
+    "0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0",
+    "0x000000000022d473030f116ddee9f6b43ac78ba3",
+  ],
+  [
+    "0x952c879f642706a4d399eb917827b5a2a5519328446dba72aef3579909bf15ef",
+    "0x000000000022d473030f116ddee9f6b43ac78ba3",
+  ],
+]);
 const address = (value?: string) => {
   const normalized = `0x${value?.replace(/^0x/i, "") ?? ""}`;
   if (!isAddress(normalized, { strict: false }))
@@ -187,13 +199,17 @@ export function uniswapV4(raw: {
     !/^(?:0x)?[0-9a-f]{64}$/i.test(options.router_code_hash ?? "")
   )
     throw new Error("Local execution deployment is invalid.");
+  const permit2 = address(options.permit2);
+  const routerCodeHash = `0x${options.router_code_hash?.replace(/^0x/i, "").toLowerCase()}`;
+  if (reviewedRouterPermit2.get(routerCodeHash) !== permit2)
+    throw new Error("Local execution deployment is invalid.");
   address(raw.quoter);
   address(options.pool_manager);
   address(options.state_view);
   const deployment: Deployment = {
     kind: "uniswap-v4",
     router: address(raw.router),
-    permit2: address(options.permit2),
+    permit2,
     pools: (options.pools ?? []).map((pool) => ({
       currency0: address(pool.currency0),
       currency1: address(pool.currency1),

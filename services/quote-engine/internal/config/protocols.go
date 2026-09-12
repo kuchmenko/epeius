@@ -9,16 +9,19 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 )
 
-type deploymentValidator func(Deployment) (any, error)
+type deploymentValidator func(Deployment, []Token) (any, error)
 
 var deploymentValidators = map[string]deploymentValidator{
 	"uniswap-v3":           validateFeeDeployment,
 	"pancake-v3":           validateFeeDeployment,
 	"aerodrome-slipstream": validateSlipstreamDeployment,
 	"balancer-v2":          validateBalancerDeployment,
+	"uniswap-v4": func(d Deployment, tokens []Token) (any, error) {
+		return validateUniswapV4(d, tokens)
+	},
 }
 
-func validateFeeDeployment(d Deployment) (any, error) {
+func validateFeeDeployment(d Deployment, _ []Token) (any, error) {
 	if !validDeploymentAddresses(d) || len(d.Fees) == 0 || d.Options != nil {
 		return nil, errors.New("fee deployment must configure fees and no provider options")
 	}
@@ -32,7 +35,7 @@ func validateFeeDeployment(d Deployment) (any, error) {
 	return nil, nil
 }
 
-func validateSlipstreamDeployment(d Deployment) (any, error) {
+func validateSlipstreamDeployment(d Deployment, _ []Token) (any, error) {
 	if !validDeploymentAddresses(d) || d.Fees != nil {
 		return nil, errors.New("Slipstream deployment does not accept fees")
 	}
@@ -42,7 +45,7 @@ func validateSlipstreamDeployment(d Deployment) (any, error) {
 	return slipstream.ParseOptions(*d.Options)
 }
 
-func validateBalancerDeployment(d Deployment) (any, error) {
+func validateBalancerDeployment(d Deployment, _ []Token) (any, error) {
 	if d.configuredFields["factory"] || d.configuredFields["quoter"] || d.configuredFields["router"] || d.Fees != nil || d.Options == nil {
 		return nil, errors.New("Balancer V2 deployment accepts only provider options")
 	}
@@ -69,20 +72,11 @@ func ValidateChain(chain Chain) error {
 		}
 	}
 	for id, d := range chain.Deployments {
-		if d.Kind == "uniswap-v4" {
-			providerConfig, err := validateUniswapV4(d, chain.Tokens)
-			if err != nil {
-				return err
-			}
-			d.ProviderConfig = providerConfig
-			chain.Deployments[id] = d
-			continue
-		}
 		validate, ok := deploymentValidators[d.Kind]
 		if !ok {
 			return errors.New("unsupported provider: " + d.Kind)
 		}
-		providerConfig, err := validate(d)
+		providerConfig, err := validate(d, chain.Tokens)
 		if err != nil {
 			return err
 		}
@@ -93,7 +87,7 @@ func ValidateChain(chain Chain) error {
 }
 
 func validateUniswapV4(d Deployment, tokens []Token) (uniswapv4.Options, error) {
-	if d.Factory != "" || d.Fees != nil || d.Options == nil {
+	if d.configuredFields["factory"] || d.Fees != nil || d.Options == nil {
 		return uniswapv4.Options{}, errors.New("invalid Uniswap V4 deployment")
 	}
 	for _, address := range []string{d.Quoter, d.Router} {

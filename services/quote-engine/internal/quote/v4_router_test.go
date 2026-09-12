@@ -37,6 +37,7 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 	permit2 := "0x4444444444444444444444444444444444444444"
 	erc20Amount := uint64(123456789)
 	permissionAmount := uint64(0)
+	permissionExpiration := uint64(1777779000)
 	timestamp := uint64(1777777000)
 	pool := uniswapv4.Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: "0x0000000000000000000000000000000000000000"}
 	poolID, _ := v4PoolID(pool)
@@ -57,7 +58,7 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 			if !bytes.Equal(data[:4], crypto.Keccak256([]byte("allowance(address,address,address)"))[:4]) || common.BytesToAddress(data[4:36]) != common.HexToAddress(wallet) || common.BytesToAddress(data[36:68]) != common.HexToAddress(tokenA) || common.BytesToAddress(data[68:100]) != common.HexToAddress(router) {
 				t.Fatal("wrong Permit2 allowance read")
 			}
-			return bytes.Join([][]byte{uintWord(permissionAmount), uintWord(1777779000), uintWord(7)}, nil), nil
+			return bytes.Join([][]byte{uintWord(permissionAmount), uintWord(permissionExpiration), uintWord(7)}, nil), nil
 		default:
 			t.Fatalf("unexpected call to %s", to)
 			return nil, nil
@@ -101,6 +102,9 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 	}
 	erc20Amount = 123456789
 	permissionAmount = 0
+	if reused := prepare(t, configuredHandler(h), &quotev1.PrepareExecutionRequest{PreparationId: approval.PreparationId}); reused.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || reused.OnChainPermission != nil || simulations != 0 {
+		t.Fatal("ERC20 approval preparation authorized a later Permit2 transaction")
+	}
 	if reused := prepare(t, configuredHandler(h), historyRequest); reused.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || simulations != 0 {
 		t.Fatal("used quote authorized a second permission transaction")
 	}
@@ -123,6 +127,16 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 	if !canonicalChecked || expired.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || expired.OnChainPermission != nil {
 		t.Fatal("permission returned after preparation expired during canonical check")
 	}
+
+	chain.Client = reader
+	h.Chains["base"] = chain
+	permissionAmount = 123456789
+	permissionExpiration = timestamp + 120
+	h.Store.saveQuote(&quotev1.QuoteRequest{Chain: "base", ChainId: "8453", TokenIn: tokenA, TokenOut: tokenB, AmountInAtomic: "123456789"}, &quotev1.QuoteFinal{QuoteId: "v4-equal-deadline", Routes: []*quotev1.RouteQuote{route}, Block: &quotev1.BlockContext{Number: "112230", Hash: blockHash}}, time.Now())
+	equal := prepare(t, configuredHandler(h), &quotev1.PrepareExecutionRequest{QuoteId: "v4-equal-deadline", RouteId: route.RouteId, Sender: wallet, SlippageBps: 75})
+	if equal.Status != quotev1.PreparationStatus_PREPARATION_STATUS_READY || simulations != 1 {
+		t.Fatalf("deadline-equal Permit2 allowance rejected: %+v", equal)
+	}
 }
 
 func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
@@ -133,7 +147,7 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 	routerAddress := common.HexToAddress(router)
 	pool := uniswapv4.Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: common.Address{}.Hex()}
 	routerCode := append([]byte{0x60}, permit2.Bytes()...)
-	for _, failure := range []string{"none", "router pool manager", "router Permit2", "router code hash"} {
+	for _, failure := range []string{"none", "router pool manager", "router code hash"} {
 		t.Run(failure, func(t *testing.T) {
 			reader := codeFake{code: func(_ context.Context, target common.Address, hash common.Hash) ([]byte, error) {
 				if hash != common.HexToHash(blockHash) {
@@ -156,11 +170,7 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 				return poolResponse(poolManager), nil
 			}}}
 			deployment := config.Deployment{Kind: "uniswap-v4", Quoter: quoter.Hex(), Router: routerAddress.Hex()}
-			configuredPermit2 := permit2
-			if failure == "router Permit2" {
-				configuredPermit2 = common.HexToAddress("0x9999999999999999999999999999999999999999")
-			}
-			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: configuredPermit2.Hex(), RouterCodeHash: crypto.Keccak256Hash(routerCode).Hex(), Pools: []uniswapv4.Pool{pool}}
+			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), RouterCodeHash: crypto.Keccak256Hash(routerCode).Hex(), Pools: []uniswapv4.Pool{pool}}
 			err := (v4Quoter{reader: reader, id: "v4", deployment: deployment, options: options}).Verify(context.Background(), common.HexToHash(blockHash))
 			if failure == "none" && err != nil || failure != "none" && err == nil {
 				t.Fatalf("failure=%s error=%v", failure, err)

@@ -199,6 +199,7 @@ export function validatePreparation(
       });
       if (
         p.approvalTransaction ||
+        p.approvalSpender ||
         !terms.permission ||
         !same(terms.permission.target, terms.spender) ||
         !same(terms.permission.spender, terms.target) ||

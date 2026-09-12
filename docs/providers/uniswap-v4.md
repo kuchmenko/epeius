@@ -40,9 +40,9 @@ At the pinned startup block, the engine requires code at PoolManager, Quoter, St
 
 1. Quoter `poolManager()`, StateView `poolManager()`, and Universal Router `poolManager()` equal the configured PoolManager.
 2. The Universal Router runtime hash equals `router_code_hash`.
-3. The configured Permit2 immutable appears in that exact pinned router runtime.
+3. The reviewed router runtime hash maps to the configured Permit2 immutable.
 
-The exact hash prevents unrelated decoy bytecode from passing the Permit2 check. The Permit2 check binds the separately configured permission target to the pinned router. A failed deployment remains unavailable while healthy deployments can continue.
+The provider-owned reviewed mapping currently admits Base and Base Sepolia router runtime hashes, both bound to canonical Permit2. This deliberate allowlist prevents another immutable that happens to appear in router bytecode from being configured as Permit2. A failed deployment remains unavailable while healthy deployments can continue.
 
 Configured pools are checked when quoted, not at startup. A pool whose StateView `getSlot0(poolId)` returns an uninitialized price is a normal no-route result at that block. RPC failure or malformed state remains a provider error.
 

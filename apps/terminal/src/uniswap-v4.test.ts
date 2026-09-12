@@ -130,6 +130,22 @@ test("terminal reconstructs reviewed V4 action bytes and Permit2 permission", ()
   expect(plan.action).toBe("approval");
   expect(plan.transaction).toBe(permission.transaction);
 
+  p.approvalSpender = weth;
+  expect(() =>
+    validatePreparation(
+      p,
+      sender,
+      "8453",
+      175,
+      configureExecution({
+        tokens: [weth, usdc],
+        deployments: { v4: rawDeployment },
+      }),
+      1777777000,
+    ),
+  ).toThrow("Permit2 permission");
+  p.approvalSpender = "";
+
   permission.expirationUnix = "1777779578";
   permission.transaction.data = encodeFunctionData({
     abi: permit2Abi,
@@ -183,6 +199,12 @@ test("V4 config rejects missing, unknown, misplaced, and inapplicable provider o
       },
     });
   expect(config(rawDeployment)).not.toThrow();
+  expect(
+    config({
+      ...rawDeployment,
+      options: { ...rawDeployment.options, permit2: weth },
+    }),
+  ).toThrow();
   expect(config({ kind: "uniswap-v4", router })).toThrow();
   expect(
     config({

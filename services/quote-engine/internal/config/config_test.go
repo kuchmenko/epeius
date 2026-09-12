@@ -242,6 +242,9 @@ pools = ["` + pool + `"]
 }
 
 func TestUniswapV4ConfigRequiresCompleteAllowlistedNoHookPool(t *testing.T) {
+	if _, registered := deploymentValidators["uniswap-v4"]; !registered {
+		t.Fatal("Uniswap V4 config validator is not registered")
+	}
 	text := validConfig + `[[chains.test-net.tokens]]
 address = "0x1111111111111111111111111111111111111111"
 symbol = "A"
@@ -257,8 +260,8 @@ router = "0x6666666666666666666666666666666666666666"
 [chains.test-net.deployments.v4.options]
 pool_manager = "0x3333333333333333333333333333333333333333"
 state_view = "0x5555555555555555555555555555555555555555"
-permit2 = "0x7777777777777777777777777777777777777777"
-router_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+router_code_hash = "0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0"
 [[chains.test-net.deployments.v4.options.pools]]
 currency0 = "0x1111111111111111111111111111111111111111"
 currency1 = "0x2222222222222222222222222222222222222222"
@@ -272,9 +275,12 @@ hooks = "0x0000000000000000000000000000000000000000"
 	}
 	for _, changed := range []string{
 		strings.Replace(text, "[chains.test-net.deployments.v4.options]\n", "", 1),
-		strings.Replace(text, "permit2 = \"0x7777777777777777777777777777777777777777\"", "permit2 = \"0x7777777777777777777777777777777777777777\"\nunknown = true", 1),
-		strings.Replace(text, "router_code_hash = \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", "router_code_hash = \"0xaaaa\"", 1),
+		strings.Replace(text, "permit2 = \"0x000000000022D473030F116dDEE9F6B43aC78BA3\"", "permit2 = \"0x000000000022D473030F116dDEE9F6B43aC78BA3\"\nunknown = true", 1),
+		strings.Replace(text, "permit2 = \"0x000000000022D473030F116dDEE9F6B43aC78BA3\"", "permit2 = \"0x4200000000000000000000000000000000000006\"", 1),
+		strings.Replace(text, "router_code_hash = \"0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0\"", "router_code_hash = \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", 1),
+		strings.Replace(text, "router_code_hash = \"0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0\"", "router_code_hash = \"0xaaaa\"", 1),
 		strings.Replace(text, "[chains.test-net.deployments.v4.options]", "pool_manager = \"0x3333333333333333333333333333333333333333\"\n[chains.test-net.deployments.v4.options]", 1),
+		strings.Replace(text, "kind = \"uniswap-v4\"", "kind = \"uniswap-v4\"\nfactory = \"\"", 1),
 	} {
 		if _, err := loadText(t, changed); err == nil {
 			t.Fatal("accepted missing, unknown, or misplaced V4 options")

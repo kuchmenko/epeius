@@ -23,6 +23,14 @@ type Pool struct {
 	Hooks       string
 }
 
+// These hashes identify reviewed Universal Router deployments and bind each
+// generation to its Permit2 immutable. Uniswap publishes both addresses here:
+// https://docs.uniswap.org/contracts/v4/deployments
+var reviewedRouterPermit2 = map[common.Hash]common.Address{
+	common.HexToHash("0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0"): common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3"),
+	common.HexToHash("0x952c879f642706a4d399eb917827b5a2a5519328446dba72aef3579909bf15ef"): common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3"),
+}
+
 func ParseOptions(raw map[string]any) (Options, error) {
 	if len(raw) != 5 {
 		return Options{}, errors.New("Uniswap V4 options must contain only pool_manager, state_view, permit2, router_code_hash, and pools")
@@ -44,6 +52,9 @@ func ParseOptions(raw map[string]any) (Options, error) {
 		return Options{}, errors.New("Uniswap V4 router_code_hash must be a 32-byte hash")
 	}
 	result.RouterCodeHash = common.HexToHash(routerCodeHash).Hex()
+	if permit2, reviewed := reviewedRouterPermit2[common.HexToHash(routerCodeHash)]; !reviewed || common.HexToAddress(result.Permit2) != permit2 {
+		return Options{}, errors.New("Uniswap V4 router_code_hash and permit2 must name a reviewed deployment")
+	}
 	values, ok := raw["pools"].([]any)
 	if !ok || len(values) == 0 {
 		return Options{}, errors.New("Uniswap V4 pools must be a non-empty array")
