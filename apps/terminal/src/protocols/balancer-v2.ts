@@ -1,4 +1,12 @@
-import { type Address, encodeFunctionData, type Hex, isAddress } from "viem";
+import {
+  type Address,
+  encodeFunctionData,
+  getAddress,
+  type Hex,
+  isAddress,
+  isAddressEqual,
+  sliceHex,
+} from "viem";
 import { balancerVaultAbi } from "../../../../generated/abi";
 import type { PrepareExecutionResponse } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { uint256Decimal } from "../execution-policy";
@@ -95,10 +103,10 @@ export function balancer(raw: {
         );
       // Balancer embeds the pool contract address in poolId's first 20 bytes.
       // https://github.com/balancer/balancer-v2-monorepo/blob/master/pkg/vault/contracts/PoolRegistry.sol
-      const poolAddress = `0x${leg.pool.slice(2, 42)}`;
+      const poolAddress = getAddress(sliceHex(leg.pool as Hex, 0, 20));
       if (
-        leg.tokenIn.toLowerCase() === poolAddress ||
-        leg.tokenOut.toLowerCase() === poolAddress
+        isAddressEqual(leg.tokenIn as Address, poolAddress) ||
+        isAddressEqual(leg.tokenOut as Address, poolAddress)
       )
         throw new Error("Balancer BPT swaps are not supported.");
       if (uint256Decimal(route.amountOutAtomic, "Route quoted output") <= 0n)
@@ -108,7 +116,9 @@ export function balancer(raw: {
         spender: deployment.vault,
         data: balancerData(p),
         quotedOutput: route.amountOutAtomic,
-        routeDetails: [[`Pool ID: ${leg.pool}; pool address: ${poolAddress}`]],
+        routeDetails: [
+          [`Pool ID: ${leg.pool}; pool address: ${poolAddress.toLowerCase()}`],
+        ],
         receipt: { intermediate: [], touched: [] },
       };
     },

@@ -42,7 +42,7 @@ func validateSlipstreamDeployment(d Deployment) (any, error) {
 }
 
 func validateBalancerDeployment(d Deployment) (any, error) {
-	if d.factorySet || d.quoterSet || d.routerSet || d.Fees != nil || d.Options == nil {
+	if d.configuredFields["factory"] || d.configuredFields["quoter"] || d.configuredFields["router"] || d.Fees != nil || d.Options == nil {
 		return nil, errors.New("Balancer V2 deployment accepts only provider options")
 	}
 	return balancer.ParseOptions(*d.Options)

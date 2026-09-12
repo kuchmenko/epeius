@@ -1,6 +1,7 @@
 import {
   type Address,
   encodeFunctionData,
+  getAddress,
   isAddress,
   isHash,
   zeroAddress,
@@ -51,30 +52,30 @@ export function fixedExecutor(
     { kind: string; router?: string; fees?: number[] }
   >,
 ) {
-  const address = `0x${raw.address?.replace(/^0x/i, "") ?? ""}`.toLowerCase();
-  const uni = raw.uniswapDeployment && deployments[raw.uniswapDeployment];
-  const pan = raw.pancakeDeployment && deployments[raw.pancakeDeployment];
-  if (
-    !isAddress(address, { strict: false }) ||
-    address === zeroAddress ||
-    !raw.uniswapDeployment ||
-    !raw.pancakeDeployment ||
-    !uni ||
-    !pan ||
-    uni.kind !== "uniswap-v3" ||
-    pan.kind !== "pancake-v3" ||
-    typeof uni.router !== "string" ||
-    typeof pan.router !== "string" ||
-    !Array.isArray(uni.fees) ||
-    !Array.isArray(pan.fees) ||
-    uni.router === pan.router
-  )
-    throw new Error(
-      "Local executor needs an address and distinct Uniswap/Pancake deployments.",
-    );
+  const invalid =
+    "Local executor needs an address and distinct Uniswap/Pancake deployments.";
+  const configuredAddress = `0x${raw.address?.replace(/^0x/i, "") ?? ""}`;
+  if (!isAddress(configuredAddress, { strict: false }))
+    throw new Error(invalid);
+  const address = getAddress(configuredAddress).toLowerCase();
+  if (address === zeroAddress) throw new Error(invalid);
+
+  const uniswapDeployment = raw.uniswapDeployment;
+  const pancakeDeployment = raw.pancakeDeployment;
+  if (!uniswapDeployment || !pancakeDeployment) throw new Error(invalid);
+  const uni = deployments[uniswapDeployment];
+  const pan = deployments[pancakeDeployment];
+  if (uni?.kind !== "uniswap-v3" || pan?.kind !== "pancake-v3")
+    throw new Error(invalid);
+  if (typeof uni.router !== "string" || !Array.isArray(uni.fees))
+    throw new Error(invalid);
+  if (typeof pan.router !== "string" || !Array.isArray(pan.fees))
+    throw new Error(invalid);
+  if (uni.router === pan.router) throw new Error(invalid);
+
   const venues = new Map<string, V3Deployment>([
-    [raw.uniswapDeployment, { ...uni, router: uni.router, fees: uni.fees }],
-    [raw.pancakeDeployment, { ...pan, router: pan.router, fees: pan.fees }],
+    [uniswapDeployment, { ...uni, router: uni.router, fees: uni.fees }],
+    [pancakeDeployment, { ...pan, router: pan.router, fees: pan.fees }],
   ]);
   return {
     plan(p: PrepareExecutionResponse, tokens: string[]): SwapTerms {

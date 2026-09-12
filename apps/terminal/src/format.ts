@@ -1,4 +1,4 @@
-import { formatUnits } from "viem";
+import { formatUnits, getAddress, type Hex, sliceHex } from "viem";
 import {
   type ChainStatus,
   PreparationStatus,
@@ -159,14 +159,13 @@ export function formatQuote(
     if (route.block)
       lines.push(`Route block: ${route.block.number} (${route.block.hash})`);
     for (const [index, leg] of route.legs.entries()) {
-      const selector =
-        leg.selector.case === "feePips"
-          ? `fee ${leg.selector.value} pips`
-          : leg.selector.case === "tickSpacing"
-            ? `tick spacing ${leg.selector.value}`
-            : /^0x[0-9a-f]{64}$/.test(leg.pool)
-              ? `pool address 0x${leg.pool.slice(2, 42)}`
-              : "unknown selector";
+      let selector = "unknown selector";
+      if (leg.selector.case === "feePips")
+        selector = `fee ${leg.selector.value} pips`;
+      else if (leg.selector.case === "tickSpacing")
+        selector = `tick spacing ${leg.selector.value}`;
+      else if (/^0x[0-9a-f]{64}$/.test(leg.pool))
+        selector = `pool address ${getAddress(sliceHex(leg.pool as Hex, 0, 20)).toLowerCase()}`;
       lines.push(
         `Leg ${index + 1}: pool ${leg.pool}; ${selector}; ${leg.tokenIn} to ${leg.tokenOut}`,
       );
