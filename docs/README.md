@@ -8,6 +8,7 @@ Epeius is an open-source EVM quote engine and trading terminal for researching d
 - [Terminal](terminal.md): CLI commands, token and amount input, human and JSON output, transaction preparation, and receipt verification.
 - [Testnet harness and contracts](testnet.md): Base Sepolia deployment and seed workflow, Foundry contracts, manifests, E2E reports, recovery, and safety rules.
 - [Execution contract](execution.md): trust split, immutable preparation terms, simulation evidence, approval flow, partial-input limitation, and unsupported execution cases.
+- [Uniswap V4 provider](providers/uniswap-v4.md): configuration, deployment admission, Permit2 flow, quote behavior, limits, and validation.
 - [Aerodrome Slipstream provider](providers/aerodrome-slipstream.md): protocol differences, configuration, startup admission, quote and preparation behavior, and limits.
 - [Balancer V2 provider](providers/balancer-v2.md): Vault and pool-ID configuration, quote and preparation behavior, startup checks, and limits.
 - [Development tooling](development.md): setup, generation, checks, build outputs, and local test output.
@@ -20,6 +21,7 @@ Epeius is an open-source EVM quote engine and trading terminal for researching d
 | --- | --- |
 | Run read-only quotes | [Terminal quick start](terminal.md#quick-start) |
 | Configure or diagnose a chain | [Engine configuration](engine.md#configuration) |
+| Configure Uniswap V4 | [Uniswap V4 provider guide](providers/uniswap-v4.md#configuration) |
 | Configure Aerodrome Slipstream | [Slipstream provider guide](providers/aerodrome-slipstream.md#configuration) |
 | Prepare or execute on an enabled chain | [Terminal execution](terminal.md#configured-chain-execution), then [execution contract](execution.md) |
 | Deploy and seed disposable test pools | [Testnet harness](testnet.md) |

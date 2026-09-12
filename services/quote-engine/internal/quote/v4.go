@@ -1,6 +1,7 @@
 package quote
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -147,7 +148,7 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 	// Permit2 address. Pin the complete deployed runtime instead of accepting an
 	// unrelated contract that happens to contain the configured address.
 	// https://github.com/Uniswap/universal-router/blob/3663f6db6e2fe121753cd2d899699c2dc75dca86/contracts/modules/PaymentsImmutables.sol
-	if crypto.Keccak256Hash(routerCode) != common.HexToHash(q.options.RouterCodeHash) {
+	if crypto.Keccak256Hash(routerCode) != common.HexToHash(q.options.RouterCodeHash) || !bytes.Contains(routerCode, common.HexToAddress(q.options.Permit2).Bytes()) {
 		return errors.New("Uniswap V4 deployment verification failed")
 	}
 	return nil

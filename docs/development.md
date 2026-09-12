@@ -63,6 +63,8 @@ For execution review, run the CLI with local Connect/RPC fixtures and a stub Cas
 
 `bun run smoke` prints each connected chain, quote summaries, and `Read-only smoke check passed. No transactions sent.` only after all checks pass. A failing run prints a short diagnostic to stderr and exits nonzero.
 
+## Uniswap V4 Base fork acceptance
+
 Uniswap V4 fork acceptance uses Base block `51172639` and requires an archive RPC. The checked-in runtime fixture is `scripts/fork/uniswap-v4.toml`. Start Anvil, align its next block with wall time, and fund the first standard Anvil account with WETH:
 
 ```bash

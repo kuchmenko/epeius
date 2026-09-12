@@ -166,6 +166,9 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 			}
 		}
 		if required {
+			if !recheck && p.approval {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Approval state changed; request a fresh quote.")
+			}
 			if recheck && !p.approval {
 				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Permission state changed; request a fresh quote.")
 			}

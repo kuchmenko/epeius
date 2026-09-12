@@ -100,8 +100,9 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 		t.Fatalf("wrong ERC20 approval response: %+v", approval)
 	}
 	erc20Amount = 123456789
+	permissionAmount = 0
 	if reused := prepare(t, configuredHandler(h), historyRequest); reused.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || simulations != 0 {
-		t.Fatal("second allowance observation erased first approval history")
+		t.Fatal("used quote authorized a second permission transaction")
 	}
 
 	permissionAmount = 0
@@ -132,7 +133,7 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 	routerAddress := common.HexToAddress(router)
 	pool := uniswapv4.Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: common.Address{}.Hex()}
 	routerCode := append([]byte{0x60}, permit2.Bytes()...)
-	for _, failure := range []string{"none", "router pool manager", "router code hash"} {
+	for _, failure := range []string{"none", "router pool manager", "router Permit2", "router code hash"} {
 		t.Run(failure, func(t *testing.T) {
 			reader := codeFake{code: func(_ context.Context, target common.Address, hash common.Hash) ([]byte, error) {
 				if hash != common.HexToHash(blockHash) {
@@ -155,7 +156,11 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 				return poolResponse(poolManager), nil
 			}}}
 			deployment := config.Deployment{Kind: "uniswap-v4", Quoter: quoter.Hex(), Router: routerAddress.Hex()}
-			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), RouterCodeHash: crypto.Keccak256Hash(routerCode).Hex(), Pools: []uniswapv4.Pool{pool}}
+			configuredPermit2 := permit2
+			if failure == "router Permit2" {
+				configuredPermit2 = common.HexToAddress("0x9999999999999999999999999999999999999999")
+			}
+			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: configuredPermit2.Hex(), RouterCodeHash: crypto.Keccak256Hash(routerCode).Hex(), Pools: []uniswapv4.Pool{pool}}
 			err := (v4Quoter{reader: reader, id: "v4", deployment: deployment, options: options}).Verify(context.Background(), common.HexToHash(blockHash))
 			if failure == "none" && err != nil || failure != "none" && err == nil {
 				t.Fatalf("failure=%s error=%v", failure, err)
