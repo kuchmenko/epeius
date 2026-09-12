@@ -4,12 +4,18 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { decodeAbiParameters, erc20Abi } from "viem";
+import {
+  decodeAbiParameters,
+  encodeFunctionResult,
+  erc20Abi,
+  toFunctionSelector,
+} from "viem";
 import {
   pancakeV3PoolAbi,
   uniswapPeripheryStateAbi,
   uniswapV3FactoryAbi,
   uniswapV3PoolAbi,
+  uniswapV4StateViewAbi,
 } from "../../generated/abi/index.ts";
 import {
   address,
@@ -27,7 +33,7 @@ import {
 
 const sender = "0x0000000000000000000000000000000000000001";
 const defaultProfilePath = new URL("./harness.toml", import.meta.url).pathname;
-const { uni } = await loadProfile(defaultProfilePath);
+const { uni, uniV4 } = await loadProfile(defaultProfilePath);
 test("pinned Uniswap artifacts are deployable without external library links", async () => {
   for (const [name, version, contract] of [
     ["@uniswap/v3-core", "1.0.1", "UniswapV3Factory"],
@@ -371,6 +377,116 @@ test("V4 fixture derives canonical pool ID and PositionManager action payload", 
   );
   assert.equal(settle0.toLowerCase(), tokenA.address);
   assert.equal(settle1.toLowerCase(), tokenC.address);
+});
+
+test("V4 seed validates existing pool before estimating approvals", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-v4-preflight-"));
+  const previousFetch = globalThis.fetch;
+  const previousURL = process.env.HARNESS_ISOLATED_RPC;
+  const token = (digit, decimals) => ({
+    address: `0x${digit.repeat(40)}`,
+    decimals,
+  });
+  const tokens = { A: token("1", 18), B: token("2", 6), C: token("3", 8) };
+  let poolChecked = false;
+  let estimated = false;
+  process.env.HARNESS_ISOLATED_RPC = "https://isolated.invalid/rpc";
+  globalThis.fetch = async (_url, request) => {
+    const { method, params } = JSON.parse(request.body);
+    let result;
+    if (method === "eth_chainId") result = "0x14a34";
+    else if (method === "eth_getCode") result = "0x6000";
+    else if (method === "eth_getTransactionCount") result = "0x0";
+    else if (method === "eth_estimateGas") {
+      estimated = true;
+      assert.ok(
+        poolChecked,
+        "pool state must be checked before approval estimate",
+      );
+      result = "0x10000";
+    } else if (method === "eth_call") {
+      const { to, data } = params[0];
+      const selector = data.slice(0, 10);
+      const word = (value) => `0x${value.replace(/^0x/, "").padStart(64, "0")}`;
+      if (selector === toFunctionSelector("factory()"))
+        result = word(uni.factory);
+      else if (selector === toFunctionSelector("WETH9()"))
+        result = word("0x4200000000000000000000000000000000000006");
+      else if (selector === toFunctionSelector("poolManager()"))
+        result = word(uniV4.pool_manager);
+      else if (selector === toFunctionSelector("permit2()"))
+        result = word(uniV4.permit2);
+      else if (selector === toFunctionSelector("decimals()"))
+        result = word(
+          BigInt(
+            Object.values(tokens).find((candidate) => candidate.address === to)
+              .decimals,
+          ).toString(16),
+        );
+      else if (selector === toFunctionSelector("getSlot0(bytes32)")) {
+        poolChecked = true;
+        result = encodeFunctionResult({
+          abi: uniswapV4StateViewAbi,
+          functionName: "getSlot0",
+          result: [1n, 0, 0, 0],
+        });
+      } else if (selector === toFunctionSelector("balanceOf(address)"))
+        result = word((1n << 255n).toString(16));
+      else if (selector === toFunctionSelector("allowance(address,address)"))
+        result = word("0");
+      else if (
+        selector === toFunctionSelector("allowance(address,address,address)")
+      )
+        result = `${word("0")}${word("0").slice(2)}${word("0").slice(2)}`;
+      else throw new Error(`Unexpected eth_call selector ${selector}`);
+    } else throw new Error(`Unexpected method ${method}`);
+    return Response.json({ result });
+  };
+  try {
+    const config = resolve(dir, "profile.toml");
+    const manifestPath = resolve(dir, "manifest.json");
+    writeFileSync(
+      config,
+      (await Bun.file(defaultProfilePath).text()).replace(
+        "BASE_SEPOLIA_RPC_URL",
+        "HARNESS_ISOLATED_RPC",
+      ),
+    );
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 1,
+        chainId: 84532,
+        sender,
+        transactions: {},
+        tokens,
+        pancake: {},
+        pools: [],
+        uni,
+      }),
+    );
+    await assert.rejects(
+      run(
+        options([
+          "seed-v4",
+          "--sender",
+          sender,
+          "--config",
+          config,
+          "--manifest",
+          manifestPath,
+        ]),
+      ),
+      /different price/,
+    );
+    assert.equal(poolChecked, true);
+    assert.equal(estimated, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousURL === undefined) delete process.env.HARNESS_ISOLATED_RPC;
+    else process.env.HARNESS_ISOLATED_RPC = previousURL;
+    rmSync(dir, { recursive: true });
+  }
 });
 
 test("V3 fixture rejects 0/255 decimals whose generated values exceed protocol bounds", () => {

@@ -155,10 +155,10 @@
   },
   {
     "name": "UniswapUniversalRouter",
-    "origin": "https://github.com/Uniswap/universal-router/blob/3663f6db6e2fe121753cd2d899699c2dc75dca86/contracts/interfaces/IUniversalRouter.sol (reviewed deadline execute interface)",
+    "origin": "https://github.com/Uniswap/universal-router/blob/3663f6db6e2fe121753cd2d899699c2dc75dca86/contracts/interfaces/IUniversalRouter.sol plus https://github.com/Uniswap/v4-periphery/blob/444c526b77d804590f0d7bc5a481af5a3277c952/src/interfaces/IImmutableState.sol (reviewed deadline execute and poolManager interfaces)",
     "license": "GPL-3.0-or-later",
     "sourceSha256": "b846941980a23b3d35cde5228daf004124fb7bb6ccfa7ab9cc3a3473480a5163",
-    "abiSha256": "a4e66e320fda7ad04f979594c165d84e4afc71fda01818542b9013ef3bdeb7d3"
+    "abiSha256": "4874bec43c2b2eae9364d75d13e29a6d2e1305ea70f3ba591c32a14489c72211"
   },
   {
     "name": "UniswapV4PoolManager",

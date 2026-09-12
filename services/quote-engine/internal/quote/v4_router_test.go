@@ -105,6 +105,40 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 	}
 }
 
+func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
+	poolManager := common.HexToAddress(tokenA)
+	quoter := common.HexToAddress(tokenB)
+	stateView := common.HexToAddress(tokenC)
+	permit2 := common.HexToAddress(wallet)
+	routerAddress := common.HexToAddress(router)
+	for _, failure := range []string{"none", "router pool manager", "router Permit2"} {
+		t.Run(failure, func(t *testing.T) {
+			reader := codeFake{code: func(_ context.Context, target common.Address, hash common.Hash) ([]byte, error) {
+				if hash != common.HexToHash(blockHash) {
+					t.Fatal("code check was not pinned")
+				}
+				if target == routerAddress && failure != "router Permit2" {
+					return append([]byte{0x60}, permit2.Bytes()...), nil
+				}
+				return []byte{0x60}, nil
+			}, readerFake: readerFake{call: func(_ context.Context, target common.Address, data []byte, hash common.Hash) ([]byte, error) {
+				if hash != common.HexToHash(blockHash) || !bytes.Equal(data, crypto.Keccak256([]byte("poolManager()"))[:4]) {
+					t.Fatal("link check was not pinned poolManager()")
+				}
+				if target == routerAddress && failure == "router pool manager" {
+					return poolResponse(common.HexToAddress("0x9999999999999999999999999999999999999999")), nil
+				}
+				return poolResponse(poolManager), nil
+			}}}
+			deployment := config.Deployment{Kind: "uniswap-v4", PoolManager: poolManager.Hex(), Quoter: quoter.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), Router: routerAddress.Hex()}
+			err := (v4Quoter{reader: reader, id: "v4", deployment: deployment}).Verify(context.Background(), common.HexToHash(blockHash))
+			if failure == "none" && err != nil || failure != "none" && err == nil {
+				t.Fatalf("failure=%s error=%v", failure, err)
+			}
+		})
+	}
+}
+
 func v4PoolID(pool config.UniswapV4Pool) (common.Hash, error) {
 	return uniswapv4.PoolID(v4PoolKey(pool))
 }

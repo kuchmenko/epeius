@@ -1,6 +1,7 @@
 package quote
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -105,18 +106,24 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 	if !ok {
 		return errors.New("deployment code unavailable")
 	}
+	var routerCode []byte
 	for _, address := range []string{q.deployment.PoolManager, q.deployment.Quoter, q.deployment.StateView, q.deployment.Permit2, q.deployment.Router} {
 		code, err := reader.Code(ctx, common.HexToAddress(address), hash)
 		if err != nil || len(code) == 0 {
 			return errors.New("Uniswap V4 deployment verification failed")
 		}
+		if address == q.deployment.Router {
+			routerCode = code
+		}
 	}
 	for target, contract := range map[string]struct {
 		method string
-	}{q.deployment.Quoter: {"poolManager"}, q.deployment.StateView: {"poolManager"}} {
+	}{q.deployment.Quoter: {"poolManager"}, q.deployment.StateView: {"poolManager"}, q.deployment.Router: {"poolManager"}} {
 		var method = contractabi.UniswapV4Quoter.Methods[contract.method]
 		if target == q.deployment.StateView {
 			method = contractabi.UniswapV4StateView.Methods[contract.method]
+		} else if target == q.deployment.Router {
+			method = contractabi.UniswapUniversalRouter.Methods[contract.method]
 		}
 		data, err := reader.Call(ctx, common.HexToAddress(target), method.ID, hash)
 		if err != nil {
@@ -126,6 +133,12 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 		if err != nil || values[0].(common.Address) != common.HexToAddress(q.deployment.PoolManager) {
 			return errors.New("Uniswap V4 deployment verification failed")
 		}
+	}
+	// Universal Router keeps Permit2 as an internal immutable, so there is no
+	// getter. Require the configured address in its pinned runtime bytecode.
+	// https://github.com/Uniswap/universal-router/blob/3663f6db6e2fe121753cd2d899699c2dc75dca86/contracts/modules/PaymentsImmutables.sol
+	if !bytes.Contains(routerCode, common.HexToAddress(q.deployment.Permit2).Bytes()) {
+		return errors.New("Uniswap V4 deployment verification failed")
 	}
 	provider := uniswapv4.Provider{Client: q.reader, Quoter: common.HexToAddress(q.deployment.Quoter), StateView: common.HexToAddress(q.deployment.StateView)}
 	for _, pool := range q.deployment.Pools {

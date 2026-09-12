@@ -1,5 +1,14 @@
 [
   {
+    "inputs": [],
+    "name": "poolManager",
+    "outputs": [
+      { "internalType": "contract IPoolManager", "name": "", "type": "address" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       { "internalType": "bytes", "name": "commands", "type": "bytes" },
       { "internalType": "bytes[]", "name": "inputs", "type": "bytes[]" },

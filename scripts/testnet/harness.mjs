@@ -1047,7 +1047,17 @@ export async function run(o) {
         manifest.v4Fixture.positionTokenId = String(tokenId);
         save();
       };
+      let slot = await call(
+        uniV4.state_view,
+        uniswapV4StateViewAbi,
+        "getSlot0",
+        [plan.poolId],
+      );
+      if (slot[0] !== 0n && slot[0] !== BigInt(plan.sqrtPriceX96))
+        throw new Error("Existing Uniswap V4 pool has a different price");
       if (manifest.transactions[mintKey]) {
+        if (slot[0] !== BigInt(plan.sqrtPriceX96))
+          throw new Error("Journaled Uniswap V4 pool is not initialized");
         if (!manifest.v4Fixture.positionDeadline)
           throw new Error("Missing journaled Uniswap V4 position deadline");
         await write(
@@ -1103,12 +1113,6 @@ export async function run(o) {
               ],
             );
         }
-        let slot = await call(
-          uniV4.state_view,
-          uniswapV4StateViewAbi,
-          "getSlot0",
-          [plan.poolId],
-        );
         if (slot[0] === 0n) {
           await write(
             "v4-initialize-A-C-500",
