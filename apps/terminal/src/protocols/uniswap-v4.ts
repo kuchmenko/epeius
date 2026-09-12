@@ -220,6 +220,8 @@ export function uniswapV4(raw: {
   };
   if (
     deployment.pools.length === 0 ||
+    new Set(deployment.pools.map((pool) => JSON.stringify(pool))).size !==
+      deployment.pools.length ||
     deployment.pools.some(
       (pool) =>
         pool.currency0 >= pool.currency1 ||

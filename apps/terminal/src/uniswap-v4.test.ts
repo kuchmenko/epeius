@@ -205,6 +205,18 @@ test("V4 config rejects missing, unknown, misplaced, and inapplicable provider o
       options: { ...rawDeployment.options, permit2: weth },
     }),
   ).toThrow();
+  expect(
+    config({
+      ...rawDeployment,
+      options: {
+        ...rawDeployment.options,
+        pools: [
+          ...rawDeployment.options.pools,
+          { ...rawDeployment.options.pools[0] },
+        ],
+      },
+    }),
+  ).toThrow();
   expect(config({ kind: "uniswap-v4", router })).toThrow();
   expect(
     config({
