@@ -159,8 +159,8 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		expiration := values[1].(*big.Int).Uint64()
 		required := permissionAmount.Cmp(permission.amount) < 0 || expiration <= deadline
 		if !recheck {
-			var exists bool
-			p.approval, exists = h.Store.markApproval(r.QuoteId, response.Recipient+permission.target+permission.spender, required, time.Now())
+			previous, exists := h.Store.markApproval(r.QuoteId, response.Recipient+permission.target+permission.spender, required, time.Now())
+			p.approval = p.approval || previous
 			if !exists || !time.Now().Before(saved.expires) {
 				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote expired or unavailable during preparation; request a fresh quote")
 			}

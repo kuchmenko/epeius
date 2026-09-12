@@ -35,6 +35,7 @@ func TestUniswapV4RouterCalldataMatchesIndependentCastVector(t *testing.T) {
 
 func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *testing.T) {
 	permit2 := "0x4444444444444444444444444444444444444444"
+	erc20Amount := uint64(123456789)
 	permissionAmount := uint64(0)
 	timestamp := uint64(1777777000)
 	pool := config.UniswapV4Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: "0x0000000000000000000000000000000000000000"}
@@ -51,7 +52,7 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 			if !bytes.Equal(data[:4], crypto.Keccak256([]byte("allowance(address,address)"))[:4]) || common.BytesToAddress(data[36:68]) != common.HexToAddress(permit2) {
 				t.Fatal("wrong ERC20 allowance read")
 			}
-			return uintWord(123456789), nil
+			return uintWord(erc20Amount), nil
 		case common.HexToAddress(permit2):
 			if !bytes.Equal(data[:4], crypto.Keccak256([]byte("allowance(address,address,address)"))[:4]) || common.BytesToAddress(data[4:36]) != common.HexToAddress(wallet) || common.BytesToAddress(data[36:68]) != common.HexToAddress(tokenA) || common.BytesToAddress(data[68:100]) != common.HexToAddress(router) {
 				t.Fatal("wrong Permit2 allowance read")
@@ -87,6 +88,20 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 	changed := prepare(t, configuredHandler(h), &quotev1.PrepareExecutionRequest{PreparationId: first.PreparationId})
 	if changed.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || simulations != 0 {
 		t.Fatal("old permission preparation became executable")
+	}
+
+	// Both V4 approvals belong to one quote. Observing the second allowance must
+	// not erase the first approval requirement and make that old quote executable.
+	erc20Amount = 0
+	h.Store.saveQuote(&quotev1.QuoteRequest{Chain: "base", ChainId: "8453", TokenIn: tokenA, TokenOut: tokenB, AmountInAtomic: "123456789"}, &quotev1.QuoteFinal{QuoteId: "v4-approval-history", Routes: []*quotev1.RouteQuote{route}, Block: &quotev1.BlockContext{Number: "112230", Hash: blockHash}}, time.Now())
+	historyRequest := &quotev1.PrepareExecutionRequest{QuoteId: "v4-approval-history", RouteId: route.RouteId, Sender: wallet, SlippageBps: 75}
+	approval := prepare(t, configuredHandler(h), historyRequest)
+	if approval.Status != quotev1.PreparationStatus_PREPARATION_STATUS_APPROVAL_REQUIRED || approval.ApprovalTransaction == nil || approval.OnChainPermission != nil {
+		t.Fatalf("wrong ERC20 approval response: %+v", approval)
+	}
+	erc20Amount = 123456789
+	if reused := prepare(t, configuredHandler(h), historyRequest); reused.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || simulations != 0 {
+		t.Fatal("second allowance observation erased first approval history")
 	}
 }
 

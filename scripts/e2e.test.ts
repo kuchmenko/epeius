@@ -295,7 +295,7 @@ function selectedTradeFixture(
       return quote;
     },
     report,
-    execute: async (quote, route, afterApproval) => {
+    execute: async (quote, route, afterApproval, approvalRound = 0) => {
       calls.push(`execute:${quote.quoteId}:${route.routeId}:${afterApproval}`);
       const isCake = route.routeId === "cake-direct";
       const router = isCake ? cakeRouter : uniRouter;
@@ -406,7 +406,12 @@ function selectedTradeFixture(
           };
         },
         reportPreparation: true,
-        swapOnly: afterApproval,
+        approvalPolicy:
+          approvalRound === 1
+            ? "permission-only"
+            : approvalRound >= 2
+              ? "none"
+              : undefined,
         report,
       });
     },

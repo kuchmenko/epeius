@@ -137,7 +137,12 @@ export async function executionCommand(
     {
       signer,
       reportPreparation: !!trade,
-      swapOnly: (trade?.approvalRound ?? 0) >= 2,
+      approvalPolicy:
+        trade?.approvalRound === 1
+          ? "permission-only"
+          : (trade?.approvalRound ?? 0) >= 2
+            ? "none"
+            : undefined,
       expectedChainId,
       slippageBps: Number(slippage),
       trusted,

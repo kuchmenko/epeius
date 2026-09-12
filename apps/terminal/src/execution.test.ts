@@ -427,7 +427,14 @@ test("approval confirms separately, sends only exact approval and requires fresh
     data: `0x095ea7b3${router.slice(2).padStart(64, "0")}${(101).toString(16).padStart(64, "0")}`,
   };
   f.p.transaction = undefined;
-  f.io.swapOnly = true;
+  f.io.approvalPolicy = "permission-only";
+  await expect(executePrepared(f.io)).rejects.toThrow(
+    "Approval is still required",
+  );
+  expect(f.sent).toHaveLength(0);
+  expect(f.confirmations).toHaveLength(0);
+  f.reports.length = 0;
+  f.io.approvalPolicy = "none";
   await expect(executePrepared(f.io)).rejects.toThrow(
     "Approval is still required",
   );
@@ -441,7 +448,7 @@ test("approval confirms separately, sends only exact approval and requires fresh
     },
     sent: false,
   });
-  f.io.swapOnly = false;
+  f.io.approvalPolicy = undefined;
   f.requests.length = 0;
   f.reports.length = 0;
   expect(await executePrepared(f.io)).toEqual({
