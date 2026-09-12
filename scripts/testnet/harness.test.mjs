@@ -40,6 +40,7 @@ const { uni, uniV4 } = await loadProfile(defaultProfilePath);
 const v4TestProfile = async () =>
   (await Bun.file(defaultProfilePath).text())
     .replace("BASE_SEPOLIA_RPC_URL", "HARNESS_ISOLATED_RPC")
+    .replace(uniV4.permit2_code_hash, keccak256("0x6000"))
     .replace(uniV4.router_code_hash, keccak256("0x6000"));
 test("pinned Uniswap artifacts are deployable without external library links", async () => {
   for (const [name, version, contract] of [

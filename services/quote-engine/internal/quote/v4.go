@@ -115,7 +115,7 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 	if !ok {
 		return errors.New("deployment code unavailable")
 	}
-	var routerCode []byte
+	var routerCode, permit2Code []byte
 	for _, address := range []string{q.options.PoolManager, q.deployment.Quoter, q.options.StateView, q.options.Permit2, q.deployment.Router} {
 		code, err := reader.Code(ctx, common.HexToAddress(address), hash)
 		if err != nil || len(code) == 0 {
@@ -123,6 +123,8 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 		}
 		if address == q.deployment.Router {
 			routerCode = code
+		} else if address == q.options.Permit2 {
+			permit2Code = code
 		}
 	}
 	for target, contract := range map[string]struct {
@@ -145,7 +147,7 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 	}
 	// ParseOptions binds this reviewed runtime generation to its Permit2
 	// immutable; startup confirms exact deployed runtime bytes here.
-	if crypto.Keccak256Hash(routerCode) != common.HexToHash(q.options.RouterCodeHash) {
+	if crypto.Keccak256Hash(routerCode) != common.HexToHash(q.options.RouterCodeHash) || crypto.Keccak256Hash(permit2Code) != common.HexToHash(q.options.Permit2CodeHash) {
 		return errors.New("Uniswap V4 deployment verification failed")
 	}
 	return nil

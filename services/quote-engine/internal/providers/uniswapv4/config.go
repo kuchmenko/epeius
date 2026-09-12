@@ -8,11 +8,12 @@ import (
 )
 
 type Options struct {
-	PoolManager    string
-	StateView      string
-	Permit2        string
-	RouterCodeHash string
-	Pools          []Pool
+	PoolManager     string
+	StateView       string
+	Permit2         string
+	Permit2CodeHash string
+	RouterCodeHash  string
+	Pools           []Pool
 }
 
 type Pool struct {
@@ -26,14 +27,17 @@ type Pool struct {
 // These hashes identify reviewed Universal Router deployments and bind each
 // generation to its Permit2 immutable. Uniswap publishes both addresses here:
 // https://docs.uniswap.org/contracts/v4/deployments
-var reviewedRouterPermit2 = map[common.Hash]common.Address{
-	common.HexToHash("0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0"): common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3"),
-	common.HexToHash("0x952c879f642706a4d399eb917827b5a2a5519328446dba72aef3579909bf15ef"): common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3"),
+var reviewedRouterPermit2 = map[common.Hash]struct {
+	Address  common.Address
+	CodeHash common.Hash
+}{
+	common.HexToHash("0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0"): {common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3"), common.HexToHash("0xa67739abc3ede9dbdc0491636c67d6a14ac07fab9030c3f509b1eb7b11dff8ed")},
+	common.HexToHash("0x952c879f642706a4d399eb917827b5a2a5519328446dba72aef3579909bf15ef"): {common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3"), common.HexToHash("0xdcde65555316946c298e4c60c6213eb5c3aeab4354d1f3fac5427236bcbb9ebe")},
 }
 
 func ParseOptions(raw map[string]any) (Options, error) {
-	if len(raw) != 5 {
-		return Options{}, errors.New("Uniswap V4 options must contain only pool_manager, state_view, permit2, router_code_hash, and pools")
+	if len(raw) != 6 {
+		return Options{}, errors.New("Uniswap V4 options must contain only pool_manager, state_view, permit2, permit2_code_hash, router_code_hash, and pools")
 	}
 	result := Options{}
 	for name, target := range map[string]*string{
@@ -52,8 +56,14 @@ func ParseOptions(raw map[string]any) (Options, error) {
 		return Options{}, errors.New("Uniswap V4 router_code_hash must be a 32-byte hash")
 	}
 	result.RouterCodeHash = common.HexToHash(routerCodeHash).Hex()
-	if permit2, reviewed := reviewedRouterPermit2[common.HexToHash(routerCodeHash)]; !reviewed || common.HexToAddress(result.Permit2) != permit2 {
-		return Options{}, errors.New("Uniswap V4 router_code_hash and permit2 must name a reviewed deployment")
+	permit2CodeHash, ok := raw["permit2_code_hash"].(string)
+	if !ok || !common.IsHexHash(permit2CodeHash) {
+		return Options{}, errors.New("Uniswap V4 permit2_code_hash must be a 32-byte hash")
+	}
+	result.Permit2CodeHash = common.HexToHash(permit2CodeHash).Hex()
+	reviewed, known := reviewedRouterPermit2[common.HexToHash(routerCodeHash)]
+	if !known || common.HexToAddress(result.Permit2) != reviewed.Address || common.HexToHash(permit2CodeHash) != reviewed.CodeHash {
+		return Options{}, errors.New("Uniswap V4 router and Permit2 must name a reviewed deployment")
 	}
 	values, ok := raw["pools"].([]any)
 	if !ok || len(values) == 0 {

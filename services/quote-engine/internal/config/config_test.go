@@ -261,6 +261,7 @@ router = "0x6666666666666666666666666666666666666666"
 pool_manager = "0x3333333333333333333333333333333333333333"
 state_view = "0x5555555555555555555555555555555555555555"
 permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+permit2_code_hash = "0xa67739abc3ede9dbdc0491636c67d6a14ac07fab9030c3f509b1eb7b11dff8ed"
 router_code_hash = "0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0"
 [[chains.test-net.deployments.v4.options.pools]]
 currency0 = "0x1111111111111111111111111111111111111111"
@@ -277,6 +278,7 @@ hooks = "0x0000000000000000000000000000000000000000"
 		strings.Replace(text, "[chains.test-net.deployments.v4.options]\n", "", 1),
 		strings.Replace(text, "permit2 = \"0x000000000022D473030F116dDEE9F6B43aC78BA3\"", "permit2 = \"0x000000000022D473030F116dDEE9F6B43aC78BA3\"\nunknown = true", 1),
 		strings.Replace(text, "permit2 = \"0x000000000022D473030F116dDEE9F6B43aC78BA3\"", "permit2 = \"0x4200000000000000000000000000000000000006\"", 1),
+		strings.Replace(text, "permit2_code_hash = \"0xa67739abc3ede9dbdc0491636c67d6a14ac07fab9030c3f509b1eb7b11dff8ed\"", "permit2_code_hash = \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", 1),
 		strings.Replace(text, "router_code_hash = \"0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0\"", "router_code_hash = \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", 1),
 		strings.Replace(text, "router_code_hash = \"0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0\"", "router_code_hash = \"0xaaaa\"", 1),
 		strings.Replace(text, "[chains.test-net.deployments.v4.options]", "pool_manager = \"0x3333333333333333333333333333333333333333\"\n[chains.test-net.deployments.v4.options]", 1),

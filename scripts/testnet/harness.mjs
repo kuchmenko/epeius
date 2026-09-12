@@ -254,13 +254,14 @@ export async function loadProfile(path) {
       "state_view",
       "router",
       "permit2",
+      "permit2_code_hash",
       "router_code_hash",
       "position_manager",
     ].some((name) => !(name in uniV4))
   )
     throw new Error("Malformed Uniswap V4 harness config");
-  if (!isHash(uniV4.router_code_hash))
-    throw new Error("Malformed Uniswap V4 router code hash");
+  if (!isHash(uniV4.router_code_hash) || !isHash(uniV4.permit2_code_hash))
+    throw new Error("Malformed Uniswap V4 code hash");
   const decimals = fixtures.tokens;
   const v4Fixture = fixtures.uniswap_v4;
   if (
@@ -572,6 +573,8 @@ export async function run(o) {
       throw new Error("Official Uniswap V4 PositionManager Permit2 mismatch");
     if (!same(v4OfficialHashes.router, uniV4.router_code_hash))
       throw new Error("Official Uniswap V4 router code hash mismatch");
+    if (!same(v4OfficialHashes.permit2, uniV4.permit2_code_hash))
+      throw new Error("Official Uniswap V4 Permit2 code hash mismatch");
   }
   console.log(
     `${chain.key} guard and configured Uniswap deployment links verified.`,
@@ -1304,6 +1307,7 @@ export async function run(o) {
         `pool_manager = "${uniV4.pool_manager}"`,
         `state_view = "${uniV4.state_view}"`,
         `permit2 = "${uniV4.permit2}"`,
+        `permit2_code_hash = "${uniV4.permit2_code_hash}"`,
         `router_code_hash = "${uniV4.router_code_hash}"`,
         "",
         `[[chains.${chain.key}.deployments.uniswap-v4.options.pools]]`,

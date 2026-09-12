@@ -20,6 +20,7 @@ router = "0x..."
 pool_manager = "0x..."
 state_view = "0x..."
 permit2 = "0x..."
+permit2_code_hash = "0x..." # keccak256 of deployed Permit2 runtime code
 router_code_hash = "0x..." # keccak256 of deployed Universal Router runtime code
 
 [[chains.base.deployments.uniswap-v4.options.pools]]
@@ -30,9 +31,9 @@ tick_spacing = 10
 hooks = "0x0000000000000000000000000000000000000000"
 ```
 
-All five options are required and unknown fields are rejected. `currency0` must sort before `currency1`. Pool entries must be unique; fee must be from 0 through 1,000,000, tick spacing must be from 1 through 32,767, and hooks must be zero. Both currencies must also be configured chain tokens.
+All six options are required and unknown fields are rejected. `currency0` must sort before `currency1`. Pool entries must be unique; fee must be from 0 through 1,000,000, tick spacing must be from 1 through 32,767, and hooks must be zero. Both currencies must also be configured chain tokens.
 
-`router_code_hash` pins one reviewed deployed Universal Router generation. It is not calculated from a local build. Obtain it from the configured chain's deployed runtime bytecode and verify that deployment against Uniswap's published addresses before trusting it.
+`router_code_hash` and `permit2_code_hash` pin the reviewed deployed Universal Router and Permit2 runtime code. They are not calculated from local builds. Obtain them from the configured chain's deployed runtime bytecode and verify those deployments against Uniswap's published addresses before trusting them.
 
 ## Startup admission
 
@@ -40,7 +41,8 @@ At the pinned startup block, the engine requires code at PoolManager, Quoter, St
 
 1. Quoter `poolManager()`, StateView `poolManager()`, and Universal Router `poolManager()` equal the configured PoolManager.
 2. The Universal Router runtime hash equals `router_code_hash`.
-3. The reviewed router runtime hash maps to the configured Permit2 immutable.
+3. The Permit2 runtime hash equals `permit2_code_hash`.
+4. The reviewed router runtime hash maps to the configured Permit2 address and runtime hash.
 
 The provider-owned reviewed mapping currently admits Base and Base Sepolia router runtime hashes, both bound to canonical Permit2. This deliberate allowlist prevents another immutable that happens to appear in router bytecode from being configured as Permit2. A failed deployment remains unavailable while healthy deployments can continue.
 

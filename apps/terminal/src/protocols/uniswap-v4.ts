@@ -30,14 +30,25 @@ type Deployment = {
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 // Bind reviewed Universal Router runtime generations to their Permit2 immutable.
 // https://docs.uniswap.org/contracts/v4/deployments
-const reviewedRouterPermit2 = new Map([
+const reviewedRouterPermit2 = new Map<
+  string,
+  { address: string; codeHash: string }
+>([
   [
     "0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0",
-    "0x000000000022d473030f116ddee9f6b43ac78ba3",
+    {
+      address: "0x000000000022d473030f116ddee9f6b43ac78ba3",
+      codeHash:
+        "0xa67739abc3ede9dbdc0491636c67d6a14ac07fab9030c3f509b1eb7b11dff8ed",
+    },
   ],
   [
     "0x952c879f642706a4d399eb917827b5a2a5519328446dba72aef3579909bf15ef",
-    "0x000000000022d473030f116ddee9f6b43ac78ba3",
+    {
+      address: "0x000000000022d473030f116ddee9f6b43ac78ba3",
+      codeHash:
+        "0xdcde65555316946c298e4c60c6213eb5c3aeab4354d1f3fac5427236bcbb9ebe",
+    },
   ],
 ]);
 const address = (value?: string, allowZero = false) => {
@@ -178,6 +189,7 @@ export function uniswapV4(
         pool_manager?: string;
         state_view?: string;
         permit2?: string;
+        permit2_code_hash?: string;
         router_code_hash?: string;
         pools?: Array<{
           currency0?: string;
@@ -195,20 +207,27 @@ export function uniswapV4(
     !options ||
     typeof options !== "object" ||
     Array.isArray(options) ||
-    Object.keys(options).length !== 5 ||
+    Object.keys(options).length !== 6 ||
     ![
       "pool_manager",
       "state_view",
       "permit2",
+      "permit2_code_hash",
       "router_code_hash",
       "pools",
     ].every((field) => Object.hasOwn(options, field)) ||
+    !/^(?:0x)?[0-9a-f]{64}$/i.test(options.permit2_code_hash ?? "") ||
     !/^(?:0x)?[0-9a-f]{64}$/i.test(options.router_code_hash ?? "")
   )
     throw new Error("Local execution deployment is invalid.");
   const permit2 = address(options.permit2);
+  const permit2CodeHash = `0x${options.permit2_code_hash?.replace(/^0x/i, "").toLowerCase()}`;
   const routerCodeHash = `0x${options.router_code_hash?.replace(/^0x/i, "").toLowerCase()}`;
-  if (reviewedRouterPermit2.get(routerCodeHash) !== permit2)
+  const reviewedPermit2 = reviewedRouterPermit2.get(routerCodeHash);
+  if (
+    reviewedPermit2?.address !== permit2 ||
+    reviewedPermit2.codeHash !== permit2CodeHash
+  )
     throw new Error("Local execution deployment is invalid.");
   address(raw.quoter);
   address(options.pool_manager);

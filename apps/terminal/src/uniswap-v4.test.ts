@@ -33,6 +33,8 @@ const rawDeployment = {
     pool_manager: "0x3333333333333333333333333333333333333333",
     state_view: "0x4444444444444444444444444444444444444444",
     permit2,
+    permit2_code_hash:
+      "0xa67739abc3ede9dbdc0491636c67d6a14ac07fab9030c3f509b1eb7b11dff8ed",
     router_code_hash:
       "0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0",
     pools: [
@@ -277,6 +279,15 @@ test("V4 config rejects missing, unknown, misplaced, and inapplicable provider o
     config({
       ...rawDeployment,
       options: { ...rawDeployment.options, permit2: weth },
+    }),
+  ).toThrow();
+  expect(
+    config({
+      ...rawDeployment,
+      options: {
+        ...rawDeployment.options,
+        permit2_code_hash: `0x${"a".repeat(64)}`,
+      },
     }),
   ).toThrow();
   expect(

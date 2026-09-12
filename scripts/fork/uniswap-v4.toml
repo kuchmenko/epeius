@@ -31,6 +31,7 @@ router = "0x6ff5693b99212da76ad316178a184ab56d299b43"
 pool_manager = "0x498581ff718922c3f8e6a244956af099b2652b2b"
 state_view = "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71"
 permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+permit2_code_hash = "0xa67739abc3ede9dbdc0491636c67d6a14ac07fab9030c3f509b1eb7b11dff8ed"
 router_code_hash = "0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0"
 
 [[chains.base-fork.deployments.uniswap-v4.options.pools]]

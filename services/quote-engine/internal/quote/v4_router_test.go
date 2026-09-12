@@ -147,7 +147,8 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 	routerAddress := common.HexToAddress(router)
 	pool := uniswapv4.Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: common.Address{}.Hex()}
 	routerCode := append([]byte{0x60}, permit2.Bytes()...)
-	for _, failure := range []string{"none", "router pool manager", "router code hash"} {
+	permit2Code := []byte{0x62}
+	for _, failure := range []string{"none", "router pool manager", "router code hash", "permit2 code hash"} {
 		t.Run(failure, func(t *testing.T) {
 			reader := codeFake{code: func(_ context.Context, target common.Address, hash common.Hash) ([]byte, error) {
 				if hash != common.HexToHash(blockHash) {
@@ -158,6 +159,12 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 						return append([]byte{0x61}, permit2.Bytes()...), nil
 					}
 					return routerCode, nil
+				}
+				if target == permit2 {
+					if failure == "permit2 code hash" {
+						return []byte{0x61}, nil
+					}
+					return permit2Code, nil
 				}
 				return []byte{0x60}, nil
 			}, readerFake: readerFake{call: func(_ context.Context, target common.Address, data []byte, hash common.Hash) ([]byte, error) {
@@ -170,7 +177,7 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 				return poolResponse(poolManager), nil
 			}}}
 			deployment := config.Deployment{Kind: "uniswap-v4", Quoter: quoter.Hex(), Router: routerAddress.Hex()}
-			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), RouterCodeHash: crypto.Keccak256Hash(routerCode).Hex(), Pools: []uniswapv4.Pool{pool}}
+			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), Permit2CodeHash: crypto.Keccak256Hash(permit2Code).Hex(), RouterCodeHash: crypto.Keccak256Hash(routerCode).Hex(), Pools: []uniswapv4.Pool{pool}}
 			err := (v4Quoter{reader: reader, id: "v4", deployment: deployment, options: options}).Verify(context.Background(), common.HexToHash(blockHash))
 			if failure == "none" && err != nil || failure != "none" && err == nil {
 				t.Fatalf("failure=%s error=%v", failure, err)
