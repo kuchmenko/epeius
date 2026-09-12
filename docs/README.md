@@ -1,6 +1,6 @@
 # Epeius documentation
 
-Use this page as the index for current components and operator workflows.
+Epeius is an open-source EVM quote engine and trading terminal for researching deterministic multi-venue routing and verifiable execution. Use this page as the index for current components and operator workflows.
 
 ## Components
 
