@@ -1074,10 +1074,8 @@ export async function run(o) {
         "getSlot0",
         [plan.poolId],
       );
-      if (slot[0] !== 0n && slot[0] !== BigInt(plan.sqrtPriceX96))
-        throw new Error("Existing Uniswap V4 pool has a different price");
       if (manifest.transactions[mintKey]) {
-        if (slot[0] !== BigInt(plan.sqrtPriceX96))
+        if (slot[0] === 0n)
           throw new Error("Journaled Uniswap V4 pool is not initialized");
         if (!manifest.v4Fixture.positionDeadline)
           throw new Error("Missing journaled Uniswap V4 position deadline");
@@ -1090,6 +1088,8 @@ export async function run(o) {
         );
         await recordPosition();
       } else {
+        if (slot[0] !== 0n && slot[0] !== BigInt(plan.sqrtPriceX96))
+          throw new Error("Existing Uniswap V4 pool has a different price");
         const latestBlock = await rpc("eth_getBlockByNumber", [
           "latest",
           false,
@@ -1097,6 +1097,7 @@ export async function run(o) {
         const deadline =
           manifest.v4Fixture.positionDeadline ??
           String(BigInt(latestBlock.timestamp) + 86400n);
+        const assets = [];
         for (const [token, maximum] of [
           [plan.token0, plan.amount0Max],
           [plan.token1, plan.amount1Max],
@@ -1112,14 +1113,6 @@ export async function run(o) {
               uniV4.permit2,
             ]),
           );
-          if (allowance < maximum)
-            await write(
-              `v4-approve-token-${token.address.toLowerCase()}`,
-              token.address,
-              erc20Abi,
-              "approve",
-              [uniV4.permit2, maximum],
-            );
           const permission = await call(
             uniV4.permit2,
             permit2Abi,
@@ -1130,6 +1123,29 @@ export async function run(o) {
           const permittedExpiration = BigInt(
             permission.expiration ?? permission[1],
           );
+          assets.push({
+            token,
+            maximum,
+            allowance,
+            permittedAmount,
+            permittedExpiration,
+          });
+        }
+        for (const {
+          token,
+          maximum,
+          allowance,
+          permittedAmount,
+          permittedExpiration,
+        } of assets) {
+          if (allowance < maximum)
+            await write(
+              `v4-approve-token-${token.address.toLowerCase()}`,
+              token.address,
+              erc20Abi,
+              "approve",
+              [uniV4.permit2, maximum],
+            );
           if (
             permittedAmount < maximum ||
             permittedExpiration <= BigInt(deadline)
