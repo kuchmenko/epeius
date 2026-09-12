@@ -1,19 +1,68 @@
 package quote
 
-// ConfigureChain selects the supported implementations at startup. Shared flows
-// never infer an implementation from protocol names or configuration fields.
+import (
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
+)
+
+type providerComponents struct {
+	quoter   ProtocolQuoter
+	requoter allocationRequoter
+	verifier deploymentVerifier
+	preparer PreparationStrategy
+}
+
+type providerRegistration func(Chain, string, config.Deployment) providerComponents
+
+func feeProvider(encode routerEncoder) providerRegistration {
+	return func(chain Chain, id string, deployment config.Deployment) providerComponents {
+		provider := v3Quoter{reader: chain.Client, id: id, deployment: deployment, tokens: chain.Config.Tokens}
+		return providerComponents{
+			quoter: provider, requoter: provider, verifier: provider,
+			preparer: v3RouterPreparation{id: id, kind: deployment.Kind, target: deployment.Router, chainID: chain.ChainID, encode: encode},
+		}
+	}
+}
+
+var providerRegistrations = map[string]providerRegistration{
+	"uniswap-v3": feeProvider(uniswapRouter02Data),
+	"pancake-v3": feeProvider(pancakeV3RouterData),
+	"aerodrome-slipstream": func(chain Chain, id string, deployment config.Deployment) providerComponents {
+		options, ok := deployment.ProviderConfig.(slipstream.Options)
+		if !ok {
+			return providerComponents{}
+		}
+		provider := slipstreamQuoter{reader: chain.Client, id: id, deployment: deployment, tokens: chain.Config.Tokens, options: options}
+		return providerComponents{
+			quoter: provider, verifier: provider,
+			preparer: v3RouterPreparation{id: id, kind: deployment.Kind, target: deployment.Router, chainID: chain.ChainID, encode: slipstreamRouterData, verify: verifySlipstreamSignerDiscount, verificationFactory: deployment.Factory},
+		}
+	},
+}
+
+// ConfigureChain selects each provider once from the compile-time registry.
 func ConfigureChain(chain Chain) Chain {
 	chain.Quoters = map[string]ProtocolQuoter{}
+	chain.AllocationRequoters = map[string]allocationRequoter{}
+	chain.DeploymentVerifiers = map[string]deploymentVerifier{}
 	chain.Preparers = map[string]PreparationStrategy{}
 	for id, deployment := range chain.Config.Deployments {
-		switch deployment.Kind {
-		case "uniswap-v3", "pancake-v3":
-			chain.Quoters[id] = v3Quoter{reader: chain.Client, id: id, deployment: deployment, tokens: chain.Config.Tokens}
-			encode := uniswapRouter02Data
-			if deployment.Kind == "pancake-v3" {
-				encode = pancakeV3RouterData
-			}
-			chain.Preparers[id] = v3RouterPreparation{id: id, kind: deployment.Kind, target: deployment.Router, chainID: chain.ChainID, encode: encode}
+		register := providerRegistrations[deployment.Kind]
+		if register == nil {
+			continue
+		}
+		components := register(chain, id, deployment)
+		if components.quoter != nil {
+			chain.Quoters[id] = components.quoter
+		}
+		if components.requoter != nil {
+			chain.AllocationRequoters[id] = components.requoter
+		}
+		if components.verifier != nil {
+			chain.DeploymentVerifiers[id] = components.verifier
+		}
+		if components.preparer != nil {
+			chain.Preparers[id] = components.preparer
 		}
 	}
 	chain.AllocationPreparer = fixedExecutorPreparation{chain: chain}

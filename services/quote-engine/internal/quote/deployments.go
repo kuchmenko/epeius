@@ -39,10 +39,10 @@ func VerifyDeployments(ctx context.Context, chain Chain) Chain {
 			var err error
 			if !ok || tokenError {
 				err = errors.New("configured token code unavailable")
-			} else if quoter := chain.Quoters[id]; quoter != nil {
-				err = quoter.Verify(ctx, hash)
+			} else if verifier := chain.DeploymentVerifiers[id]; verifier != nil {
+				err = verifier.Verify(ctx, hash)
 			} else {
-				err = errors.New("quoting implementation unavailable")
+				err = errors.New("deployment verification unavailable")
 			}
 			if err != nil {
 				mu.Lock()

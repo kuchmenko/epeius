@@ -2,10 +2,44 @@ package config
 
 import (
 	"errors"
+
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 )
 
-// ValidateV3Chain is the shipped Uniswap/Pancake and fixed-executor config
+type deploymentValidator func(Deployment) (any, error)
+
+var deploymentValidators = map[string]deploymentValidator{
+	"uniswap-v3":           validateFeeDeployment,
+	"pancake-v3":           validateFeeDeployment,
+	"aerodrome-slipstream": validateSlipstreamDeployment,
+}
+
+func validateFeeDeployment(d Deployment) (any, error) {
+	if len(d.Fees) == 0 || d.Options != nil {
+		return nil, errors.New("fee deployment must configure fees and no provider options")
+	}
+	fees := map[uint32]bool{}
+	for _, fee := range d.Fees {
+		if fee >= 1000000 || fees[fee] {
+			return nil, errors.New("invalid or duplicate pool fee")
+		}
+		fees[fee] = true
+	}
+	return nil, nil
+}
+
+func validateSlipstreamDeployment(d Deployment) (any, error) {
+	if d.Fees != nil {
+		return nil, errors.New("Slipstream deployment does not accept fees")
+	}
+	if d.Options == nil {
+		return nil, errors.New("Slipstream options must contain only tick_spacings")
+	}
+	return slipstream.ParseOptions(*d.Options)
+}
+
+// ValidateV3Chain is the shipped provider and fixed-executor config
 // composition. Load owns TOML and chain validation, not protocol admission.
 func ValidateV3Chain(chain Chain) error {
 	if e := chain.Executor; e != nil {
@@ -15,22 +49,22 @@ func ValidateV3Chain(chain Chain) error {
 			return errors.New("executor needs a nonzero address and distinct configured Uniswap and Pancake routers")
 		}
 	}
-	for _, d := range chain.Deployments {
-		if (d.Kind != "uniswap-v3" && d.Kind != "pancake-v3") || len(d.Fees) == 0 {
-			return errors.New("invalid deployment kind, identifier, or fees")
+	for id, d := range chain.Deployments {
+		validate, ok := deploymentValidators[d.Kind]
+		if !ok {
+			return errors.New("unsupported provider: " + d.Kind)
 		}
 		for _, a := range []string{d.Factory, d.Quoter, d.Router} {
 			if !common.IsHexAddress(a) || common.HexToAddress(a) == (common.Address{}) {
 				return errors.New("deployment addresses must be nonzero EVM addresses")
 			}
 		}
-		fees := map[uint32]bool{}
-		for _, fee := range d.Fees {
-			if fee >= 1000000 || fees[fee] {
-				return errors.New("invalid or duplicate pool fee")
-			}
-			fees[fee] = true
+		providerConfig, err := validate(d)
+		if err != nil {
+			return err
 		}
+		d.ProviderConfig = providerConfig
+		chain.Deployments[id] = d
 	}
 	return nil
 }

@@ -984,7 +984,7 @@ test("consumer implementation dispatches once with distinct target/spender and e
       ...settings,
       deployments: { fake: { kind: "test-only", router, fees: [500] } },
     }),
-  ).toThrow("deployment is invalid");
+  ).toThrow("Unsupported provider: test-only.");
 });
 
 test("Transfer decode rejects extra/missing words, topics and noncanonical address padding", () => {

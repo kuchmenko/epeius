@@ -7,7 +7,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +25,20 @@ func Verify(ctx context.Context, key string, chainID int64, endpoint string) (Sn
 }
 
 func TestPinnedCall(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		code         int
+		data         string
+		wantReverted bool
+		wantMessage  string
+	}{
+		{name: "success"},
+		{name: "provider failure", code: -32000},
+		{name: "execution reverted without data", code: 3, wantReverted: true, wantMessage: "contract call reverted"},
+		{name: "execution reverted with empty data", code: 3, data: "0x", wantReverted: true, wantMessage: "contract call reverted"},
+		{name: "execution reverted with reason data", code: 3, data: "0x08c379a0", wantMessage: "contract call reverted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			calls := 0
 			hash := common.HexToHash("0x1234")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -52,13 +63,17 @@ func TestPinnedCall(t *testing.T) {
 				}
 				var args map[string]string
 				json.Unmarshal(request.Params[0], &args)
-				if args["data"] != "0x010203" || common.HexToAddress(args["to"]) != common.HexToAddress("0xabcd") {
+				if args["data"] != "0x010203" || common.HexToAddress(args["to"]) != common.HexToAddress("0xabcd") || args["from"] != (common.Address{}).Hex() {
 					t.Error(args)
 				}
 				response := map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": "0x0405"}
-				if fail {
+				if test.code != 0 {
 					delete(response, "result")
-					response["error"] = map[string]any{"code": -32000, "message": "secret canonical block unavailable"}
+					rpcError := map[string]any{"code": test.code, "message": "secret canonical block unavailable"}
+					if test.data != "" {
+						rpcError["data"] = test.data
+					}
+					response["error"] = rpcError
 				}
 				json.NewEncoder(w).Encode(response)
 			}))
@@ -70,8 +85,8 @@ func TestPinnedCall(t *testing.T) {
 			client := &Client{Client: eth}
 			defer client.Close()
 			got, err := client.Call(context.Background(), common.HexToAddress("0xabcd"), []byte{1, 2, 3}, hash)
-			if fail {
-				if err == nil || strings.Contains(err.Error(), "secret") {
+			if test.code != 0 {
+				if err == nil || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrEmptyExecutionRevert) != test.wantReverted || test.wantMessage != "" && err.Error() != test.wantMessage {
 					t.Fatal(err)
 				}
 			} else if err != nil || string(got) != string([]byte{4, 5}) {

@@ -14,8 +14,12 @@ import (
 // The router version, deployment identity and target are independent values.
 type v3RouterPreparation struct {
 	id, kind, target, chainID string
-	encode                    func(*quotev1.RouteQuote, string, *big.Int, *big.Int, uint64) ([]byte, error)
+	encode                    routerEncoder
+	verify                    func(context.Context, Reader, common.Hash, common.Address, string) string
+	verificationFactory       string
 }
+
+type routerEncoder func(*quotev1.RouteQuote, string, *big.Int, *big.Int, uint64) ([]byte, error)
 
 func (s v3RouterPreparation) Select(_ context.Context, _ storedQuote, _ *quotev1.PrepareExecutionRequest, route *quotev1.RouteQuote) (executionSelection, string) {
 	if route == nil || route.DeploymentId != s.id || route.Provider != s.kind {
@@ -37,7 +41,13 @@ func (s v3RouterPreparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 		return executionPlan{}, "unsupported route"
 	}
 	tx := &quotev1.UnsignedTransaction{ChainId: s.chainID, To: common.HexToAddress(s.target).Hex(), From: p.Recipient, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1500000"}
-	return executionPlan{transaction: tx, spender: tx.To, checks: directChecks(p.Route, tx)}, ""
+	plan := executionPlan{transaction: tx, spender: tx.To, checks: directChecks(p.Route, tx)}
+	if s.verify != nil {
+		plan.verify = func(ctx context.Context, reader Reader, hash common.Hash) string {
+			return s.verify(ctx, reader, hash, common.HexToAddress(s.verificationFactory), p.Recipient)
+		}
+	}
+	return plan, ""
 }
 
 func directChecks(route *quotev1.RouteQuote, tx *quotev1.UnsignedTransaction) SimulationChecks {

@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
@@ -87,6 +88,65 @@ func TestStartupDeploymentLinksAndIsolation(t *testing.T) {
 				if len(chain.DeploymentErrors) != 1 || chain.DeploymentErrors["pancake"] == "" {
 					t.Fatal(chain.DeploymentErrors)
 				}
+			}
+		})
+	}
+}
+
+func TestSlipstreamStartupRequiresOneLinkedGeneration(t *testing.T) {
+	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	quoter := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	routerAddress := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	module := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	deployment := config.Deployment{Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex(), Router: routerAddress.Hex(), ProviderConfig: slipstream.Options{TickSpacings: []int32{100}}}
+	configured := ConfigureChain(Chain{ChainID: "1", Config: config.Chain{Deployments: map[string]config.Deployment{"slipstream": deployment}}})
+	if configured.Quoters["slipstream"] == nil || configured.Preparers["slipstream"] == nil || configured.DeploymentVerifiers["slipstream"] == nil || configured.AllocationRequoters["slipstream"] != nil {
+		t.Fatal("Slipstream capabilities do not match direct-only execution")
+	}
+	for _, failure := range []string{"none", "factory code", "quoter code", "router code", "module code", "quoter link", "router link", "zero module", "module link"} {
+		t.Run(failure, func(t *testing.T) {
+			reader := codeFake{code: func(_ context.Context, target common.Address, hash common.Hash) ([]byte, error) {
+				if hash != common.HexToHash(blockHash) {
+					t.Fatal("code check was not pinned")
+				}
+				failedTarget := map[string]common.Address{"factory code": factory, "quoter code": quoter, "router code": routerAddress, "module code": module}[failure]
+				if target == failedTarget {
+					return nil, nil
+				}
+				return []byte{1}, nil
+			}, readerFake: readerFake{call: func(_ context.Context, target common.Address, data []byte, hash common.Hash) ([]byte, error) {
+				if hash != common.HexToHash(blockHash) {
+					t.Fatal("link check was not pinned")
+				}
+				is := func(signature string) bool { return bytes.Equal(data, crypto.Keccak256([]byte(signature))[:4]) }
+				switch {
+				case target == quoter && is("factory()"):
+					if failure == "quoter link" {
+						return poolResponse(common.HexToAddress(tokenC)), nil
+					}
+					return poolResponse(factory), nil
+				case target == routerAddress && is("factory()"):
+					if failure == "router link" {
+						return poolResponse(common.HexToAddress(tokenC)), nil
+					}
+					return poolResponse(factory), nil
+				case target == factory && is("swapFeeModule()"):
+					if failure == "zero module" {
+						return poolResponse(common.Address{}), nil
+					}
+					return poolResponse(module), nil
+				case target == module && is("factory()"):
+					if failure == "module link" {
+						return poolResponse(common.HexToAddress(tokenC)), nil
+					}
+					return poolResponse(factory), nil
+				default:
+					return nil, errors.New("unexpected getter")
+				}
+			}}}
+			err := verifySlipstreamDeployment(context.Background(), reader, deployment, common.HexToHash(blockHash))
+			if failure == "none" && err != nil || failure != "none" && err == nil {
+				t.Fatalf("failure=%s error=%v", failure, err)
 			}
 		})
 	}

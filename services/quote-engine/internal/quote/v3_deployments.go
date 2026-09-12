@@ -11,7 +11,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 )
 
-func verifyDeployment(ctx context.Context, reader codeReader, d config.Deployment, hash common.Hash) error {
+func verifyFeeDeploymentLinks(ctx context.Context, reader codeReader, d config.Deployment, hash common.Hash) error {
 	fail := errors.New("deployment code or factory linkage verification failed")
 	for _, value := range []string{d.Factory, d.Quoter, d.Router} {
 		code, err := reader.Code(ctx, common.HexToAddress(value), hash)
