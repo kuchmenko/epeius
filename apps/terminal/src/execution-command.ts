@@ -100,6 +100,8 @@ export async function executionCommand(
     approvalRound?: number;
   },
 ) {
+  if (values["preparation-id"] && values["slippage-bps"] === undefined)
+    throw new Error("--slippage-bps is required with --preparation-id.");
   if (
     !values.keystore ||
     !values["password-file"] ||

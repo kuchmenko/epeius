@@ -1456,10 +1456,23 @@ console.log(args[0] === 'wallet' ? readFileSync(${JSON.stringify(accountPath)}, 
     expect(slowPreview.code).toBe(0);
     expect(slowPreview.out).toContain('"status":"PREPARATION_STATUS_READY"');
     expect(slowPreview.out).toContain('"sent":false');
+    const requestCount = requests.length;
+    const missingResumeSlippage = await run([
+      "execute",
+      "--preparation-id",
+      "p-preview",
+    ]);
+    expect(missingResumeSlippage.code).toBe(1);
+    expect(missingResumeSlippage.err).toContain(
+      "--slippage-bps is required with --preparation-id",
+    );
+    expect(requests).toHaveLength(requestCount);
     const existingPreview = await run([
       "execute",
       "--preparation-id",
       "p-preview",
+      "--slippage-bps",
+      "50",
     ]);
     expect(existingPreview.code).toBe(1);
     expect(existingPreview.out).toBe('{"sent":false,"outcome":"canceled"}\n');
