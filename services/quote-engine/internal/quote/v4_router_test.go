@@ -103,6 +103,25 @@ func TestUniswapV4PreparationReturnsExactPermit2PermissionBeforeSimulation(t *te
 	if reused := prepare(t, configuredHandler(h), historyRequest); reused.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || simulations != 0 {
 		t.Fatal("second allowance observation erased first approval history")
 	}
+
+	permissionAmount = 0
+	stored := h.Store.preparations[first.PreparationId]
+	stored.expires = time.Now().Add(20 * time.Millisecond)
+	h.Store.preparations[first.PreparationId] = stored
+	chain := h.Chains["base"]
+	expiringReader := chain.Client.(executionFake)
+	canonicalChecked := false
+	expiringReader.canonical = func(context.Context, rpc.Snapshot) error {
+		canonicalChecked = true
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	}
+	chain.Client = expiringReader
+	h.Chains["base"] = chain
+	expired := prepare(t, h, &quotev1.PrepareExecutionRequest{PreparationId: first.PreparationId})
+	if !canonicalChecked || expired.Status != quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED || expired.OnChainPermission != nil {
+		t.Fatal("permission returned after preparation expired during canonical check")
+	}
 }
 
 func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
@@ -112,14 +131,18 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 	permit2 := common.HexToAddress(wallet)
 	routerAddress := common.HexToAddress(router)
 	pool := uniswapv4.Pool{Currency0: tokenA, Currency1: tokenB, FeePips: 500, TickSpacing: 10, Hooks: common.Address{}.Hex()}
-	for _, failure := range []string{"none", "router pool manager", "router Permit2"} {
+	routerCode := append([]byte{0x60}, permit2.Bytes()...)
+	for _, failure := range []string{"none", "router pool manager", "router code hash"} {
 		t.Run(failure, func(t *testing.T) {
 			reader := codeFake{code: func(_ context.Context, target common.Address, hash common.Hash) ([]byte, error) {
 				if hash != common.HexToHash(blockHash) {
 					t.Fatal("code check was not pinned")
 				}
-				if target == routerAddress && failure != "router Permit2" {
-					return append([]byte{0x60}, permit2.Bytes()...), nil
+				if target == routerAddress {
+					if failure == "router code hash" {
+						return append([]byte{0x61}, permit2.Bytes()...), nil
+					}
+					return routerCode, nil
 				}
 				return []byte{0x60}, nil
 			}, readerFake: readerFake{call: func(_ context.Context, target common.Address, data []byte, hash common.Hash) ([]byte, error) {
@@ -132,7 +155,7 @@ func TestUniswapV4DeploymentRequiresRouterLinks(t *testing.T) {
 				return poolResponse(poolManager), nil
 			}}}
 			deployment := config.Deployment{Kind: "uniswap-v4", Quoter: quoter.Hex(), Router: routerAddress.Hex()}
-			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), Pools: []uniswapv4.Pool{pool}}
+			options := uniswapv4.Options{PoolManager: poolManager.Hex(), StateView: stateView.Hex(), Permit2: permit2.Hex(), RouterCodeHash: crypto.Keccak256Hash(routerCode).Hex(), Pools: []uniswapv4.Pool{pool}}
 			err := (v4Quoter{reader: reader, id: "v4", deployment: deployment, options: options}).Verify(context.Background(), common.HexToHash(blockHash))
 			if failure == "none" && err != nil || failure != "none" && err == nil {
 				t.Fatalf("failure=%s error=%v", failure, err)

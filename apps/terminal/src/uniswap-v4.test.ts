@@ -32,6 +32,8 @@ const rawDeployment = {
     pool_manager: "0x3333333333333333333333333333333333333333",
     state_view: "0x4444444444444444444444444444444444444444",
     permit2,
+    router_code_hash:
+      "0x27713951fb0660a1422b710122022d90723d883dc7b72949be79cb2957d234e0",
     pools: [
       {
         currency0: weth,

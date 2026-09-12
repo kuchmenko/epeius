@@ -180,6 +180,9 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 			if err := reader.Canonical(ctx, snapshot); err != nil {
 				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "The permission check block could not be confirmed; request a fresh quote.")
 			}
+			if !time.Now().Before(p.expires) {
+				return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "Quote or preparation expired; request a fresh quote.")
+			}
 			response.SimulationBlock = &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash}
 			p.approval = true
 			h.Store.savePreparation(p)

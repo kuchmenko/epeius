@@ -160,6 +160,7 @@ export function uniswapV4(raw: {
         pool_manager?: string;
         state_view?: string;
         permit2?: string;
+        router_code_hash?: string;
         pools?: Array<{
           currency0?: string;
           currency1?: string;
@@ -175,10 +176,15 @@ export function uniswapV4(raw: {
     !options ||
     typeof options !== "object" ||
     Array.isArray(options) ||
-    Object.keys(options).length !== 4 ||
-    !["pool_manager", "state_view", "permit2", "pools"].every((field) =>
-      Object.hasOwn(options, field),
-    )
+    Object.keys(options).length !== 5 ||
+    ![
+      "pool_manager",
+      "state_view",
+      "permit2",
+      "router_code_hash",
+      "pools",
+    ].every((field) => Object.hasOwn(options, field)) ||
+    !/^(?:0x)?[0-9a-f]{64}$/i.test(options.router_code_hash ?? "")
   )
     throw new Error("Local execution deployment is invalid.");
   address(raw.quoter);

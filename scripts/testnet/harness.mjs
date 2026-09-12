@@ -1267,6 +1267,7 @@ export async function run(o) {
         `pool_manager = "${uniV4.pool_manager}"`,
         `state_view = "${uniV4.state_view}"`,
         `permit2 = "${uniV4.permit2}"`,
+        `router_code_hash = "${manifest.uniswapV4CodeHashes.router}"`,
         "",
         `[[chains.${chain.key}.deployments.uniswap-v4.options.pools]]`,
         `currency0 = "${manifest.v4Fixture.token0}"`,

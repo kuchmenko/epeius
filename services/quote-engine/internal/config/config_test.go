@@ -258,6 +258,7 @@ router = "0x6666666666666666666666666666666666666666"
 pool_manager = "0x3333333333333333333333333333333333333333"
 state_view = "0x5555555555555555555555555555555555555555"
 permit2 = "0x7777777777777777777777777777777777777777"
+router_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 [[chains.test-net.deployments.v4.options.pools]]
 currency0 = "0x1111111111111111111111111111111111111111"
 currency1 = "0x2222222222222222222222222222222222222222"
@@ -272,6 +273,7 @@ hooks = "0x0000000000000000000000000000000000000000"
 	for _, changed := range []string{
 		strings.Replace(text, "[chains.test-net.deployments.v4.options]\n", "", 1),
 		strings.Replace(text, "permit2 = \"0x7777777777777777777777777777777777777777\"", "permit2 = \"0x7777777777777777777777777777777777777777\"\nunknown = true", 1),
+		strings.Replace(text, "router_code_hash = \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", "router_code_hash = \"0xaaaa\"", 1),
 		strings.Replace(text, "[chains.test-net.deployments.v4.options]", "pool_manager = \"0x3333333333333333333333333333333333333333\"\n[chains.test-net.deployments.v4.options]", 1),
 	} {
 		if _, err := loadText(t, changed); err == nil {

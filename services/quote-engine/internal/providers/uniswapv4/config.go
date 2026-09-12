@@ -8,10 +8,11 @@ import (
 )
 
 type Options struct {
-	PoolManager string
-	StateView   string
-	Permit2     string
-	Pools       []Pool
+	PoolManager    string
+	StateView      string
+	Permit2        string
+	RouterCodeHash string
+	Pools          []Pool
 }
 
 type Pool struct {
@@ -23,8 +24,8 @@ type Pool struct {
 }
 
 func ParseOptions(raw map[string]any) (Options, error) {
-	if len(raw) != 4 {
-		return Options{}, errors.New("Uniswap V4 options must contain only pool_manager, state_view, permit2, and pools")
+	if len(raw) != 5 {
+		return Options{}, errors.New("Uniswap V4 options must contain only pool_manager, state_view, permit2, router_code_hash, and pools")
 	}
 	result := Options{}
 	for name, target := range map[string]*string{
@@ -38,6 +39,11 @@ func ParseOptions(raw map[string]any) (Options, error) {
 		}
 		*target = common.HexToAddress(value).Hex()
 	}
+	routerCodeHash, ok := raw["router_code_hash"].(string)
+	if !ok || !common.IsHexHash(routerCodeHash) {
+		return Options{}, errors.New("Uniswap V4 router_code_hash must be a 32-byte hash")
+	}
+	result.RouterCodeHash = common.HexToHash(routerCodeHash).Hex()
 	values, ok := raw["pools"].([]any)
 	if !ok || len(values) == 0 {
 		return Options{}, errors.New("Uniswap V4 pools must be a non-empty array")

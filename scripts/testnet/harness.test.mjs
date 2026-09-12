@@ -424,6 +424,7 @@ test("V4 seed validates existing pool before estimating approvals", async () => 
           ).toString(16),
         );
       else if (selector === toFunctionSelector("getSlot0(bytes32)")) {
+        assert.equal(to.toLowerCase(), uniV4.state_view.toLowerCase());
         poolChecked = true;
         result = encodeFunctionResult({
           abi: uniswapV4StateViewAbi,

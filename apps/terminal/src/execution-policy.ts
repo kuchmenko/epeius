@@ -170,6 +170,10 @@ export function validatePreparation(
       "Route is not allowed by local token and deployment config.",
     );
   const terms = implementation.plan(p, trusted.tokens);
+  if (!approval && permission)
+    throw new Error(
+      "READY preparation must not contain an approval permission.",
+    );
   const quoted = uint256Decimal(terms.quotedOutput, "Aggregate output");
   if (quoted <= 0n) throw new Error("Route quoted output must be positive.");
   if (minimum !== (quoted * BigInt(10000 - slippageBps)) / 10000n)

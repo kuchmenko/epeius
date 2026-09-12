@@ -1,7 +1,6 @@
 package quote
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
@@ -139,10 +139,11 @@ func (q v4Quoter) Verify(ctx context.Context, hash common.Hash) error {
 			return errors.New("Uniswap V4 deployment verification failed")
 		}
 	}
-	// Universal Router keeps Permit2 as an internal immutable, so there is no
-	// getter. Require the configured address in its pinned runtime bytecode.
+	// The Universal Router exposes PoolManager but not its internal immutable
+	// Permit2 address. Pin the complete deployed runtime instead of accepting an
+	// unrelated contract that happens to contain the configured address.
 	// https://github.com/Uniswap/universal-router/blob/3663f6db6e2fe121753cd2d899699c2dc75dca86/contracts/modules/PaymentsImmutables.sol
-	if !bytes.Contains(routerCode, common.HexToAddress(q.options.Permit2).Bytes()) {
+	if crypto.Keccak256Hash(routerCode) != common.HexToHash(q.options.RouterCodeHash) {
 		return errors.New("Uniswap V4 deployment verification failed")
 	}
 	return nil
