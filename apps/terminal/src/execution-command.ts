@@ -103,11 +103,12 @@ export async function executionCommand(
   if (
     !values.keystore ||
     !values["password-file"] ||
-    !values["quote-id"] ||
+    (!values["quote-id"] && !values["preparation-id"]) ||
+    (!!values["quote-id"] && !!values["preparation-id"]) ||
     !!values["route-id"] === !!values.allocations
   )
     throw new Error(
-      "Provide --keystore, --password-file, --quote-id and either --route-id or --allocations.",
+      "Provide --keystore, --password-file, either --quote-id or --preparation-id, and either --route-id or --allocations.",
     );
   const allocations = values.allocations
     ? parseAllocations(values.allocations)
