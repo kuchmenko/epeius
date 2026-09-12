@@ -40,9 +40,12 @@ const reviewedRouterPermit2 = new Map([
     "0x000000000022d473030f116ddee9f6b43ac78ba3",
   ],
 ]);
-const address = (value?: string) => {
+const address = (value?: string, allowZero = false) => {
   const normalized = `0x${value?.replace(/^0x/i, "") ?? ""}`;
-  if (!isAddress(normalized, { strict: false }))
+  if (
+    !isAddress(normalized, { strict: false }) ||
+    (!allowZero && /^0x0{40}$/.test(normalized))
+  )
     throw new Error("Local execution deployment is invalid.");
   return normalized.toLowerCase();
 };
@@ -224,7 +227,7 @@ export function uniswapV4(raw: {
         currency1: address(pool.currency1),
         feePips: pool.fee_pips ?? -1,
         tickSpacing: pool.tick_spacing ?? 0,
-        hooks: address(pool.hooks),
+        hooks: address(pool.hooks, true),
       };
     }),
   };

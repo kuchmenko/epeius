@@ -239,6 +239,26 @@ test("V4 config rejects missing, unknown, misplaced, and inapplicable provider o
       },
     });
   expect(config(rawDeployment)).not.toThrow();
+  const zero = "0x0000000000000000000000000000000000000000";
+  for (const field of ["quoter", "router"])
+    expect(config({ ...rawDeployment, [field]: zero })).toThrow();
+  for (const field of ["pool_manager", "state_view"])
+    expect(
+      config({
+        ...rawDeployment,
+        options: { ...rawDeployment.options, [field]: zero },
+      }),
+    ).toThrow();
+  for (const field of ["currency0", "currency1"])
+    expect(
+      config({
+        ...rawDeployment,
+        options: {
+          ...rawDeployment.options,
+          pools: [{ ...rawDeployment.options.pools[0], [field]: zero }],
+        },
+      }),
+    ).toThrow();
   expect(
     config({
       ...rawDeployment,
