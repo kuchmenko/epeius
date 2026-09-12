@@ -21,13 +21,27 @@ import (
 var balancerVaultABI = contractabi.BalancerVault
 var balancerPoolABI = contractabi.BalancerPool
 
+// queryBatchSwap requires FundManagement addresses even with external balances;
+// this nonzero placeholder cannot authorize or receive an eth_call-only quote.
+// https://github.com/balancer/balancer-v2-monorepo/blob/master/pkg/interfaces/contracts/vault/IVault.sol
 var balancerQuerySender = common.HexToAddress("0x0000000000000000000000000000000000000001")
+
+// Balancer V2 defines GIVEN_IN as 0 and its three pool specializations as 0-2.
+// https://github.com/balancer/balancer-v2-monorepo/blob/master/pkg/interfaces/contracts/vault/IVault.sol
+const (
+	balancerGivenIn                uint8 = 0
+	balancerLastPoolSpecialization uint8 = 2
+)
+
+// Dated fork and Tenderly evidence in epeius-development-log keeps this above
+// the largest measured estimate without retaining the old 1.5M cap.
+const balancerSwapGasLimit = "250000"
 
 type balancerV2Quoter struct {
 	reader     Reader
 	id         string
 	options    balancer.Options
-	poolErrors map[string]string
+	poolErrors map[string]bool
 }
 
 type balancerBatchSwapStep struct {
@@ -64,7 +78,7 @@ func (q balancerV2Quoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 		id := q.id + ":" + pool
 		return QuoteCandidate{ID: id, Quote: func(ctx context.Context) (*quotev1.RouteQuote, error) {
 			start := time.Now()
-			if q.poolErrors[pool] != "" {
+			if q.poolErrors[pool] {
 				return nil, errors.New("Balancer V2 pool verification failed")
 			}
 			output, eligible, err := quoteBalancerPool(ctx, q.reader, common.HexToAddress(q.options.Vault), common.HexToHash(pool), common.HexToAddress(r.TokenIn), common.HexToAddress(r.TokenOut), amount, common.HexToHash(block.Hash))
@@ -84,24 +98,6 @@ func (q balancerV2Quoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 	}
 }
 
-func (q balancerV2Quoter) Requote(ctx context.Context, route *quotev1.RouteQuote, amount *big.Int, block *quotev1.BlockContext) (*quotev1.RouteQuote, error) {
-	if !validBalancerRoute(route, q.id, q.options) || q.poolErrors[route.Legs[0].Pool] != "" {
-		return nil, errors.New("Balancer V2 route is invalid")
-	}
-	start := time.Now()
-	leg := route.Legs[0]
-	output, eligible, err := quoteBalancerPool(ctx, q.reader, common.HexToAddress(q.options.Vault), common.HexToHash(leg.Pool), common.HexToAddress(leg.TokenIn), common.HexToAddress(leg.TokenOut), amount, common.HexToHash(block.Hash))
-	if err != nil || !eligible {
-		return nil, errors.New("Balancer V2 pool could not be quoted")
-	}
-	result := proto.CloneOf(route)
-	result.AmountOutAtomic = output.String()
-	result.Block = proto.CloneOf(block)
-	result.LatencyMs = uint32(time.Since(start).Milliseconds())
-	result.NetworkCostOutAtomic, result.EffectiveOutAtomic = nil, nil
-	return result, nil
-}
-
 func (q balancerV2Quoter) Verify(ctx context.Context, hash common.Hash) error {
 	reader, ok := q.reader.(codeReader)
 	if !ok {
@@ -115,7 +111,7 @@ func (q balancerV2Quoter) Verify(ctx context.Context, hash common.Hash) error {
 	valid := 0
 	for _, value := range q.options.Pools {
 		if err := verifyBalancerPool(ctx, reader, vault, common.HexToHash(value), hash); err != nil {
-			q.poolErrors[value] = "Balancer V2 pool verification failed"
+			q.poolErrors[value] = true
 			continue
 		}
 		valid++
@@ -132,7 +128,7 @@ func quoteBalancerPool(ctx context.Context, reader Reader, vault common.Address,
 	if err != nil {
 		return nil, false, errors.New("Balancer V2 pool tokens unavailable")
 	}
-	poolAddress := common.BytesToAddress(poolID[:20])
+	poolAddress := balancerPoolAddress(poolID)
 	hasIn, hasOut := false, false
 	for _, token := range tokens {
 		hasIn = hasIn || token == tokenIn
@@ -141,7 +137,7 @@ func quoteBalancerPool(ctx context.Context, reader Reader, vault common.Address,
 	if !hasIn || !hasOut || tokenIn == poolAddress || tokenOut == poolAddress {
 		return nil, false, nil
 	}
-	data, err := balancerVaultABI.Pack("queryBatchSwap", uint8(0), []balancerBatchSwapStep{{PoolID: poolID, AssetInIndex: big.NewInt(0), AssetOutIndex: big.NewInt(1), Amount: amount, UserData: []byte{}}}, []common.Address{tokenIn, tokenOut}, balancerFunds{Sender: balancerQuerySender, Recipient: balancerQuerySender})
+	data, err := balancerVaultABI.Pack("queryBatchSwap", balancerGivenIn, []balancerBatchSwapStep{{PoolID: poolID, AssetInIndex: big.NewInt(0), AssetOutIndex: big.NewInt(1), Amount: amount, UserData: []byte{}}}, []common.Address{tokenIn, tokenOut}, balancerFunds{Sender: balancerQuerySender, Recipient: balancerQuerySender})
 	if err != nil {
 		return nil, false, errors.New("Balancer V2 quote encoding failed")
 	}
@@ -201,7 +197,7 @@ func verifyBalancerPool(ctx context.Context, reader codeReader, vault common.Add
 	}
 	pool, ok := values[0].(common.Address)
 	specialization, specializationOK := values[1].(uint8)
-	if !ok || !specializationOK || specialization > 2 || pool == (common.Address{}) || pool != common.BytesToAddress(poolID[:20]) {
+	if !ok || !specializationOK || specialization > balancerLastPoolSpecialization || pool == (common.Address{}) || pool != balancerPoolAddress(poolID) {
 		return errors.New("pool address mismatch")
 	}
 	code, err := reader.Code(ctx, pool, hash)
@@ -236,7 +232,7 @@ func validBalancerRoute(route *quotev1.RouteQuote, id string, options balancer.O
 	for _, pool := range options.Pools {
 		if leg.Pool == pool {
 			poolID := common.HexToHash(pool)
-			poolAddress := common.BytesToAddress(poolID[:20])
+			poolAddress := balancerPoolAddress(poolID)
 			return common.HexToAddress(leg.TokenIn) != poolAddress && common.HexToAddress(leg.TokenOut) != poolAddress
 		}
 	}
@@ -267,12 +263,12 @@ func (s balancerV2Preparation) Build(p *quotev1.PrepareExecutionResponse) (execu
 	}
 	deadline, _ := strconv.ParseUint(p.DeadlineUnix, 10, 64)
 	leg := p.Route.Legs[0]
-	data, err := balancerVaultABI.Pack("swap", balancerSingleSwap{PoolID: common.HexToHash(leg.Pool), AssetIn: common.HexToAddress(leg.TokenIn), AssetOut: common.HexToAddress(leg.TokenOut), Amount: amount, UserData: []byte{}}, balancerFunds{Sender: common.HexToAddress(p.Recipient), Recipient: common.HexToAddress(p.Recipient)}, minimum, new(big.Int).SetUint64(deadline))
+	data, err := balancerVaultABI.Pack("swap", balancerSingleSwap{PoolID: common.HexToHash(leg.Pool), Kind: balancerGivenIn, AssetIn: common.HexToAddress(leg.TokenIn), AssetOut: common.HexToAddress(leg.TokenOut), Amount: amount, UserData: []byte{}}, balancerFunds{Sender: common.HexToAddress(p.Recipient), Recipient: common.HexToAddress(p.Recipient)}, minimum, new(big.Int).SetUint64(deadline))
 	if err != nil {
 		return executionPlan{}, "unsupported route"
 	}
 	vault := common.HexToAddress(s.options.Vault).Hex()
-	tx := &quotev1.UnsignedTransaction{ChainId: s.chainID, To: vault, From: p.Recipient, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "250000"}
+	tx := &quotev1.UnsignedTransaction{ChainId: s.chainID, To: vault, From: p.Recipient, Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: balancerSwapGasLimit}
 	checks := SimulationChecks{Input: BalanceProbe{leg.TokenIn, tx.From}, Output: BalanceProbe{leg.TokenOut, tx.From}}
 	verify := func(ctx context.Context, reader Reader, hash common.Hash) string {
 		code, ok := reader.(codeReader)
@@ -294,4 +290,10 @@ func (s balancerV2Preparation) Build(p *quotev1.PrepareExecutionResponse) (execu
 		return ""
 	}
 	return executionPlan{transaction: tx, spender: vault, checks: checks, verify: verify}, ""
+}
+
+// Balancer embeds the pool contract address in the first 20 bytes of poolId.
+// https://github.com/balancer/balancer-v2-monorepo/blob/master/pkg/vault/contracts/PoolRegistry.sol
+func balancerPoolAddress(poolID common.Hash) common.Address {
+	return common.BytesToAddress(poolID[:20])
 }

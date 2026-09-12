@@ -7,6 +7,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// A Balancer pool ID is the 20-byte pool address, 2-byte specialization, and
+// 10-byte nonce. All 32 bytes identify the registered pool.
+// https://github.com/balancer/balancer-v2-monorepo/blob/master/pkg/vault/contracts/PoolRegistry.sol
 var poolID = regexp.MustCompile(`^0x[0-9a-f]{64}$`)
 
 type Options struct {

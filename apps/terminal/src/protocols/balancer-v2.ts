@@ -12,6 +12,10 @@ export type BalancerV2Deployment = {
 export const isBalancerPoolId = (value: unknown): value is Hex =>
   typeof value === "string" && /^0x[0-9a-f]{64}$/.test(value);
 
+// Balancer V2 IVault.SwapKind defines GIVEN_IN as 0.
+// https://github.com/balancer/balancer-v2-monorepo/blob/master/pkg/interfaces/contracts/vault/IVault.sol
+const balancerGivenIn = 0;
+
 export function balancerData(p: PrepareExecutionResponse) {
   if (p.route?.legs.length !== 1) throw new Error("Invalid route terms.");
   const leg = p.route.legs[0];
@@ -21,7 +25,7 @@ export function balancerData(p: PrepareExecutionResponse) {
     args: [
       {
         poolId: leg.pool as Hex,
-        kind: 0,
+        kind: balancerGivenIn,
         assetIn: leg.tokenIn as Address,
         assetOut: leg.tokenOut as Address,
         amount: uint256Decimal(p.amountInAtomic, "Input amount"),
@@ -89,6 +93,8 @@ export function balancer(raw: {
         throw new Error(
           "Route is not allowed by local token and deployment config.",
         );
+      // Balancer embeds the pool contract address in poolId's first 20 bytes.
+      // https://github.com/balancer/balancer-v2-monorepo/blob/master/pkg/vault/contracts/PoolRegistry.sol
       const poolAddress = `0x${leg.pool.slice(2, 42)}`;
       if (
         leg.tokenIn.toLowerCase() === poolAddress ||

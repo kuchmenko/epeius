@@ -226,10 +226,10 @@ pools = ["` + pool + `"]
 		}
 	}
 	for _, field := range []string{
-		`factory = "0x1111111111111111111111111111111111111111"`,
-		`quoter = "0x2222222222222222222222222222222222222222"`,
-		`router = "0x3333333333333333333333333333333333333333"`,
-		"fees = [500]",
+		`factory = ""`,
+		`quoter = ""`,
+		`router = ""`,
+		"fees = []",
 	} {
 		changed := strings.Replace(text, "kind = \"balancer-v2\"", "kind = \"balancer-v2\"\n"+field, 1)
 		if _, err := loadText(t, changed); err == nil {

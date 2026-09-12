@@ -43,6 +43,10 @@ Preparation encodes one `Vault.swap` with the same pool ID, asset order, exact i
 
 The terminal independently checks the configured deployment and full pool ID, rejects BPT and selector-bearing routes, re-encodes the complete tuple, and requires exact target, value, and calldata equality before handing one transaction to Cast. Simulation and receipt checks prove exact input consumption and minimum output; Vault balances are persistent pool custody, not router residue.
 
+## Account-dependent behavior
+
+Informational quotes take no wallet address. Epeius supplies a fixed nonzero `FundManagement` address required by `queryBatchSwap`, uses external balances, and performs the quote as a pinned read-only call. Preparation does depend on selected signer: signer must hold enough input, approve configured Vault, remain both sender and recipient, and pass simulation before terminal consent.
+
 ## Limitations
 
 Only direct, single-pool, exact-input ERC-20 swaps are supported. Native assets, internal balances, BPT swaps, relayers, custom user data, batch or multi-pool routes, SOR, transfer-tax tokens, and rebasing tokens are unsupported. The checked-in configuration keeps execution disabled.
@@ -52,8 +56,8 @@ Only direct, single-pool, exact-input ERC-20 swaps are supported. Native assets,
 ```bash
 bun run check
 bun run check:generated
-ETHEREUM_ARCHIVE_RPC_URL="$ETHEREUM_RPC_URL" go test ./services/quote-engine/internal/quote -run '^TestBalancerHistoricalArchiveFixtures$' -count=1
-BALANCER_FORK_E2E=1 go test -race ./services/quote-engine/internal/quote -run '^TestBalancerForkExecutionEndToEnd$' -count=1
+ETHEREUM_ARCHIVE_RPC_URL="$ETHEREUM_RPC_URL" go -C services/quote-engine test ./internal/quote -run '^TestBalancerHistoricalArchiveFixtures$' -count=1
+BALANCER_FORK_E2E=1 go -C services/quote-engine test -race ./internal/quote -run '^TestBalancerForkExecutionEndToEnd$' -count=1
 ```
 
 The archive and fork tests are optional and require an archive-capable Ethereum RPC. The fork test uses only resettable local state and never broadcasts to Ethereum. Passing mock, fork, or simulator checks is not production execution evidence.

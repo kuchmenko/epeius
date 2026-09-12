@@ -44,7 +44,7 @@ var providerRegistrations = map[string]providerRegistration{
 		if !ok {
 			return providerComponents{}
 		}
-		provider := balancerV2Quoter{reader: chain.Client, id: id, options: options, poolErrors: map[string]string{}}
+		provider := balancerV2Quoter{reader: chain.Client, id: id, options: options, poolErrors: map[string]bool{}}
 		return providerComponents{
 			quoter: provider, verifier: provider,
 			preparer: balancerV2Preparation{id: id, chainID: chain.ChainID, options: options},

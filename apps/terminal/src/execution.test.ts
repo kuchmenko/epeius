@@ -736,6 +736,19 @@ test("Balancer binds full pool ID and matches independent Vault.swap calldata", 
       balancer: { kind: "balancer-v2", options: { vault, pools: [poolId] } },
     },
   });
+  for (const field of ["factory", "quoter", "router", "fees"] as const) {
+    const deployment: Record<string, unknown> = {
+      kind: "balancer-v2",
+      options: { vault, pools: [poolId] },
+      [field]: field === "fees" ? [] : "",
+    };
+    expect(() =>
+      configureExecution({
+        tokens: [tokenIn, tokenOut],
+        deployments: { balancer: deployment },
+      }),
+    ).toThrow("Local execution deployment is invalid.");
+  }
   const plan = validatePreparation(p, sender, "1", 50, local, 1699999999);
   expect(plan.spender).toBe(vault);
   expect(plan.routeDetails).toEqual([

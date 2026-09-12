@@ -183,12 +183,12 @@ func TestBalancerFailedPoolDoesNotDisableHealthyPool(t *testing.T) {
 		reader:     reader,
 		id:         "balancer",
 		options:    balancer.Options{Vault: balancerVault, Pools: []string{weightedPool, stablePool}},
-		poolErrors: map[string]string{},
+		poolErrors: map[string]bool{},
 	}
 	if err := quoter.Verify(context.Background(), common.HexToHash(blockHash)); err != nil {
 		t.Fatal("healthy pool did not keep deployment available", err)
 	}
-	if quoter.poolErrors[stablePool] != "" || quoter.poolErrors[weightedPool] == "" {
+	if quoter.poolErrors[stablePool] || !quoter.poolErrors[weightedPool] {
 		t.Fatal("pool verification results were not isolated", quoter.poolErrors)
 	}
 	next := quoter.Candidates(&quotev1.QuoteRequest{TokenIn: dai, TokenOut: usdc, AmountInAtomic: "100"}, &quotev1.BlockContext{Hash: blockHash})

@@ -73,8 +73,8 @@ export function fixedExecutor(
       "Local executor needs an address and distinct Uniswap/Pancake deployments.",
     );
   const venues = new Map<string, V3Deployment>([
-    [raw.uniswapDeployment, { ...uni, fees: uni.fees }],
-    [raw.pancakeDeployment, { ...pan, fees: pan.fees }],
+    [raw.uniswapDeployment, { ...uni, router: uni.router, fees: uni.fees }],
+    [raw.pancakeDeployment, { ...pan, router: pan.router, fees: pan.fees }],
   ]);
   return {
     plan(p: PrepareExecutionResponse, tokens: string[]): SwapTerms {

@@ -60,6 +60,9 @@ type Deployment struct {
 	Fees           []uint32        `toml:"fees"`
 	Options        *map[string]any `toml:"options"`
 	ProviderConfig any             `toml:"-"`
+	factorySet     bool
+	quoterSet      bool
+	routerSet      bool
 }
 
 var chainKey = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -75,6 +78,27 @@ func Load(path string, validateProtocols func(Chain) error) (Config, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil {
 		return Config{}, errors.New("could not parse config file")
+	}
+	// String zero values do not preserve whether an inapplicable field was
+	// omitted or explicitly empty. Keep that distinction for provider checks.
+	var presence struct {
+		Chains map[string]struct {
+			Deployments map[string]map[string]any `toml:"deployments"`
+		} `toml:"chains"`
+	}
+	if err := toml.Unmarshal(data, &presence); err != nil {
+		return Config{}, errors.New("could not parse config file")
+	}
+	for chainID, rawChain := range presence.Chains {
+		chain := result.Chains[chainID]
+		for id, fields := range rawChain.Deployments {
+			deployment := chain.Deployments[id]
+			_, deployment.factorySet = fields["factory"]
+			_, deployment.quoterSet = fields["quoter"]
+			_, deployment.routerSet = fields["router"]
+			chain.Deployments[id] = deployment
+		}
+		result.Chains[chainID] = chain
 	}
 	result.normalizeAddresses()
 	if err := result.validate(); err != nil {
