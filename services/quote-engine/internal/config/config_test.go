@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 )
 
 const validConfig = `[terminal]
@@ -136,7 +138,6 @@ fees = [500, 2500]
 		{"decimals = 6", "decimals = 256"},
 		{"fees = [500, 2500]", "fees = [500, 500]"},
 		{"fees = [500, 2500]", "fees = [1000000]"},
-		{"pancake-v3", "slipstream"},
 		{"0x5555555555555555555555555555555555555555", "0x0000000000000000000000000000000000000000"},
 		{"0x2222222222222222222222222222222222222222", "0x1111111111111111111111111111111111111111"},
 		{"fees = [500, 2500]", "fees = [500, 2500]\nnpm = \"private-value\""},
@@ -145,18 +146,26 @@ fees = [500, 2500]
 			t.Fatalf("accepted %s", test.new)
 		}
 	}
+	if _, err := loadText(t, text+"[chains.test-net.deployments.pancake.options]\n"); err == nil {
+		t.Fatal("accepted explicit empty provider options for fee deployment")
+	}
+	if _, err := loadText(t, strings.Replace(text, "pancake-v3", "unknown", 1)); err == nil || err.Error() != "unsupported provider: unknown" {
+		t.Fatalf("unknown provider error=%v", err)
+	}
 }
 
-func TestSlipstreamInitialConfigUsesOnlySignedTickSpacings(t *testing.T) {
+func TestSlipstreamConfigUsesOnlySignedTickSpacings(t *testing.T) {
 	text := validConfig + `[chains.base.deployments.slipstream]
 kind = "aerodrome-slipstream"
-factory = "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
-quoter = "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0"
-router = "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5"
+factory = "0x1111111111111111111111111111111111111111"
+quoter = "0x2222222222222222222222222222222222222222"
+router = "0x3333333333333333333333333333333333333333"
+[chains.base.deployments.slipstream.options]
 tick_spacings = [-8388608, -1, 1, 100, 8388607]
 `
 	got, err := loadText(t, text)
-	if err != nil || len(got.Chains["base"].Deployments["slipstream"].TickSpacings) != 5 {
+	options, ok := got.Chains["base"].Deployments["slipstream"].ProviderConfig.(slipstream.Options)
+	if err != nil || !ok || len(options.TickSpacings) != 5 {
 		t.Fatalf("Slipstream config rejected: %+v %v", got, err)
 	}
 	for _, replacement := range []string{
@@ -165,17 +174,26 @@ tick_spacings = [-8388608, -1, 1, 100, 8388607]
 		"tick_spacings = [-8388609]",
 		"tick_spacings = [8388608]",
 		"tick_spacings = [100]\nfees = [500]",
+		"tick_spacings = [100]\nunknown = true",
 	} {
 		changed := strings.Replace(text, "tick_spacings = [-8388608, -1, 1, 100, 8388607]", replacement, 1)
 		if _, err := loadText(t, changed); err == nil {
 			t.Fatalf("accepted %s", replacement)
 		}
 	}
-	if _, err := loadText(t, strings.Replace(text, "chain_id = 8453", "chain_id = 8454", 1)); err == nil {
-		t.Fatal("accepted Slipstream Initial outside Base")
+	withoutOptions := strings.Replace(text, "[chains.base.deployments.slipstream.options]\ntick_spacings = [-8388608, -1, 1, 100, 8388607]\n", "", 1)
+	if _, err := loadText(t, withoutOptions); err == nil {
+		t.Fatal("accepted missing Slipstream options")
 	}
-	if _, err := loadText(t, strings.Replace(text, "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0", "0x3d4C22254F86f64B7eC90ab8F7aeC1FBFD271c6C", 1)); err == nil {
-		t.Fatal("accepted mixed Slipstream generation")
+	withEmptyFees := strings.Replace(text, "[chains.base.deployments.slipstream.options]", "fees = []\n[chains.base.deployments.slipstream.options]", 1)
+	if _, err := loadText(t, withEmptyFees); err == nil {
+		t.Fatal("accepted explicit empty Slipstream fees")
+	}
+	if _, err := loadText(t, strings.Replace(text, "chain_id = 8453", "chain_id = 8454", 1)); err != nil {
+		t.Fatal("rejected ABI-compatible Slipstream deployment outside Base")
+	}
+	if _, err := loadText(t, strings.Replace(text, "0x2222222222222222222222222222222222222222", "0x4444444444444444444444444444444444444444", 1)); err != nil {
+		t.Fatal("rejected configured Slipstream address before runtime linkage verification")
 	}
 }
 

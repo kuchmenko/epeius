@@ -53,12 +53,13 @@ type Token struct {
 }
 
 type Deployment struct {
-	Kind         string   `toml:"kind"`
-	Factory      string   `toml:"factory"`
-	Quoter       string   `toml:"quoter"`
-	Router       string   `toml:"router"`
-	Fees         []uint32 `toml:"fees"`
-	TickSpacings []int32  `toml:"tick_spacings"`
+	Kind           string          `toml:"kind"`
+	Factory        string          `toml:"factory"`
+	Quoter         string          `toml:"quoter"`
+	Router         string          `toml:"router"`
+	Fees           []uint32        `toml:"fees"`
+	Options        *map[string]any `toml:"options"`
+	ProviderConfig any             `toml:"-"`
 }
 
 var chainKey = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)

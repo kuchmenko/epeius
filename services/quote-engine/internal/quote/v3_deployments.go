@@ -11,7 +11,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 )
 
-func verifyDeployment(ctx context.Context, reader codeReader, d config.Deployment, hash common.Hash) error {
+func verifyFeeDeploymentLinks(ctx context.Context, reader codeReader, d config.Deployment, hash common.Hash) error {
 	fail := errors.New("deployment code or factory linkage verification failed")
 	for _, value := range []string{d.Factory, d.Quoter, d.Router} {
 		code, err := reader.Code(ctx, common.HexToAddress(value), hash)
@@ -37,9 +37,6 @@ func verifyDeployment(ctx context.Context, reader codeReader, d config.Deploymen
 	}
 	factory := common.HexToAddress(d.Factory)
 	quoterABI, routerABI := contractabi.UniswapPeripheryState, contractabi.UniswapRouter02
-	if d.Kind == "aerodrome-slipstream" {
-		quoterABI, routerABI = contractabi.AerodromeSlipstreamQuoterV2, contractabi.AerodromeSlipstreamRouter
-	}
 	if d.Kind == "pancake-v3" {
 		quoterABI, routerABI = contractabi.PancakeQuoterV2, contractabi.PancakeV3Router
 	}
@@ -67,20 +64,6 @@ func verifyDeployment(ctx context.Context, reader codeReader, d config.Deploymen
 			if err != nil || linked != deployer {
 				return fail
 			}
-		}
-	}
-	if d.Kind == "aerodrome-slipstream" {
-		module, err := getter(d.Factory, contractabi.AerodromeSlipstreamFactory, "swapFeeModule")
-		if err != nil {
-			return fail
-		}
-		code, err := reader.Code(ctx, module, hash)
-		if err != nil || len(code) == 0 {
-			return fail
-		}
-		linked, err := getter(module.Hex(), contractabi.AerodromeSlipstreamFeeModule, "factory")
-		if err != nil || linked != factory {
-			return fail
 		}
 	}
 	return nil

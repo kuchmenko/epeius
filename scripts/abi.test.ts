@@ -112,6 +112,12 @@ test("Slipstream ABIs retain signed spacing and Initial tuple order", () => {
     "int24",
     "uint160",
   ]);
+  expect(quote.outputs.map((output) => output.type)).toEqual([
+    "uint256",
+    "uint160",
+    "uint32",
+    "uint256",
+  ]);
   expect(swap.inputs[0].components?.map((input) => input.type)).toEqual([
     "bytes",
     "address",

@@ -71,7 +71,7 @@ func (q v3Quoter) Verify(ctx context.Context, hash common.Hash) error {
 	if !ok {
 		return errors.New("deployment code unavailable")
 	}
-	return verifyDeployment(ctx, reader, q.deployment, hash)
+	return verifyFeeDeploymentLinks(ctx, reader, q.deployment, hash)
 }
 
 // quotePath quotes an admitted path sequentially at one pinned block. A nil

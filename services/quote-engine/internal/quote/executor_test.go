@@ -148,7 +148,7 @@ func executorFixture(t *testing.T) (Handler, *quotev1.PrepareExecutionRequest, *
 func TestUnavailableSecondQuoterDoesNotQuoteFirstAllocation(t *testing.T) {
 	h, r, _, calls := executorFixture(t)
 	chain := h.Chains["test"]
-	delete(chain.Quoters, "pan")
+	delete(chain.AllocationRequoters, "pan")
 	if _, err := quoteAllocations(context.Background(), chain, h.Store.quotes["q"], r.Allocations); err == nil || *calls != 0 {
 		t.Fatal("unavailable second quoter reached first allocation RPC", err, *calls)
 	}

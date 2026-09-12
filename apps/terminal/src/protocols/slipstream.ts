@@ -3,6 +3,8 @@ import {
   encodeFunctionData,
   encodePacked,
   isAddress,
+  maxInt24,
+  minInt24,
 } from "viem";
 import { aerodromeSlipstreamRouterAbi } from "../../../../generated/abi";
 import type {
@@ -18,6 +20,9 @@ type Deployment = {
   tickSpacings: number[];
 };
 
+const MIN_TICK_SPACING = Number(minInt24);
+const MAX_TICK_SPACING = Number(maxInt24);
+
 export function slipstreamPath(route: RouteQuote) {
   if (
     !route.legs.length ||
@@ -26,17 +31,17 @@ export function slipstreamPath(route: RouteQuote) {
       (leg) =>
         leg.selector.case !== "tickSpacing" ||
         !Number.isInteger(leg.selector.value) ||
-        leg.selector.value < -8388608 ||
-        leg.selector.value > 8388607,
+        leg.selector.value < MIN_TICK_SPACING ||
+        leg.selector.value > MAX_TICK_SPACING,
     )
   )
     throw new Error("Invalid route terms.");
   return encodePacked(
-    [...route.legs.flatMap(() => ["address", "bytes3"] as const), "address"],
+    [...route.legs.flatMap(() => ["address", "int24"] as const), "address"],
     [
       ...route.legs.flatMap((leg) => [
         leg.tokenIn as Address,
-        `0x${((leg.selector.case === "tickSpacing" ? leg.selector.value : 0) & 0xffffff).toString(16).padStart(6, "0")}` as `0x${string}`,
+        leg.selector.case === "tickSpacing" ? leg.selector.value : 0,
       ]),
       route.legs.at(-1)?.tokenOut as Address,
     ],
@@ -66,25 +71,32 @@ export function slipstreamData(p: PrepareExecutionResponse) {
 export function slipstream(raw: {
   router?: string;
   fees?: number[];
-  tick_spacings?: number[];
+  options?: unknown;
 }) {
   const router = `0x${raw.router?.replace(/^0x/i, "") ?? ""}`.toLowerCase();
+  const options = raw.options as Record<string, unknown> | undefined;
+  const tickSpacings = options?.tick_spacings;
   if (
     !isAddress(router, { strict: false }) ||
-    router !== "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5" ||
     raw.fees !== undefined ||
-    !Array.isArray(raw.tick_spacings) ||
-    !raw.tick_spacings.length ||
-    new Set(raw.tick_spacings).size !== raw.tick_spacings.length ||
-    !raw.tick_spacings.every(
-      (v) => Number.isInteger(v) && v >= -8388608 && v <= 8388607,
+    !options ||
+    Object.keys(options).length !== 1 ||
+    !Array.isArray(tickSpacings) ||
+    !tickSpacings.length ||
+    new Set(tickSpacings).size !== tickSpacings.length ||
+    !tickSpacings.every(
+      (v) =>
+        typeof v === "number" &&
+        Number.isInteger(v) &&
+        v >= MIN_TICK_SPACING &&
+        v <= MAX_TICK_SPACING,
     )
   )
     throw new Error("Local execution deployment is invalid.");
   const deployment: Deployment = {
     kind: "aerodrome-slipstream",
     router,
-    tickSpacings: [...raw.tick_spacings],
+    tickSpacings: [...tickSpacings],
   };
   return {
     ...deployment,

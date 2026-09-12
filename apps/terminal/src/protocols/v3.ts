@@ -8,13 +8,16 @@ import { type SwapTerms, uint256Decimal } from "../execution-policy";
 export type V3Deployment = { kind: string; router: string; fees: number[] };
 
 export function v3Deployment(
-  raw: { router?: string; fees?: number[] },
+  raw: { router?: string; fees?: number[]; options?: unknown },
   kind: string,
 ): V3Deployment {
   const router = `0x${raw.router?.replace(/^0x/i, "") ?? ""}`;
   if (
     !isAddress(router, { strict: false }) ||
     !Array.isArray(raw.fees) ||
+    !raw.fees.length ||
+    new Set(raw.fees).size !== raw.fees.length ||
+    raw.options !== undefined ||
     !raw.fees.every(
       (fee) => Number.isInteger(fee) && fee >= 0 && fee < 1_000_000,
     )

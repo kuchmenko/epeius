@@ -28,7 +28,13 @@ type Reader interface {
 // Candidate callbacks return nil without error for a missing route.
 type ProtocolQuoter interface {
 	Candidates(*quotev1.QuoteRequest, *quotev1.BlockContext) func(context.Context) (QuoteCandidate, bool)
+}
+
+type allocationRequoter interface {
 	Requote(context.Context, *quotev1.RouteQuote, *big.Int, *quotev1.BlockContext) (*quotev1.RouteQuote, error)
+}
+
+type deploymentVerifier interface {
 	Verify(context.Context, common.Hash) error
 }
 
@@ -46,15 +52,17 @@ type Handler struct {
 }
 
 type Chain struct {
-	ChainID            string
-	Client             Reader
-	Snapshot           rpc.Snapshot
-	Error              string
-	Config             config.Chain
-	DeploymentErrors   map[string]string
-	Quoters            map[string]ProtocolQuoter
-	Preparers          map[string]PreparationStrategy
-	AllocationPreparer PreparationStrategy
+	ChainID             string
+	Client              Reader
+	Snapshot            rpc.Snapshot
+	Error               string
+	Config              config.Chain
+	DeploymentErrors    map[string]string
+	Quoters             map[string]ProtocolQuoter
+	AllocationRequoters map[string]allocationRequoter
+	DeploymentVerifiers map[string]deploymentVerifier
+	Preparers           map[string]PreparationStrategy
+	AllocationPreparer  PreparationStrategy
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)

@@ -151,7 +151,10 @@ func quoteAllocations(ctx context.Context, chain Chain, saved storedQuote, reque
 		return nil, err
 	}
 	for _, a := range result {
-		quoter := chain.Quoters[a.Route.DeploymentId]
+		quoter := chain.AllocationRequoters[a.Route.DeploymentId]
+		if quoter == nil {
+			return nil, errExecutorRoute
+		}
 		amount, _ := new(big.Int).SetString(a.AmountInAtomic, 10)
 		a.Route, err = quoter.Requote(ctx, a.Route, amount, saved.final.Block)
 		if err != nil {
@@ -186,7 +189,7 @@ func admitAllocations(chain Chain, saved storedQuote, requested []*quotev1.Route
 				break
 			}
 		}
-		if route == nil || chain.Quoters[route.DeploymentId] == nil || chain.DeploymentErrors[route.DeploymentId] != "" || len(route.Legs) < 1 || len(route.Legs) > 2 {
+		if route == nil || chain.AllocationRequoters[route.DeploymentId] == nil || chain.DeploymentErrors[route.DeploymentId] != "" || len(route.Legs) < 1 || len(route.Legs) > 2 {
 			return nil, errExecutorRoute
 		}
 		venue, err := executorVenue(chain.Config, route)

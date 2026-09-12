@@ -1,4 +1,4 @@
-// Package slipstream quotes Aerodrome Slipstream Initial pools.
+// Package slipstream quotes Aerodrome Slipstream pools.
 package slipstream
 
 import (
@@ -10,6 +10,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
+)
+
+const (
+	maxQuoteInputBitLength = 255
+	// TickMath defines these as the exclusive swap limits plus or minus one.
+	// https://github.com/aerodrome-finance/slipstream/blob/main/contracts/core/libraries/TickMath.sol#L8-L16
+	minimumUsableSqrtPriceX96 = "4295128740"
+	maximumUsableSqrtPriceX96 = "1461446703485210103287273052203988822378723970341"
 )
 
 type Caller interface {
@@ -29,7 +37,9 @@ type singleInput struct {
 }
 
 func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big.Int, spacing int32, block common.Hash) (common.Address, *big.Int, error) {
-	if amount.Sign() <= 0 || amount.BitLen() > 255 {
+	// QuoterV2 converts exact-input uint256 to positive int256 before calling the pool.
+	// https://github.com/aerodrome-finance/slipstream/blob/main/contracts/periphery/lens/QuoterV2.sol#L105-L125
+	if amount.Sign() <= 0 || amount.BitLen() > maxQuoteInputBitLength {
 		return common.Address{}, nil, errors.New("quote input exceeds Slipstream signed amount limit")
 	}
 	data, err := contractabi.AerodromeSlipstreamFactory.Pack("getPool", in, out, big.NewInt(int64(spacing)))
@@ -64,9 +74,13 @@ func (p Provider) Quote(ctx context.Context, in, out common.Address, amount *big
 	if output.Sign() <= 0 {
 		return pool, nil, errors.New("quote returned zero output")
 	}
-	limit := "1461446703485210103287273052203988822378723970341"
+	// A zero requested limit makes QuoterV2 choose TickMath's direction-specific
+	// extreme. Reaching it can leave exact input unconsumed because pool swapping
+	// stops when either amount is exhausted or price reaches its limit.
+	// https://github.com/aerodrome-finance/slipstream/blob/main/contracts/core/CLPool.sol#L678-L725
+	limit := maximumUsableSqrtPriceX96
 	if bytes.Compare(in[:], out[:]) < 0 {
-		limit = "4295128740"
+		limit = minimumUsableSqrtPriceX96
 	}
 	if values[1].(*big.Int).String() == limit {
 		return pool, nil, errors.New("quote reached the price limit; full input consumption is not guaranteed")

@@ -2,6 +2,8 @@
 
 Scope: Base chain **8453**, reviewed Initial deployment, read-only Tenderly simulation, and a disposable local Anvil fork. No mainnet transaction was signed or submitted. The local fork transaction hash is not a Base transaction.
 
+This is dated evidence for one configured deployment, not Epeius's current admission limit. Epeius now has no hardcoded Slipstream chain ID or exact-address allowlist. See the reusable [Aerodrome Slipstream provider guide](providers/aerodrome-slipstream.md) for current configuration, startup checks, behavior, and limits.
+
 ## Pinned state and account
 
 - Block: **51180007**, hash `0x4e568ac52344c6b51c267c3b712ff88889d1fe30c60f9187e78b07554e2a392b`.

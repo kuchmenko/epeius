@@ -5,6 +5,39 @@ import { pancake } from "./pancake-v3";
 import { slipstream } from "./slipstream";
 import { uniswap } from "./uniswap-v3";
 
+type RawDeployment = {
+  kind?: string;
+  factory?: string;
+  quoter?: string;
+  router?: string;
+  fees?: number[];
+  options?: unknown;
+};
+
+type ParsedDeployment = TrustedExecution["deployments"][string] & {
+  kind: string;
+  router: string;
+  fees?: number[];
+};
+
+const providerParsers: Record<
+  string,
+  (raw: RawDeployment) => ParsedDeployment
+> = {
+  "uniswap-v3": uniswap,
+  "pancake-v3": pancake,
+  "aerodrome-slipstream": slipstream,
+};
+
+const deploymentFields = new Set([
+  "kind",
+  "factory",
+  "quoter",
+  "router",
+  "fees",
+  "options",
+]);
+
 export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
   tokens,
   settings,
@@ -28,41 +61,22 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
 export function configureExecution(config: {
   tokens: string[];
   chainId?: number;
-  deployments: Record<
-    string,
-    {
-      kind?: string;
-      router?: string;
-      fees?: number[];
-      tick_spacings?: number[];
-    }
-  >;
+  deployments: Record<string, RawDeployment>;
   executor?: {
     address?: string;
     uniswapDeployment?: string;
     pancakeDeployment?: string;
   };
 }): TrustedExecution {
-  const factories = {
-    "uniswap-v3": uniswap,
-    "pancake-v3": pancake,
-    "aerodrome-slipstream": slipstream,
-  };
   const deployments = Object.fromEntries(
     Object.entries(config.deployments).map(([id, raw]) => {
-      if (
-        raw.kind !== "uniswap-v3" &&
-        raw.kind !== "pancake-v3" &&
-        raw.kind !== "aerodrome-slipstream"
-      )
+      if (Object.keys(raw).some((field) => !deploymentFields.has(field)))
         throw new Error("Local execution deployment is invalid.");
-      if (
-        raw.kind === "aerodrome-slipstream"
-          ? config.chainId !== 8453 || raw.fees !== undefined
-          : raw.tick_spacings !== undefined
-      )
-        throw new Error("Local execution deployment is invalid.");
-      return [id, factories[raw.kind](raw)];
+      const provider =
+        typeof raw.kind === "string" ? providerParsers[raw.kind] : undefined;
+      if (!provider)
+        throw new Error(`Unsupported provider: ${raw.kind ?? "missing"}.`);
+      return [id, provider(raw)];
     }),
   );
   return {

@@ -9,6 +9,7 @@ import (
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 )
 
 var erc20ABI = contractabi.ERC20
@@ -16,6 +17,8 @@ var uniRouterABI = contractabi.UniswapRouter02
 var pancakeRouterABI = contractabi.PancakeV3Router
 var slipstreamRouterABI = contractabi.AerodromeSlipstreamRouter
 var uniDeadlineCall = evm.Method(uniRouterABI, "multicall(uint256,bytes[])")
+
+const slipstreamTickSpacingMask uint32 = 1<<24 - 1
 
 func v3Path(route *quotev1.RouteQuote) ([]byte, error) {
 	if len(route.Legs) < 1 || len(route.Legs) > 2 {
@@ -41,10 +44,13 @@ func slipstreamPath(route *quotev1.RouteQuote) ([]byte, error) {
 	var path []byte
 	for i, leg := range route.Legs {
 		selector, ok := leg.Selector.(*quotev1.RouteLeg_TickSpacing)
-		if !ok || selector.TickSpacing < -8388608 || selector.TickSpacing > 8388607 || !validAddress(leg.TokenIn) || !validAddress(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
+		if !ok || selector.TickSpacing < slipstream.MinTickSpacing || selector.TickSpacing > slipstream.MaxTickSpacing || !validAddress(leg.TokenIn) || !validAddress(leg.TokenOut) || i > 0 && !strings.EqualFold(route.Legs[i-1].TokenOut, leg.TokenIn) {
 			return nil, errors.New("invalid path")
 		}
-		value := uint32(selector.TickSpacing) & 0xffffff
+		// Slipstream exact-input paths use address | int24 | address, then repeat
+		// int24 | address for each next hop. Masking preserves int24 two's-complement.
+		// https://github.com/aerodrome-finance/slipstream/blob/main/contracts/periphery/libraries/Path.sol#L10-L50
+		value := uint32(selector.TickSpacing) & slipstreamTickSpacingMask
 		path = append(path, common.HexToAddress(leg.TokenIn).Bytes()...)
 		path = append(path, byte(value>>16), byte(value>>8), byte(value))
 	}

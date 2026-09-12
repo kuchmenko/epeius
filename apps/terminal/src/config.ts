@@ -139,7 +139,7 @@ export async function readSettings(path: string) {
             kind?: string;
             router?: string;
             fees?: number[];
-            tick_spacings?: number[];
+            options?: unknown;
           }
         >;
       }

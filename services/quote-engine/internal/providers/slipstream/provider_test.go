@@ -28,8 +28,8 @@ func TestQuoteUsesSignedSpacingTupleAndPinnedSequentialAmount(t *testing.T) {
 	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	quoter := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	pool := common.HexToAddress("0x3333333333333333333333333333333333333333")
-	in := common.HexToAddress("0x4200000000000000000000000000000000000006")
-	out := common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
+	inputToken := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	outputToken := common.HexToAddress("0x5555555555555555555555555555555555555555")
 	hash := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	amount := big.NewInt(17)
 	calls := 0
@@ -39,7 +39,7 @@ func TestQuoteUsesSignedSpacingTupleAndPinnedSequentialAmount(t *testing.T) {
 		}
 		calls++
 		if calls == 1 {
-			if to != factory || len(data) != 100 || !bytes.Equal(data[4:36], addressWord(in)) || !bytes.Equal(data[36:68], addressWord(out)) || !bytes.Equal(data[68:100], bytes.Repeat([]byte{0xff}, 32)) {
+			if to != factory || len(data) != 100 || !bytes.Equal(data[4:36], addressWord(inputToken)) || !bytes.Equal(data[36:68], addressWord(outputToken)) || !bytes.Equal(data[68:100], bytes.Repeat([]byte{0xff}, 32)) {
 				t.Fatalf("wrong signed pool lookup: %x", data)
 			}
 			return addressWord(pool), nil
@@ -49,7 +49,7 @@ func TestQuoteUsesSignedSpacingTupleAndPinnedSequentialAmount(t *testing.T) {
 		}
 		return quoteWords(big.NewInt(29), big.NewInt(1000)), nil
 	})}
-	gotPool, output, err := p.Quote(context.Background(), in, out, amount, -1, hash)
+	gotPool, output, err := p.Quote(context.Background(), inputToken, outputToken, amount, -1, hash)
 	if err != nil || gotPool != pool || output.Cmp(big.NewInt(29)) != 0 || calls != 2 {
 		t.Fatalf("pool=%s output=%v calls=%d err=%v", gotPool, output, calls, err)
 	}
@@ -58,8 +58,8 @@ func TestQuoteUsesSignedSpacingTupleAndPinnedSequentialAmount(t *testing.T) {
 func TestQuoteDistinguishesMissingPoolProviderFailureAndUnsafeQuote(t *testing.T) {
 	factory := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	quoter := common.HexToAddress("0x2222222222222222222222222222222222222222")
-	in := common.HexToAddress("0x4200000000000000000000000000000000000006")
-	out := common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
+	lowerToken := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	higherToken := common.HexToAddress("0x5555555555555555555555555555555555555555")
 	for _, test := range []struct {
 		name   string
 		amount *big.Int
@@ -80,11 +80,12 @@ func TestQuoteDistinguishesMissingPoolProviderFailureAndUnsafeQuote(t *testing.T
 			if to == factory {
 				return addressWord(common.HexToAddress("0x3333333333333333333333333333333333333333")), nil
 			}
-			return quoteWords(big.NewInt(2), big.NewInt(4295128740)), nil
+			price, _ := new(big.Int).SetString(minimumUsableSqrtPriceX96, 10)
+			return quoteWords(big.NewInt(2), price), nil
 		}, "quote reached the price limit"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			pool, output, err := (Provider{Client: test.call, FactoryAddress: factory, QuoterAddress: quoter}).Quote(context.Background(), in, out, test.amount, 100, common.Hash{})
+			pool, output, err := (Provider{Client: test.call, FactoryAddress: factory, QuoterAddress: quoter}).Quote(context.Background(), lowerToken, higherToken, test.amount, 100, common.Hash{})
 			if test.want == "missing" {
 				if err != nil || pool != (common.Address{}) || output != nil {
 					t.Fatalf("%s %v %v", pool, output, err)
@@ -94,12 +95,22 @@ func TestQuoteDistinguishesMissingPoolProviderFailureAndUnsafeQuote(t *testing.T
 			}
 		})
 	}
+	upperLimit := callerFunc(func(_ context.Context, to common.Address, _ []byte, _ common.Hash) ([]byte, error) {
+		if to == factory {
+			return addressWord(common.HexToAddress("0x3333333333333333333333333333333333333333")), nil
+		}
+		price, _ := new(big.Int).SetString(maximumUsableSqrtPriceX96, 10)
+		return quoteWords(big.NewInt(2), price), nil
+	})
+	if _, _, err := (Provider{Client: upperLimit, FactoryAddress: factory, QuoterAddress: quoter}).Quote(context.Background(), higherToken, lowerToken, big.NewInt(1), 100, common.Hash{}); err == nil || !bytes.Contains([]byte(err.Error()), []byte("quote reached the price limit")) {
+		t.Fatalf("upper-direction limit error=%v", err)
+	}
 	max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(1))
 	called := false
 	_, _, _ = (Provider{Client: callerFunc(func(context.Context, common.Address, []byte, common.Hash) ([]byte, error) {
 		called = true
 		return nil, errors.New("stop")
-	}), FactoryAddress: factory}).Quote(context.Background(), in, out, max, 100, common.Hash{})
+	}), FactoryAddress: factory}).Quote(context.Background(), lowerToken, higherToken, max, 100, common.Hash{})
 	if !called {
 		t.Fatal("2^255-1 was rejected")
 	}

@@ -20,9 +20,13 @@ type slipstreamQuoter struct {
 	id         string
 	deployment config.Deployment
 	tokens     []config.Token
+	options    slipstream.Options
 }
 
 func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.BlockContext) func(context.Context) (QuoteCandidate, bool) {
+	// Epeius policy searches every configured spacing directly and through each
+	// configured intermediate token. Sorting makes route IDs and result order
+	// deterministic; arbitrary-length paths are intentionally not generated.
 	tokens := []common.Address{}
 	for _, token := range q.tokens {
 		a := common.HexToAddress(token.Address)
@@ -31,7 +35,7 @@ func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 		}
 	}
 	sort.Slice(tokens, func(i, j int) bool { return tokens[i].Hex() < tokens[j].Hex() })
-	spacings := append([]int32(nil), q.deployment.TickSpacings...)
+	spacings := append([]int32(nil), q.options.TickSpacings...)
 	sort.Slice(spacings, func(i, j int) bool { return spacings[i] < spacings[j] })
 	type path struct {
 		tokens   []common.Address
@@ -73,6 +77,9 @@ func (q slipstreamQuoter) quote(ctx context.Context, tokens []common.Address, sp
 	out := new(big.Int).Set(amount)
 	legs := []*quotev1.RouteLeg{}
 	for i, s := range spacings {
+		// Slipstream exact-input routing feeds each hop's actual quoted output into
+		// the next hop, matching SwapRouter's forward path execution.
+		// https://github.com/aerodrome-finance/slipstream/blob/main/contracts/periphery/SwapRouter.sol#L124-L160
 		pool, next, err := p.Quote(ctx, tokens[i], tokens[i+1], out, s, hash)
 		if err != nil || next == nil {
 			return nil, nil, err
@@ -82,27 +89,10 @@ func (q slipstreamQuoter) quote(ctx context.Context, tokens []common.Address, sp
 	}
 	return legs, out, nil
 }
-func (q slipstreamQuoter) Requote(ctx context.Context, r *quotev1.RouteQuote, amount *big.Int, b *quotev1.BlockContext) (*quotev1.RouteQuote, error) {
-	tokens := []common.Address{common.HexToAddress(r.Legs[0].TokenIn)}
-	ss := []int32{}
-	for _, l := range r.Legs {
-		tokens = append(tokens, common.HexToAddress(l.TokenOut))
-		ss = append(ss, l.GetTickSpacing())
-	}
-	legs, out, err := q.quote(ctx, tokens, ss, amount, common.HexToHash(b.Hash))
-	if err != nil || out == nil {
-		return nil, errors.New("executor path could not be quoted")
-	}
-	result := proto.CloneOf(r)
-	result.Legs = legs
-	result.AmountOutAtomic = out.String()
-	result.Block = proto.CloneOf(b)
-	return result, nil
-}
 func (q slipstreamQuoter) Verify(ctx context.Context, h common.Hash) error {
 	r, ok := q.reader.(codeReader)
 	if !ok {
 		return errors.New("deployment code unavailable")
 	}
-	return verifyDeployment(ctx, r, q.deployment, h)
+	return verifySlipstreamDeployment(ctx, r, q.deployment, h)
 }

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { create } from "@bufbuild/protobuf";
+import { maxInt24, minInt24 } from "viem";
 import { PrepareExecutionResponseSchema } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { configureExecution } from "./index";
 import { slipstream, slipstreamData, slipstreamPath } from "./slipstream";
@@ -38,32 +39,40 @@ test("Slipstream path uses signed three-byte two's-complement tick spacing", () 
   ).toBe(`${address("1")}ffffff${address("2").slice(2)}` as `0x${string}`);
   expect(
     slipstreamPath(
-      route(-8388608).route as NonNullable<ReturnType<typeof route>["route"]>,
+      route(Number(minInt24)).route as NonNullable<
+        ReturnType<typeof route>["route"]
+      >,
     ),
   ).toContain("800000");
   expect(
     slipstreamPath(
-      route(8388607).route as NonNullable<ReturnType<typeof route>["route"]>,
+      route(Number(maxInt24)).route as NonNullable<
+        ReturnType<typeof route>["route"]
+      >,
     ),
   ).toContain("7fffff");
   expect(() =>
     slipstreamPath(
-      route(-8388609).route as NonNullable<ReturnType<typeof route>["route"]>,
+      route(Number(minInt24) - 1).route as NonNullable<
+        ReturnType<typeof route>["route"]
+      >,
     ),
   ).toThrow();
   expect(() =>
     slipstreamPath(
-      route(8388608).route as NonNullable<ReturnType<typeof route>["route"]>,
+      route(Number(maxInt24) + 1).route as NonNullable<
+        ReturnType<typeof route>["route"]
+      >,
     ),
   ).toThrow();
 });
 
 test("Slipstream independently admits config and exact router calldata", () => {
   const prepared = route(100);
-  const router = "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5";
+  const router = address("9");
   const implementation = slipstream({
     router,
-    tick_spacings: [100],
+    options: { tick_spacings: [100] },
   });
   const terms = implementation.plan(prepared, [address("1"), address("2")]);
   expect(terms.target).toBe(router);
@@ -74,9 +83,18 @@ test("Slipstream independently admits config and exact router calldata", () => {
   expect(slipstreamData(prepared)).toBe(castVector);
   expect(terms.routeDetails[0][0]).toContain("tick spacing: 100");
   expect(() =>
-    slipstream({ router, fees: [100], tick_spacings: [100] }),
+    slipstream({ router, fees: [100], options: { tick_spacings: [100] } }),
   ).toThrow();
-  expect(() => slipstream({ router, tick_spacings: [100, 100] })).toThrow();
+  expect(() =>
+    slipstream({ router, fees: [], options: { tick_spacings: [100] } }),
+  ).toThrow();
+  expect(() =>
+    slipstream({ router, options: { tick_spacings: [100, 100] } }),
+  ).toThrow();
+  expect(() => slipstream({ router, options: {} })).toThrow();
+  expect(() =>
+    slipstream({ router, options: { tick_spacings: [100], unknown: true } }),
+  ).toThrow();
   expect(() =>
     configureExecution({
       tokens: [address("1"), address("2")],
@@ -85,11 +103,29 @@ test("Slipstream independently admits config and exact router calldata", () => {
         slip: {
           kind: "aerodrome-slipstream",
           router,
-          tick_spacings: [100],
+          options: { tick_spacings: [100] },
         },
       },
     }),
-  ).toThrow();
+  ).not.toThrow();
+  expect(() =>
+    configureExecution({
+      tokens: [address("1"), address("2")],
+      deployments: { unknown: { kind: "unknown", router } },
+    }),
+  ).toThrow("Unsupported provider: unknown.");
+  const legacyTopLevelOptions = {
+    tokens: [address("1"), address("2")],
+    deployments: {
+      slip: {
+        kind: "aerodrome-slipstream",
+        router,
+        tick_spacings: [100],
+        options: { tick_spacings: [100] },
+      },
+    },
+  } as unknown as Parameters<typeof configureExecution>[0];
+  expect(() => configureExecution(legacyTopLevelOptions)).toThrow();
 
   const wrongProvider = route(100);
   if (wrongProvider.route) wrongProvider.route.provider = "uniswap-v3";

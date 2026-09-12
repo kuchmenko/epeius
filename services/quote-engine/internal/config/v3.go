@@ -2,10 +2,44 @@ package config
 
 import (
 	"errors"
+
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 )
 
-// ValidateV3Chain is the shipped Uniswap/Pancake and fixed-executor config
+type deploymentValidator func(Deployment) (any, error)
+
+var deploymentValidators = map[string]deploymentValidator{
+	"uniswap-v3":           validateFeeDeployment,
+	"pancake-v3":           validateFeeDeployment,
+	"aerodrome-slipstream": validateSlipstreamDeployment,
+}
+
+func validateFeeDeployment(d Deployment) (any, error) {
+	if len(d.Fees) == 0 || d.Options != nil {
+		return nil, errors.New("fee deployment must configure fees and no provider options")
+	}
+	fees := map[uint32]bool{}
+	for _, fee := range d.Fees {
+		if fee >= 1000000 || fees[fee] {
+			return nil, errors.New("invalid or duplicate pool fee")
+		}
+		fees[fee] = true
+	}
+	return nil, nil
+}
+
+func validateSlipstreamDeployment(d Deployment) (any, error) {
+	if d.Fees != nil {
+		return nil, errors.New("Slipstream deployment does not accept fees")
+	}
+	if d.Options == nil {
+		return nil, errors.New("Slipstream options must contain only tick_spacings")
+	}
+	return slipstream.ParseOptions(*d.Options)
+}
+
+// ValidateV3Chain is the shipped provider and fixed-executor config
 // composition. Load owns TOML and chain validation, not protocol admission.
 func ValidateV3Chain(chain Chain) error {
 	if e := chain.Executor; e != nil {
@@ -15,35 +49,22 @@ func ValidateV3Chain(chain Chain) error {
 			return errors.New("executor needs a nonzero address and distinct configured Uniswap and Pancake routers")
 		}
 	}
-	for _, d := range chain.Deployments {
-		if d.Kind != "uniswap-v3" && d.Kind != "pancake-v3" && d.Kind != "aerodrome-slipstream" {
-			return errors.New("invalid deployment kind, identifier, or fees")
-		}
-		if d.Kind == "aerodrome-slipstream" && (len(d.TickSpacings) == 0 || len(d.Fees) != 0) || d.Kind != "aerodrome-slipstream" && (len(d.Fees) == 0 || len(d.TickSpacings) != 0) {
-			return errors.New("deployment must configure only its protocol pool selector")
-		}
-		if d.Kind == "aerodrome-slipstream" && (chain.ChainID != 8453 || common.HexToAddress(d.Factory) != common.HexToAddress("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A") || common.HexToAddress(d.Quoter) != common.HexToAddress("0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0") || common.HexToAddress(d.Router) != common.HexToAddress("0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5")) {
-			return errors.New("unsupported Slipstream generation")
+	for id, d := range chain.Deployments {
+		validate, ok := deploymentValidators[d.Kind]
+		if !ok {
+			return errors.New("unsupported provider: " + d.Kind)
 		}
 		for _, a := range []string{d.Factory, d.Quoter, d.Router} {
 			if !common.IsHexAddress(a) || common.HexToAddress(a) == (common.Address{}) {
 				return errors.New("deployment addresses must be nonzero EVM addresses")
 			}
 		}
-		fees := map[uint32]bool{}
-		for _, fee := range d.Fees {
-			if fee >= 1000000 || fees[fee] {
-				return errors.New("invalid or duplicate pool fee")
-			}
-			fees[fee] = true
+		providerConfig, err := validate(d)
+		if err != nil {
+			return err
 		}
-		spacings := map[int32]bool{}
-		for _, spacing := range d.TickSpacings {
-			if spacing < -8388608 || spacing > 8388607 || spacings[spacing] {
-				return errors.New("invalid or duplicate tick spacing")
-			}
-			spacings[spacing] = true
-		}
+		d.ProviderConfig = providerConfig
+		chain.Deployments[id] = d
 	}
 	return nil
 }
