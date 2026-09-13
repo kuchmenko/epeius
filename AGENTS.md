@@ -7,6 +7,13 @@
 - Report only reachable regressions introduced by the diff. Leave formatting, lint, generated drift, and established deterministic checks to CI. Treat the default branch as current product truth, and never claim that mocked, local-EVM, fork, dated live, or production evidence proves another layer.
 - After addressing a review finding, reply with the relevant commit and verification evidence, then resolve its conversation. Minimize AI reviewer comments that only report review state, progress, completion, limits, or review summaries; keep the actual findings and resolution replies visible.
 
+## Development history
+
+- Every implementation thread must create or update a historical log in the separate `kuchmenko/epeius-development-log` repository before declaring its stage complete. Use that repository's `templates/implementation-log.md` and a dedicated `docs/<topic>-log` worktree. Report the exact log commit and whether it was pushed; pushing still requires explicit operator approval.
+- Record the starting state, scope, decisions, rejected alternatives, chronological implementation phases, failures and course corrections, UI or presentation work when applicable, AI review findings and mitigations, exact verification, evidence limits, final state, rollback, and follow-up. The log must stand alone without chat history.
+- Keep stable product behavior and reusable instructions in this public repository. Keep dated experiments, implementation journals, review history, and environment-specific acceptance evidence in the development-log repository. Never store secrets, credentials, wallets, private keys, private user data, or unbounded raw logs.
+- Protocol-research threads continue to write detailed reports in their research workspace. The coordinating research thread maintains the development-log repository's `research/protocol-integration-program.md` after each material plan, wave, synthesis, implementation outcome, or roadmap change.
+
 ## Provider and protocol changes
 
 - Keep deployment and network data in strict TOML configuration instead of hardcoding chain IDs or contract addresses in provider code. Verify configured contracts by bytecode, ABI behavior, and required on-chain links. If an exact allowlist is a deliberate security policy, name it, document why it exists, and keep one source of truth.
