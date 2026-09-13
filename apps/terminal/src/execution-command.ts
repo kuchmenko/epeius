@@ -97,16 +97,22 @@ export async function executionCommand(
     tokenIn: string;
     tokenOut: string;
     afterApproval: boolean;
+    approvalRound?: number;
   },
 ) {
+  if (values["preparation-id"] && values["slippage-bps"] === undefined)
+    throw new Error("--slippage-bps is required with --preparation-id.");
   if (
     !values.keystore ||
     !values["password-file"] ||
-    !values["quote-id"] ||
-    !!values["route-id"] === !!values.allocations
+    (!values["quote-id"] && !values["preparation-id"]) ||
+    (!!values["quote-id"] && !!values["preparation-id"]) ||
+    (values["preparation-id"]
+      ? !!values["route-id"] || !!values.allocations
+      : !!values["route-id"] === !!values.allocations)
   )
     throw new Error(
-      "Provide --keystore, --password-file, --quote-id and either --route-id or --allocations.",
+      "Provide --keystore, --password-file, and either --preparation-id alone or --quote-id with --route-id or --allocations.",
     );
   const allocations = values.allocations
     ? parseAllocations(values.allocations)
@@ -119,6 +125,12 @@ export async function executionCommand(
       throw new Error(`--${name} requires the literal value yes.`);
   if (values["confirm-approval"] && values["confirm-swap"])
     throw new Error("Confirm only one action: approval or swap.");
+  let initialPreparation = values["preparation-id"]
+    ? await client.prepareExecution(
+        { preparationId: values["preparation-id"] },
+        { signal, timeoutMs: 25000 },
+      )
+    : undefined;
   const { expectedChainId, trusted, rpc, wallet, signer } =
     await connectExecution(
       values,
@@ -126,7 +138,7 @@ export async function executionCommand(
       chain,
       remoteChainId,
       signal,
-      allocations.length > 0,
+      (initialPreparation?.allocations.length ?? allocations.length) > 0,
     );
   if (trade && !same(signer, trade.signer))
     throw new Error(
@@ -136,24 +148,33 @@ export async function executionCommand(
     {
       signer,
       reportPreparation: !!trade,
-      swapOnly: trade?.afterApproval,
+      approvalPolicy:
+        trade?.approvalRound === 1
+          ? "permission-only"
+          : (trade?.approvalRound ?? 0) >= 2
+            ? "none"
+            : undefined,
       expectedChainId,
       slippageBps: Number(slippage),
       trusted,
       chainId: rpc.chainId,
       prepare: async (preparationId) => {
-        const response = await client.prepareExecution(
-          preparationId
-            ? { preparationId }
-            : {
-                quoteId: values["quote-id"],
-                routeId: values["route-id"],
-                allocations,
-                sender: signer,
-                slippageBps: Number(slippage),
-              },
-          { signal, timeoutMs: 25000 },
-        );
+        const response =
+          !preparationId && initialPreparation
+            ? initialPreparation
+            : await client.prepareExecution(
+                preparationId
+                  ? { preparationId }
+                  : {
+                      quoteId: values["quote-id"],
+                      routeId: values["route-id"],
+                      allocations,
+                      sender: signer,
+                      slippageBps: Number(slippage),
+                    },
+                { signal, timeoutMs: 25000 },
+              );
+        initialPreparation = undefined;
         // Rejections have no executable terms. Status validation reports the reason.
         if (
           ![
@@ -162,15 +183,20 @@ export async function executionCommand(
           ].includes(response.status)
         )
           return response;
-        if (response.route && response.route.routeId !== values["route-id"])
+        if (
+          !values["preparation-id"] &&
+          response.route &&
+          response.route.routeId !== values["route-id"]
+        )
           throw new Error("Engine returned a different route. Nothing sent.");
         if (
-          response.allocations.length !== allocations.length ||
-          response.allocations.some(
-            (a, i) =>
-              a.route?.routeId !== allocations[i].routeId ||
-              a.amountInAtomic !== allocations[i].amountInAtomic,
-          )
+          !values["preparation-id"] &&
+          (response.allocations.length !== allocations.length ||
+            response.allocations.some(
+              (a, i) =>
+                a.route?.routeId !== allocations[i].routeId ||
+                a.amountInAtomic !== allocations[i].amountInAtomic,
+            ))
         )
           throw new Error(
             "Engine returned different allocations. Nothing sent.",

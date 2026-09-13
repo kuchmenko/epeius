@@ -89,7 +89,7 @@ if (import.meta.main) {
     .filter((arg, index) => !(index === 0 && arg === "--"));
   if (args.includes("--help") || args.includes("-h")) {
     console.log(
-      "Usage: bun run engine [--config PATH]\nStarts all configured chains. Press Ctrl+C to stop.",
+      "Usage: bun run engine [--config PATH] [--anvil-simulation]\nStarts all configured chains. --anvil-simulation enables read-only trace simulation for a single loopback Anvil chain. Press Ctrl+C to stop.",
     );
   } else {
     const abort = new AbortController();

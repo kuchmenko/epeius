@@ -24,8 +24,24 @@ type executionSelection struct {
 type executionPlan struct {
 	transaction *quotev1.UnsignedTransaction
 	spender     string
+	permission  *permissionPlan
 	checks      SimulationChecks
 	verify      func(context.Context, Reader, common.Hash) string
+}
+
+type permissionPlan struct {
+	target, token, spender string
+	amount                 *big.Int
+	expiration             uint64
+}
+
+func (p *permissionPlan) clone() *permissionPlan {
+	if p == nil {
+		return nil
+	}
+	result := *p
+	result.amount = new(big.Int).Set(p.amount)
+	return &result
 }
 
 type BalanceProbe struct{ Token, Owner string }

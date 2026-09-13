@@ -93,6 +93,7 @@ export function balancer(raw: {
         route.provider !== deployment.kind ||
         !deployment.pools.includes(leg.pool) ||
         leg.selector.case !== undefined ||
+        leg.uniswapV4PoolKey !== undefined ||
         leg.tokenIn.toLowerCase() !== p.tokenIn.toLowerCase() ||
         leg.tokenOut.toLowerCase() !== p.tokenOut.toLowerCase() ||
         !configured.has(leg.tokenIn.toLowerCase()) ||

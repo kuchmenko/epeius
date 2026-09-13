@@ -5,6 +5,7 @@ import { fixedExecutor } from "./fixed-executor";
 import { pancake } from "./pancake-v3";
 import { slipstream } from "./slipstream";
 import { uniswap } from "./uniswap-v3";
+import { uniswapV4 } from "./uniswap-v4";
 
 type RawDeployment = {
   kind?: string;
@@ -23,12 +24,13 @@ type ParsedDeployment = TrustedExecution["deployments"][string] & {
 
 const providerParsers = new Map<
   string,
-  (raw: RawDeployment) => ParsedDeployment
+  (raw: RawDeployment, tokens: string[]) => ParsedDeployment
 >([
   ["uniswap-v3", uniswap],
   ["pancake-v3", pancake],
   ["aerodrome-slipstream", slipstream],
   ["balancer-v2", balancer],
+  ["uniswap-v4", uniswapV4],
 ]);
 
 const deploymentFields = new Set([
@@ -80,14 +82,16 @@ export function configureExecution(config: {
           : undefined;
       if (!provider)
         throw new Error(`Unsupported provider: ${raw.kind ?? "missing"}.`);
-      return [id, provider(raw)];
+      return [id, provider(raw, config.tokens)];
     }),
   );
   return {
     tokens: config.tokens,
     deployments,
     ...(config.executor
-      ? { executor: fixedExecutor(config.executor, deployments) }
+      ? {
+          executor: fixedExecutor(config.executor, deployments),
+        }
       : {}),
   };
 }

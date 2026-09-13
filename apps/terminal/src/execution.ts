@@ -109,7 +109,7 @@ export type ExecutionIO = {
   receipt: (hash: string) => Promise<Receipt>;
   report: (event: ExecutionEvent) => void;
   reportPreparation?: boolean;
-  swapOnly?: boolean;
+  approvalPolicy?: "permission-only" | "none";
 };
 
 function verifiedResult(
@@ -180,7 +180,11 @@ export async function executePrepared(
   const kind = plan.action;
   if (preview || io.reportPreparation)
     io.report({ preparation: JSON.parse(snapshot), sent: false });
-  if (io.swapOnly && kind === ExecutionAction.Approval)
+  if (
+    kind === ExecutionAction.Approval &&
+    (io.approvalPolicy === "none" ||
+      (io.approvalPolicy === "permission-only" && !prepared.onChainPermission))
+  )
     throw new Error(
       "Approval is still required. Start a new trade; nothing retried.",
     );

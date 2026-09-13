@@ -1,6 +1,6 @@
 # Testnet harness and contracts
 
-The harness creates disposable A/B/C fixtures using the checked-in Base Sepolia profile, validates configured official Uniswap deployment links, deploys authentic Pancake contracts plus local test contracts, seeds pools, and writes a runtime config. Network writes require explicit `--broadcast`.
+The harness creates disposable A/B/C fixtures using the checked-in Base Sepolia profile, validates configured official Uniswap deployments, deploys authentic Pancake contracts plus local test contracts, seeds V3 and V4 pools, and writes a runtime config. Network writes require explicit `--broadcast`.
 
 For execution guarantees and the partial-input limitation, read [Execution contract](execution.md). Detailed dependency provenance remains beside the harness in [`scripts/testnet/README.md`](../scripts/testnet/README.md).
 
@@ -72,10 +72,19 @@ bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs seed \
   --recipient "$TERMINAL_ADDRESS" --broadcast \
   --keystore "$KEYSTORE" --password-file "$PASSWORD_FILE"
 
+# Preview, then authorize the configured Uniswap V4 pool and position.
+bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs seed-v4 \
+  --sender "$HARNESS_ADDRESS"
+bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs seed-v4 \
+  --sender "$HARNESS_ADDRESS" --broadcast \
+  --keystore "$KEYSTORE" --password-file "$PASSWORD_FILE"
+
 bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs check
 bun --env-file="$ENV_FILE" scripts/testnet/harness.mjs config
 bun --env-file="$ENV_FILE" scripts/engine.ts --config .testnet/runtime.toml
 ```
+
+Run `seed-v4` after `deploy` and `seed`, because it uses the deployed fixture tokens and harness token balances. It grants the PositionManager the required token permissions, initializes the configured pool directly through PoolManager, and mints one liquidity position. The receipt's NFT transfer identifies the position; reruns verify its owner and exact liquidity without creating another position.
 
 Dry runs do not save a manifest, sign, or submit. Deployment addresses are predictions until broadcast. Estimates for dependent operations can be unavailable until prior contracts or writes exist. Each actual write is estimated immediately before signing. Gas limits add 20% headroom and legacy gas price uses twice the current suggestion. Printed ceilings exclude Base L1 data fees.
 
@@ -107,7 +116,7 @@ Base may expose a preliminary successful receipt with a zero block hash. The har
 
 The default profile's tokens A, B, and C use 18, 6, and 8 decimals. A/B/C are named harness fixtures for seeded scenarios, not the product token allowlist. Product token and contract allowlists come from generated runtime TOML. Each explicit recipient receives 1,000,000 whole units of each token once. Initial prices represent one whole token for one whole token, not equal atomic amounts.
 
-Under the default profile, both venues receive A/B, B/C, and A/C pools. Fee-500 pools use a broad range for normal swaps. Narrow pools use Uniswap fee 3000 and Pancake fee 2500 for exhaustion tests. These pairs and fee lists come from `harness.toml`. Public testnet trades change pool state; reruns are new trades, not resets, and sequential outputs need not match.
+Under the default profile, both V3 venues receive A/B, B/C, and A/C pools. Fee-500 pools use a broad range for normal swaps. Narrow pools use Uniswap fee 3000 and Pancake fee 2500 for exhaustion tests. Uniswap V4 receives the configured A/C fee-500 pool with one broad position. These pairs and fee lists come from `harness.toml`. Public testnet trades change pool state; reruns are new trades, not resets, and sequential outputs need not match.
 
 ## Credential-free selected-route evidence
 
@@ -141,7 +150,7 @@ bun --env-file="$ENV_FILE" scripts/e2e.ts --config .testnet/runtime.toml --broad
   --report .testnet/coverage-acceptance.jsonl
 ```
 
-Broadcast mode creates `.testnet/e2e-<timestamp>.jsonl` with mode 0600, or uses `--report PATH` (which must not exist). It prints the same JSONL events to stdout. Event order is `start`, then per-scenario `quote`, `preparation_preview`, terminal `approval` when needed, fresh `quote` after approval, terminal `swap`, and `scenario_passed`; final success is `passed` with `track: "coverage"` and count equal to four times the configured deployment count. Quote events include the pinned block, selected route, engine `bestRouteId`, search completeness, and errors. This matrix deliberately selects a named venue/hop route rather than the engine recommendation; it establishes execution coverage, not winner selection.
+Broadcast mode creates `.testnet/e2e-<timestamp>.jsonl` with mode 0600, or uses `--report PATH` (which must not exist). It prints the same JSONL events to stdout. Event order is `start`, then per-scenario `quote`, `preparation_preview`, terminal `approval` when needed, a fresh `quote` after each permission, terminal `swap`, and `scenario_passed`; at most two permission transactions are allowed. Final success is `passed` with `track: "coverage"` and count matching the listed plan. Quote events include the pinned block, selected route, engine `bestRouteId`, search completeness, and errors. This matrix deliberately selects a named venue/hop route rather than the engine recommendation; it establishes execution coverage, not winner selection. Uniswap V4 deployments list one-hop scenarios only. Pass `--in TOKEN --out TOKEN` together to replace the default A/C fixture symbols.
 
 Each terminal send records the submitted hash before waiting for receipt verification. Final swap success requires `verification.outcome: "passed"`; approval requires `receipt_success`. An earlier successful event cannot hide a later failure or cancellation. Any missing route, rejected preparation, nonzero child exit, inconclusive receipt, malformed remaining output, or failed verification stops the run at the first scenario. Provider diagnostics are suppressed in the final runner error. Inspect the JSONL report and wallet transactions before rerunning; there is no automatic resend.
 
@@ -159,7 +168,7 @@ bun --env-file="$ENV_FILE" scripts/e2e.ts --config .testnet/runtime.toml \
   --report .testnet/selection-acceptance.jsonl
 ```
 
-Review each displayed preparation and type `approval` or `swap` only for that transaction. The runner passes no confirmation flag and requires a TTY. A verified approval permits one fresh quote, not a swap authorization. Auto mode reselects the fresh engine recommendation; manual terminal `trade --route-id ID` keeps that route or fails if missing. The fresh route and amounts require another explicit swap confirmation. If the fresh winner still needs an approval, the flow stops instead of sending another approval or silently choosing another venue. Previously confirmed approval remains in place.
+Review each displayed preparation and type `approval` or `swap` only for that transaction. The runner passes no confirmation flag and requires a TTY. A verified approval permits one fresh quote, not a swap authorization. Auto mode reselects the fresh engine recommendation; manual terminal `trade --route-id ID` keeps that route or fails if missing. The fresh route and amounts require another explicit confirmation. The flow accepts at most two separately confirmed permission transactions, refreshing the quote after each; a third required permission stops the trade. Previously confirmed permissions remain in place.
 
 Selected reports begin with `start` and `track: "selection"`. Each `trade` event wraps the terminal JSON under `result`: full `quote`, explicit `selection` (quote/route IDs, `source`, `searchComplete`, `basis: "raw_output"`, `afterApproval`), full `preparation` before confirmation, submitted hash, then verification. Compare `preparation.route.amountOutAtomic` (quoted), `preparation.simulatedAmountOutAtomic` (simulated at `simulationBlock`), and `verification.outputReceivedAtomic` (actual transaction transfers). Retain quote block/hash, preparation ID, transaction hash, and actual input spent as well. `scenario_passed` follows each verified swap; final `passed` count is 2. Confirmation cancellation is not success.
 

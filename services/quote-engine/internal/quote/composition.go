@@ -4,6 +4,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 )
 
 type providerComponents struct {
@@ -48,6 +49,17 @@ var providerRegistrations = map[string]providerRegistration{
 		return providerComponents{
 			quoter: provider, verifier: provider,
 			preparer: balancerV2Preparation{id: id, chainID: chain.ChainID, options: options},
+		}
+	},
+	"uniswap-v4": func(chain Chain, id string, deployment config.Deployment) providerComponents {
+		options, ok := deployment.ProviderConfig.(uniswapv4.Options)
+		if !ok {
+			return providerComponents{}
+		}
+		provider := v4Quoter{reader: chain.Client, id: id, deployment: deployment, options: options}
+		return providerComponents{
+			quoter: provider, verifier: provider,
+			preparer: v4RouterPreparation{id: id, chainID: chain.ChainID, router: deployment.Router, permit2: options.Permit2, admit: provider.admit},
 		}
 	},
 }

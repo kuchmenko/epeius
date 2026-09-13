@@ -30,6 +30,22 @@ test("E2E covers both directions and hop counts independently for each deploymen
     { deployment: "uni", hops: 2, input: "A", output: "C" },
     { deployment: "uni", hops: 2, input: "C", output: "A" },
   ]);
+  expect(
+    scenarios([{ id: "uniswap-v4", kind: "uniswap-v4" }], "WETH", "USDC"),
+  ).toEqual([
+    {
+      deployment: "uniswap-v4",
+      hops: 1,
+      input: "WETH",
+      output: "USDC",
+    },
+    {
+      deployment: "uniswap-v4",
+      hops: 1,
+      input: "USDC",
+      output: "WETH",
+    },
+  ]);
 });
 
 test("default E2E only lists scenarios without a signer or reachable engine", async () => {
@@ -279,7 +295,7 @@ function selectedTradeFixture(
       return quote;
     },
     report,
-    execute: async (quote, route, afterApproval) => {
+    execute: async (quote, route, afterApproval, approvalRound = 0) => {
       calls.push(`execute:${quote.quoteId}:${route.routeId}:${afterApproval}`);
       const isCake = route.routeId === "cake-direct";
       const router = isCake ? cakeRouter : uniRouter;
@@ -390,7 +406,12 @@ function selectedTradeFixture(
           };
         },
         reportPreparation: true,
-        swapOnly: afterApproval,
+        approvalPolicy:
+          approvalRound === 1
+            ? "permission-only"
+            : approvalRound >= 2
+              ? "none"
+              : undefined,
         report,
       });
     },

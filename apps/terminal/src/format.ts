@@ -52,7 +52,9 @@ export function formatPreparation(
     return `${utc} (Unix ${unix})`;
   };
   const approval = p.status === PreparationStatus.APPROVAL_REQUIRED;
-  const tx = approval ? p.approvalTransaction : p.transaction;
+  const tx = approval
+    ? (p.onChainPermission?.transaction ?? p.approvalTransaction)
+    : p.transaction;
   if (!tx) throw new Error("Preparation has no transaction to review.");
   const lines = [
     approval
@@ -107,7 +109,14 @@ export function formatPreparation(
     );
   if (approval)
     lines.push(
-      "This approval authorizes only the total input above. It does not send a swap.",
+      ...(p.onChainPermission
+        ? [
+            `Permission contract: ${p.onChainPermission.target}`,
+            `Delegated spender: ${p.onChainPermission.spender}`,
+            `Permission expiration: ${timestamp(p.onChainPermission.expirationUnix)}`,
+          ]
+        : []),
+      "This permission authorizes only the total input above. It does not send a swap.",
     );
   lines.push(
     "Actual output is verified from canonical receipt token deltas after submission.",
@@ -164,8 +173,12 @@ export function formatQuote(
         selector = `fee ${leg.selector.value} pips`;
       else if (leg.selector.case === "tickSpacing")
         selector = `tick spacing ${leg.selector.value}`;
-      else if (/^0x[0-9a-f]{64}$/.test(leg.pool))
+      else if (
+        route.provider === "balancer-v2" &&
+        /^0x[0-9a-f]{64}$/.test(leg.pool)
+      )
         selector = `pool address ${getAddress(sliceHex(leg.pool as Hex, 0, 20)).toLowerCase()}`;
+      else if (/^0x[0-9a-f]{64}$/.test(leg.pool)) selector = "pool hash";
       lines.push(
         `Leg ${index + 1}: pool ${leg.pool}; ${selector}; ${leg.tokenIn} to ${leg.tokenOut}`,
       );

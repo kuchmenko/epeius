@@ -121,6 +121,7 @@ export function slipstream(raw: {
         !route.legs.every(
           (l) =>
             l.selector.case === "tickSpacing" &&
+            l.uniswapV4PoolKey === undefined &&
             deployment.tickSpacings.includes(l.selector.value) &&
             configured.has(l.tokenIn.toLowerCase()) &&
             configured.has(l.tokenOut.toLowerCase()),

@@ -53,6 +53,15 @@ message BlockContext {
   string hash = 2;
 }
 
+message UniswapV4PoolKey {
+  string currency0 = 1;
+  string currency1 = 2;
+  // Static LP fee in millionths, not basis points.
+  uint32 fee_pips = 3;
+  int32 tick_spacing = 4;
+  string hooks = 5;
+}
+
 message RouteLeg {
   string pool = 1;
   string token_in = 2;
@@ -63,6 +72,7 @@ message RouteLeg {
     // Slipstream pool selector, not a fee.
     int32 tick_spacing = 5;
   }
+  UniswapV4PoolKey uniswap_v4_pool_key = 6;
 }
 
 message RouteQuote {
@@ -141,6 +151,17 @@ message UnsignedTransaction {
   string gas_limit = 6;
 }
 
+message OnChainPermission {
+  UnsignedTransaction transaction = 1;
+  // Contract receiving the permission call.
+  string target = 2;
+  string token = 3;
+  // Contract delegated by the permission target.
+  string spender = 4;
+  string amount_atomic = 5;
+  string expiration_unix = 6;
+}
+
 message PrepareExecutionResponse {
   PreparationStatus status = 1;
   // Only a READY response may contain a swap transaction.
@@ -163,4 +184,7 @@ message PrepareExecutionResponse {
   // Present only for executor preparation; route is then absent. All allocation
   // quotes share one block. Slippage applies after summing their exact outputs.
   repeated QuotedAllocation allocations = 17;
+  // Separate typed permission transaction. Its success never makes this
+  // preparation executable and never replaces the legacy ERC-20 approval.
+  OnChainPermission on_chain_permission = 18;
 }

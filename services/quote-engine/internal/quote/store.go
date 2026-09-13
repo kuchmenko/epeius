@@ -83,6 +83,7 @@ func (s *Store) savePreparation(p preparation) {
 	}
 	p.response = proto.CloneOf(p.response)
 	p.transaction = proto.CloneOf(p.transaction)
+	p.permission = p.permission.clone()
 	p.checks = p.checks.clone()
 	s.preparations[p.response.PreparationId] = p
 }
@@ -99,6 +100,7 @@ func (s *Store) lookup(quoteID, preparationID string, now time.Time) (storedQuot
 	q.approvals = nil
 	p.response = proto.CloneOf(p.response)
 	p.transaction = proto.CloneOf(p.transaction)
+	p.permission = p.permission.clone()
 	p.checks = p.checks.clone()
 	return q, found, p, recheck
 }

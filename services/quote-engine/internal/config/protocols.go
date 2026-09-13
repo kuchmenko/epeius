@@ -6,18 +6,22 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 )
 
-type deploymentValidator func(Deployment) (any, error)
+type deploymentValidator func(Deployment, []Token) (any, error)
 
 var deploymentValidators = map[string]deploymentValidator{
 	"uniswap-v3":           validateFeeDeployment,
 	"pancake-v3":           validateFeeDeployment,
 	"aerodrome-slipstream": validateSlipstreamDeployment,
 	"balancer-v2":          validateBalancerDeployment,
+	"uniswap-v4": func(d Deployment, tokens []Token) (any, error) {
+		return validateUniswapV4(d, tokens)
+	},
 }
 
-func validateFeeDeployment(d Deployment) (any, error) {
+func validateFeeDeployment(d Deployment, _ []Token) (any, error) {
 	if !validDeploymentAddresses(d) || len(d.Fees) == 0 || d.Options != nil {
 		return nil, errors.New("fee deployment must configure fees and no provider options")
 	}
@@ -31,7 +35,7 @@ func validateFeeDeployment(d Deployment) (any, error) {
 	return nil, nil
 }
 
-func validateSlipstreamDeployment(d Deployment) (any, error) {
+func validateSlipstreamDeployment(d Deployment, _ []Token) (any, error) {
 	if !validDeploymentAddresses(d) || d.Fees != nil {
 		return nil, errors.New("Slipstream deployment does not accept fees")
 	}
@@ -41,7 +45,7 @@ func validateSlipstreamDeployment(d Deployment) (any, error) {
 	return slipstream.ParseOptions(*d.Options)
 }
 
-func validateBalancerDeployment(d Deployment) (any, error) {
+func validateBalancerDeployment(d Deployment, _ []Token) (any, error) {
 	if d.configuredFields["factory"] || d.configuredFields["quoter"] || d.configuredFields["router"] || d.Fees != nil || d.Options == nil {
 		return nil, errors.New("Balancer V2 deployment accepts only provider options")
 	}
@@ -72,7 +76,7 @@ func ValidateChain(chain Chain) error {
 		if !ok {
 			return errors.New("unsupported provider: " + d.Kind)
 		}
-		providerConfig, err := validate(d)
+		providerConfig, err := validate(d, chain.Tokens)
 		if err != nil {
 			return err
 		}
@@ -80,4 +84,30 @@ func ValidateChain(chain Chain) error {
 		chain.Deployments[id] = d
 	}
 	return nil
+}
+
+func validateUniswapV4(d Deployment, tokens []Token) (uniswapv4.Options, error) {
+	if d.configuredFields["factory"] || d.Fees != nil || d.Options == nil {
+		return uniswapv4.Options{}, errors.New("invalid Uniswap V4 deployment")
+	}
+	for _, address := range []string{d.Quoter, d.Router} {
+		if !common.IsHexAddress(address) || common.HexToAddress(address) == (common.Address{}) {
+			return uniswapv4.Options{}, errors.New("Uniswap V4 deployment addresses must be nonzero EVM addresses")
+		}
+	}
+	options, err := uniswapv4.ParseOptions(*d.Options)
+	if err != nil {
+		return uniswapv4.Options{}, err
+	}
+	configured := map[common.Address]bool{}
+	for _, token := range tokens {
+		configured[common.HexToAddress(token.Address)] = true
+	}
+	for _, pool := range options.Pools {
+		currency0, currency1 := common.HexToAddress(pool.Currency0), common.HexToAddress(pool.Currency1)
+		if !configured[currency0] || !configured[currency1] {
+			return uniswapv4.Options{}, errors.New("Uniswap V4 pools must use configured tokens")
+		}
+	}
+	return options, nil
 }
