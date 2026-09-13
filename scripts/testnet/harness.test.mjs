@@ -41,7 +41,8 @@ const v4TestProfile = async () =>
   (await Bun.file(defaultProfilePath).text())
     .replace("BASE_SEPOLIA_RPC_URL", "HARNESS_ISOLATED_RPC")
     .replace(uniV4.permit2_code_hash, keccak256("0x6000"))
-    .replace(uniV4.router_code_hash, keccak256("0x6000"));
+    .replace(uniV4.router_code_hash, keccak256("0x6000"))
+    .replace(uniV4.position_manager_code_hash, keccak256("0x6000"));
 test("pinned Uniswap artifacts are deployable without external library links", async () => {
   for (const [name, version, contract] of [
     ["@uniswap/v3-core", "1.0.1", "UniswapV3Factory"],
@@ -230,6 +231,35 @@ test("checked-in profile owns chain, contracts, fixture tokens and fee limits", 
     profile.uniV4.position_manager,
     "0x4B2C77d209D3405F41a037Ec6c77F7F5b8e2ca80",
   );
+  assert.equal(
+    profile.uniV4.position_manager_code_hash,
+    "0xe8329b35b8b34290b6cf03affc0836f7b23205229cc96ffdc66544b93112c076",
+  );
+});
+
+test("V4 fixture fee accepts the inclusive protocol maximum", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "epeius-v4-fee-"));
+  try {
+    const source = await Bun.file(defaultProfilePath).text();
+    const maximum = resolve(dir, "maximum.toml");
+    const aboveMaximum = resolve(dir, "above-maximum.toml");
+    writeFileSync(
+      maximum,
+      source.replace("fee = 500, tick_spacing", "fee = 1000000, tick_spacing"),
+    );
+    writeFileSync(
+      aboveMaximum,
+      source.replace("fee = 500, tick_spacing", "fee = 1000001, tick_spacing"),
+    );
+
+    assert.equal((await loadProfile(maximum)).fixtures.uniswap_v4.fee, 1000000);
+    await assert.rejects(
+      loadProfile(aboveMaximum),
+      /Malformed harness fixture/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
 });
 
 test("profile reads custom quote concurrency and rejects absent or zero values", async () => {
@@ -542,7 +572,30 @@ test("V4 seed validates existing pool before estimating approvals", async () => 
     );
     assert.equal(routerLinked, true);
     assert.equal(estimated, false);
-    writeFileSync(config, await v4TestProfile());
+    const validConfig = await v4TestProfile();
+    writeFileSync(
+      config,
+      validConfig.replace(
+        `position_manager_code_hash = "${keccak256("0x6000")}"`,
+        `position_manager_code_hash = "${keccak256("0x6001")}"`,
+      ),
+    );
+    await assert.rejects(
+      run(
+        options([
+          "seed-v4",
+          "--sender",
+          sender,
+          "--config",
+          config,
+          "--manifest",
+          manifestPath,
+        ]),
+      ),
+      /PositionManager code hash mismatch/,
+    );
+    assert.equal(estimated, false);
+    writeFileSync(config, validConfig);
     await assert.rejects(
       run(
         options([

@@ -22,6 +22,7 @@ permit2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
 permit2_code_hash = "0xdcde65555316946c298e4c60c6213eb5c3aeab4354d1f3fac5427236bcbb9ebe"
 router_code_hash = "0x952c879f642706a4d399eb917827b5a2a5519328446dba72aef3579909bf15ef"
 position_manager = "0x4B2C77d209D3405F41a037Ec6c77F7F5b8e2ca80"
+position_manager_code_hash = "0xe8329b35b8b34290b6cf03affc0836f7b23205229cc96ffdc66544b93112c076"
 
 [fixtures]
 # A/B/C are purpose-built E2E tokens, not a product token whitelist.
