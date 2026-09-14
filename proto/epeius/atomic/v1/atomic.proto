@@ -4,6 +4,19 @@ package epeius.atomic.v1;
 
 option go_package = "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1;atomicv1";
 
+service AtomicPlanService {
+  rpc GetPlanQuote(PlanQuoteRequest) returns (PlanQuoteResponse);
+}
+
+message PlanQuoteRequest {
+  optional uint32 format_version = 1;
+  optional bytes chain_id = 2;
+  optional bytes token_in = 3;
+  optional bytes token_out = 4;
+  optional bytes amount_in = 5;
+  optional uint32 search_budget_ms = 6;
+}
+
 // Plan carries the accepted terms and transaction identities alongside the
 // exact ExecutorV2 call and its narrower on-chain event commitment.
 message Plan {
@@ -49,6 +62,24 @@ message PlanProgram {
   optional bytes token_out = 4;
   optional bytes amount_in = 5;
   repeated PlanBranch branches = 6;
+}
+
+message BranchQuote {
+  repeated bytes operation_outputs = 1;
+}
+
+message PlanCandidate {
+  optional bytes candidate_id = 1;
+  PlanProgram program = 2;
+  PinnedBlock quote_block = 3;
+  repeated BranchQuote branch_quotes = 4;
+  optional bytes network_cost_out = 5;
+}
+
+message PlanQuoteResponse {
+  optional bytes quote_id = 1;
+  repeated PlanCandidate candidates = 2;
+  optional bool search_complete = 3;
 }
 
 message PlanBranch {

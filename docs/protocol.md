@@ -39,6 +39,10 @@ Each route identifies provider, configured deployment, exact atomic output, bloc
 
 All calls at quote time use one canonical EIP-1898 block hash. There is no fallback to latest state. Quote output is informational and does not authorize execution.
 
+`epeius.atomic.v1.AtomicPlanService.GetPlanQuote` is an additive read-only quote path. Its request uses present format version 1, 32-byte unsigned chain ID and input amount, 20-byte token addresses, and a positive search budget. The response has a random 32-byte quote ID, explicit `searchComplete`, and ordered zero or more candidates. This slice returns only one full-input branch with one or two sequential Uniswap V3 operations from the configured Atomic V1 deployment. It does not discover split branches, rank candidates, or populate `networkCostOut`.
+
+Each candidate carries the complete typed program, one exact positive output per operation, one pinned block, and a 32-byte candidate ID. The ID commits ordered provider, operation, program branch, program, and candidate-quote branch hashes under their `Epeius.Atomic*.v1` domains. Labels, quoter address, latency, and diagnostics do not enter this identity. This quote ID is not yet accepted by preparation; existing quote and preparation APIs remain unchanged.
+
 ## Execution preparation
 
 Initial `PrepareExecutionRequest` supplies quote ID, sender, slippage basis points, and either `routeId` for direct execution or `allocations` for an executor. `execution_mode = ATOMIC_V1` selects the additive Atomic V1 path. Atomic V1 accepts one already-returned Uniswap V3 route with one or two token-continuous legs, or exactly two already-returned direct Uniswap V3 routes. Atomic allocations must both be positive and sum exactly to the original quote input. Their physical pools, identified by unordered token pair and fee, must be globally distinct. The engine re-quotes only these selected routes at their literal inputs; it does not discover split candidates. Unspecified mode preserves the legacy configured-executor rule that two allocations use distinct venues. A recheck supplies only `preparationId`. Current sender and recipient are the same wallet.

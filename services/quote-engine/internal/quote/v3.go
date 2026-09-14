@@ -77,9 +77,18 @@ func (q v3Quoter) Verify(ctx context.Context, hash common.Hash) error {
 // quotePath quotes an admitted path sequentially at one pinned block. A nil
 // output without an error means a pool is missing, not that the RPC failed.
 func quotePath(ctx context.Context, caller Reader, deployment config.Deployment, tokens []common.Address, fees []uint32, amount *big.Int, hash common.Hash) ([]*quotev1.RouteLeg, *big.Int, error) {
+	legs, outputs, err := quotePathOutputs(ctx, caller, deployment, tokens, fees, amount, hash)
+	if err != nil || len(outputs) == 0 {
+		return nil, nil, err
+	}
+	return legs, outputs[len(outputs)-1], nil
+}
+
+func quotePathOutputs(ctx context.Context, caller Reader, deployment config.Deployment, tokens []common.Address, fees []uint32, amount *big.Int, hash common.Hash) ([]*quotev1.RouteLeg, []*big.Int, error) {
 	provider := uniswapv3.Provider{Client: caller, FactoryAddress: common.HexToAddress(deployment.Factory), QuoterAddress: common.HexToAddress(deployment.Quoter), Pancake: deployment.Kind == "pancake-v3"}
 	output := new(big.Int).Set(amount)
 	var legs []*quotev1.RouteLeg
+	var outputs []*big.Int
 	for i, fee := range fees {
 		pool, next, err := provider.Quote(ctx, tokens[i], tokens[i+1], output, fee, hash)
 		if err != nil || next == nil {
@@ -87,8 +96,9 @@ func quotePath(ctx context.Context, caller Reader, deployment config.Deployment,
 		}
 		output = next
 		legs = append(legs, &quotev1.RouteLeg{Pool: pool.Hex(), TokenIn: tokens[i].Hex(), TokenOut: tokens[i+1].Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: fee}})
+		outputs = append(outputs, new(big.Int).Set(output))
 	}
-	return legs, output, nil
+	return legs, outputs, nil
 }
 
 type candidate struct {

@@ -64,6 +64,8 @@ Routes stay in deterministic search order, not best-to-worst order. `bestRouteId
 
 `status` exits 1 if any configured chain is unavailable. `chain check` exits 1 for a failed check. Machine consumers should read both the JSON and exit code.
 
+For the read-only Atomic V1 candidate contract, add `--execution-mode atomic-v1` to `quote`. The terminal calls the separate `AtomicPlanService`, rejects unknown or incomplete response fields, independently recomputes every typed provider/operation/program/candidate hash, and verifies token continuity, pool uniqueness, exact output cardinality, positive hop outputs, and canonical candidate order. Human output shows quote and candidate IDs, pinned block, every hop output, final output, and explicit completion state. Candidates are crossings, not a best, net-output, or execution approval. They cannot yet be passed to `prepare`.
+
 ## Configured-chain execution
 
 Read [Execution contract](execution.md) before sending. Requires Foundry `cast`, an encrypted keystore, a password file, Tenderly credentials, native gas, funded configured tokens, a positive `chain_id`, and `execution_enabled = true`. The local TOML chain ID must match engine status, the terminal RPC, and the prepared transaction. Tokens, deployment contracts, and pool fees are accepted only from TOML; addresses supplied as token input do not bypass that allowlist.

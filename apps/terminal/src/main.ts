@@ -1,14 +1,20 @@
 import { parseArgs } from "node:util";
 import { toJsonString } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
-import { hexToBigInt, isHex } from "viem";
+import { getAddress, hexToBigInt, isHex } from "viem";
+import { PlanQuoteResponseSchema } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import {
   ChainStatusSchema,
   GetStatusResponseSchema,
   QuoteFinalSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
-import { quoteClient } from "./client";
+import {
+  atomicPlanQuoteRequest,
+  formatAtomicPlanQuote,
+  validateAtomicPlanQuote,
+} from "./atomic-plan-quote";
+import { atomicPlanClient, quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
 import { connectExecution, executionCommand } from "./execution-command";
@@ -47,7 +53,7 @@ Usage:
   bun run terminal -- chain check KEY [--config PATH] [--json]
   bun run terminal -- status [--engine-url URL] [--json]
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
-  bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
+  bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--execution-mode atomic-v1] [--search-budget-ms N] [--engine-url URL] [--json]
   bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH [--route-id ID] [--execution-mode atomic-v1] [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
   bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID | --allocations JSON) [--execution-mode atomic-v1] [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
@@ -296,6 +302,7 @@ export async function main(rawArgs: string[]) {
               "amount",
               "amount-atomic",
               "search-budget-ms",
+              ...(command === "quote" ? ["execution-mode"] : []),
               ...(command === "trade"
                 ? [
                     "route-id",
@@ -365,6 +372,12 @@ export async function main(rawArgs: string[]) {
       searchBudgetMs > MAX_BUDGET
     )
       throw new Error(`--search-budget-ms must be from 1 to ${MAX_BUDGET}.`);
+    if (
+      command === "quote" &&
+      values["execution-mode"] !== undefined &&
+      values["execution-mode"] !== "atomic-v1"
+    )
+      throw new Error("--execution-mode must be atomic-v1 when provided.");
     quoting = true;
     const getQuote = () =>
       client.getQuote(
@@ -444,6 +457,37 @@ export async function main(rawArgs: string[]) {
           values["route-id"],
         ),
       );
+    }
+    if (values["execution-mode"] === "atomic-v1") {
+      const request = {
+        chainId: BigInt(chain.chainId),
+        tokenIn: getAddress(tokenIn.address),
+        tokenOut: getAddress(tokenOut.address),
+        amountIn: BigInt(amountInAtomic),
+      };
+      const quote = validateAtomicPlanQuote(
+        await atomicPlanClient(engineUrl).getPlanQuote(
+          atomicPlanQuoteRequest(request, searchBudgetMs),
+          { signal: abort.signal, timeoutMs: searchBudgetMs + 5000 },
+        ),
+        request,
+      );
+      console.log(
+        json
+          ? toJsonString(PlanQuoteResponseSchema, quote)
+          : formatAtomicPlanQuote(
+              quote,
+              chain,
+              tokenIn,
+              tokenOut,
+              BigInt(amountInAtomic),
+            ),
+      );
+      if (json && !quote.searchComplete)
+        console.error(
+          "WARNING: Search was partial; some candidates may be missing.",
+        );
+      return quote.candidates.length ? 0 : 1;
     }
     const quote = await getQuote();
     console.log(

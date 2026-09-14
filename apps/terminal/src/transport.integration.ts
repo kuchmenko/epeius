@@ -4,7 +4,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Code, ConnectError } from "@connectrpc/connect";
-import { quoteClient } from "./client";
+import { getAddress } from "viem";
+import {
+  atomicPlanQuoteRequest,
+  validateAtomicPlanQuote,
+} from "./atomic-plan-quote";
+import { atomicPlanClient, quoteClient } from "./client";
 
 const WETH = "0x4200000000000000000000000000000000000006";
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -42,13 +47,72 @@ assert.deepEqual(
 );
 assert.equal(quote.routes[0].amountOutAtomic, "987654321");
 
+const atomicRequest = {
+  chainId: 8453n,
+  tokenIn: getAddress(WETH),
+  tokenOut: getAddress(USDC),
+  amountIn: 9007199254740993n,
+};
+const atomic = validateAtomicPlanQuote(
+  await atomicPlanClient(url).getPlanQuote(
+    atomicPlanQuoteRequest(atomicRequest, 5000),
+  ),
+  atomicRequest,
+);
+assert.equal(atomic.searchComplete, true);
+assert.equal(atomic.candidates.length, 4);
+assert.ok(
+  atomic.candidates.every(
+    (candidate) =>
+      candidate.program?.branches.length === 1 &&
+      candidate.program.branches[0].operations.length === 1,
+  ),
+);
+await assert.rejects(
+  atomicPlanClient(`${url}/fixture`).getPlanQuote(
+    atomicPlanQuoteRequest(atomicRequest, 5000),
+  ),
+  hasCode(Code.Unimplemented),
+);
+
 const directory = await mkdtemp(join(tmpdir(), "epeius-integration-"));
 const config = join(directory, "epeius.toml");
-await Bun.write(
-  config,
-  `[terminal]\ndefault_chain='base'\nengine_url='${url}/partial'\nsearch_budget_ms=5500\n[[chains.base.tokens]]\naddress='${WETH}'\nsymbol='WETH'\ndecimals=18\n[[chains.base.tokens]]\naddress='${USDC}'\nsymbol='USDC'\ndecimals=6\n`,
-);
 try {
+  await Bun.write(
+    config,
+    `[terminal]\ndefault_chain='base'\nengine_url='${url}'\nsearch_budget_ms=5000\n[[chains.base.tokens]]\naddress='${WETH}'\nsymbol='WETH'\ndecimals=18\n[[chains.base.tokens]]\naddress='${USDC}'\nsymbol='USDC'\ndecimals=6\n`,
+  );
+  const atomicTerminal = Bun.spawn(
+    [
+      "bun",
+      "apps/terminal/src/main.ts",
+      "quote",
+      "--config",
+      config,
+      "--in",
+      "WETH",
+      "--out",
+      "USDC",
+      "--amount-atomic",
+      "9007199254740993",
+      "--execution-mode",
+      "atomic-v1",
+      "--json",
+    ],
+    { stdout: "pipe", stderr: "pipe", timeout: 10000, killSignal: "SIGKILL" },
+  );
+  const [atomicStdout, atomicStderr, atomicExitCode] = await Promise.all([
+    new Response(atomicTerminal.stdout).text(),
+    new Response(atomicTerminal.stderr).text(),
+    atomicTerminal.exited,
+  ]);
+  assert.equal(atomicExitCode, 0, atomicStderr);
+  assert.equal(JSON.parse(atomicStdout).candidates.length, 4);
+
+  await Bun.write(
+    config,
+    `[terminal]\ndefault_chain='base'\nengine_url='${url}/partial'\nsearch_budget_ms=5500\n[[chains.base.tokens]]\naddress='${WETH}'\nsymbol='WETH'\ndecimals=18\n[[chains.base.tokens]]\naddress='${USDC}'\nsymbol='USDC'\ndecimals=6\n`,
+  );
   const terminal = Bun.spawn(
     [
       "bun",

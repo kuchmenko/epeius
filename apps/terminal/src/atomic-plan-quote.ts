@@ -1,0 +1,334 @@
+import {
+  type Address,
+  bytesToHex,
+  encodeAbiParameters,
+  getAddress,
+  type Hex,
+  hexToBytes,
+  keccak256,
+  padHex,
+  stringToHex,
+  toHex,
+  zeroAddress,
+} from "viem";
+import type {
+  PlanCandidate,
+  PlanQuoteResponse,
+} from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
+import type {
+  ChainStatus,
+  Token,
+} from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import { formatAtomic } from "./format";
+
+const domain = (value: string) => keccak256(stringToHex(value));
+const uint256 = (value: bigint) =>
+  hexToBytes(padHex(toHex(value), { size: 32 }));
+const addressBytes = (value: string) => hexToBytes(getAddress(value));
+const exact = (value: Uint8Array | undefined, size: number, label: string) => {
+  if (!value || value.length !== size)
+    throw new Error(`Atomic V1 ${label} has the wrong width.`);
+  return bytesToHex(value);
+};
+const requiredAddress = (value: Uint8Array | undefined, label: string) => {
+  const address = getAddress(exact(value, 20, label));
+  if (address === zeroAddress)
+    throw new Error(`Atomic V1 ${label} must not be zero.`);
+  return address;
+};
+const positive = (value: Uint8Array | undefined, label: string) => {
+  const number = BigInt(exact(value, 32, label));
+  if (number <= 0n) throw new Error(`Atomic V1 ${label} must be positive.`);
+  return number;
+};
+const same = (a: Uint8Array | undefined, b: Uint8Array) =>
+  !!a && bytesToHex(a) === bytesToHex(b);
+
+function rejectUnknown(value: unknown) {
+  if (!value || typeof value !== "object" || value instanceof Uint8Array)
+    return;
+  const message = value as { $unknown?: unknown[] };
+  if (message.$unknown?.length)
+    throw new Error("Atomic V1 quote contains unsupported fields.");
+  for (const child of Object.values(value)) rejectUnknown(child);
+}
+
+export function atomicCandidateId(candidate: PlanCandidate) {
+  const program = candidate.program;
+  const block = candidate.quoteBlock;
+  if (!program || !block) throw new Error("Atomic V1 candidate is incomplete.");
+  const branchHashes: Hex[] = [];
+  const quoteHashes: Hex[] = [];
+  if (candidate.branchQuotes.length !== program.branches.length)
+    throw new Error("Atomic V1 branch quote cardinality is invalid.");
+  for (const [branchIndex, branch] of program.branches.entries()) {
+    const operationHashes: Hex[] = [];
+    const quote = candidate.branchQuotes[branchIndex];
+    if (!quote || quote.operationOutputs.length !== branch.operations.length)
+      throw new Error("Atomic V1 operation output cardinality is invalid.");
+    for (const operation of branch.operations) {
+      if (operation.pool.case !== "uniswapV3")
+        throw new Error("Atomic V1 quote uses an unsupported operation.");
+      const pool = operation.pool.value;
+      if (pool.feePips === undefined || pool.feePips >= 1_000_000)
+        throw new Error("Atomic V1 quote has an invalid pool fee.");
+      const provider = keccak256(
+        encodeAbiParameters(
+          [
+            { type: "bytes32" },
+            { type: "uint8" },
+            { type: "address" },
+            { type: "address" },
+            { type: "address" },
+            { type: "uint24" },
+          ],
+          [
+            domain("Epeius.AtomicProvider.v1"),
+            1,
+            requiredAddress(pool.factory, "factory"),
+            requiredAddress(pool.router, "router"),
+            requiredAddress(pool.pool, "pool"),
+            pool.feePips,
+          ],
+        ),
+      );
+      operationHashes.push(
+        keccak256(
+          encodeAbiParameters(
+            [
+              { type: "bytes32" },
+              { type: "uint8" },
+              { type: "address" },
+              { type: "address" },
+              { type: "bytes32" },
+            ],
+            [
+              domain("Epeius.AtomicOperation.v1"),
+              1,
+              requiredAddress(operation.tokenIn, "operation input"),
+              requiredAddress(operation.tokenOut, "operation output"),
+              provider,
+            ],
+          ),
+        ),
+      );
+    }
+    branchHashes.push(
+      keccak256(
+        encodeAbiParameters(
+          [{ type: "bytes32" }, { type: "uint256" }, { type: "bytes32[]" }],
+          [
+            domain("Epeius.AtomicProgramBranch.v1"),
+            positive(branch.amountIn, "branch input"),
+            operationHashes,
+          ],
+        ),
+      ),
+    );
+    quoteHashes.push(
+      keccak256(
+        encodeAbiParameters(
+          [{ type: "bytes32" }, { type: "uint256[]" }],
+          [
+            domain("Epeius.AtomicCandidateBranch.v1"),
+            quote.operationOutputs.map((output) =>
+              positive(output, "operation output"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+  const programHash = keccak256(
+    encodeAbiParameters(
+      [
+        { type: "bytes32" },
+        { type: "uint32" },
+        { type: "uint256" },
+        { type: "address" },
+        { type: "address" },
+        { type: "uint256" },
+        { type: "bytes32[]" },
+      ],
+      [
+        domain("Epeius.AtomicProgram.v1"),
+        1,
+        positive(program.chainId, "chain ID"),
+        requiredAddress(program.tokenIn, "program input"),
+        requiredAddress(program.tokenOut, "program output"),
+        positive(program.amountIn, "program input amount"),
+        branchHashes,
+      ],
+    ),
+  );
+  return keccak256(
+    encodeAbiParameters(
+      [
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "uint256" },
+        { type: "bytes32" },
+        { type: "bytes32[]" },
+      ],
+      [
+        domain("Epeius.AtomicCandidate.v1"),
+        programHash,
+        BigInt(exact(block.number, 32, "quote block number")),
+        exact(block.hash, 32, "quote block hash"),
+        quoteHashes,
+      ],
+    ),
+  );
+}
+
+export type AtomicQuoteRequest = {
+  chainId: bigint;
+  tokenIn: Address;
+  tokenOut: Address;
+  amountIn: bigint;
+};
+
+export function atomicPlanQuoteRequest(
+  request: AtomicQuoteRequest,
+  searchBudgetMs: number,
+) {
+  return {
+    formatVersion: 1,
+    chainId: uint256(request.chainId),
+    tokenIn: addressBytes(request.tokenIn),
+    tokenOut: addressBytes(request.tokenOut),
+    amountIn: uint256(request.amountIn),
+    searchBudgetMs,
+  };
+}
+
+export function validateAtomicPlanQuote(
+  response: PlanQuoteResponse,
+  request: AtomicQuoteRequest,
+) {
+  rejectUnknown(response);
+  exact(response.quoteId, 32, "quote ID");
+  if (response.searchComplete === undefined)
+    throw new Error("Atomic V1 search completion is absent.");
+  let previousKey = "";
+  for (const candidate of response.candidates) {
+    if (candidate.networkCostOut !== undefined)
+      throw new Error("Atomic V1 network cost is unsupported.");
+    const program = candidate.program;
+    if (
+      program?.formatVersion !== 1 ||
+      !same(program.chainId, uint256(request.chainId)) ||
+      !same(program.tokenIn, addressBytes(request.tokenIn)) ||
+      !same(program.tokenOut, addressBytes(request.tokenOut)) ||
+      !same(program.amountIn, uint256(request.amountIn)) ||
+      program.branches.length !== 1 ||
+      !same(program.branches[0]?.amountIn, uint256(request.amountIn))
+    )
+      throw new Error(
+        "Atomic V1 candidate program does not match the request.",
+      );
+    const operations = program.branches[0].operations;
+    if (operations.length < 1 || operations.length > 2)
+      throw new Error("Atomic V1 candidate path length is unsupported.");
+    let current = addressBytes(request.tokenIn);
+    const pools = new Set<string>();
+    const physicalPools = new Set<string>();
+    let factory = "";
+    let router = "";
+    for (const operation of operations) {
+      if (!same(operation.tokenIn, current) || !operation.tokenOut)
+        throw new Error("Atomic V1 candidate token continuity is invalid.");
+      if (operation.pool.case !== "uniswapV3")
+        throw new Error("Atomic V1 candidate operation is unsupported.");
+      const pool = operation.pool.value;
+      const poolAddress = requiredAddress(pool.pool, "pool");
+      const nextFactory = requiredAddress(pool.factory, "factory");
+      const nextRouter = requiredAddress(pool.router, "router");
+      if (
+        (!factory && !router) ||
+        (factory === nextFactory && router === nextRouter)
+      ) {
+        factory = nextFactory;
+        router = nextRouter;
+      } else throw new Error("Atomic V1 candidate mixes deployments.");
+      const input = exact(operation.tokenIn, 20, "operation input");
+      const output = exact(operation.tokenOut, 20, "operation output");
+      if (input === output)
+        throw new Error("Atomic V1 operation tokens must be distinct.");
+      const pair = input < output ? `${input}:${output}` : `${output}:${input}`;
+      const physical = `${pair}:${pool.feePips}`;
+      if (pools.has(poolAddress) || physicalPools.has(physical))
+        throw new Error("Atomic V1 candidate reuses a pool.");
+      pools.add(poolAddress);
+      physicalPools.add(physical);
+      current = operation.tokenOut;
+    }
+    if (!same(current, addressBytes(request.tokenOut)))
+      throw new Error("Atomic V1 candidate final token is invalid.");
+    const fees = operations.map((operation) =>
+      String(
+        operation.pool.case === "uniswapV3" ? operation.pool.value.feePips : 0,
+      ).padStart(7, "0"),
+    );
+    const middle =
+      operations.length === 2
+        ? getAddress(exact(operations[0].tokenOut, 20, "intermediate token"))
+        : "";
+    const key = `${operations.length - 1}:${middle}:${fees.join(":")}`;
+    if (key <= previousKey)
+      throw new Error("Atomic V1 candidates are not in canonical order.");
+    previousKey = key;
+    const expected = atomicCandidateId(candidate);
+    if (exact(candidate.candidateId, 32, "candidate ID") !== expected)
+      throw new Error("Atomic V1 candidate ID does not match its contents.");
+  }
+  return response;
+}
+
+export function formatAtomicPlanQuote(
+  response: PlanQuoteResponse,
+  chain: Pick<ChainStatus, "key" | "chainId" | "tokens">,
+  tokenIn: Token,
+  tokenOut: Token,
+  amountIn: bigint,
+) {
+  const amount = (token: Token, value: bigint) =>
+    `${formatAtomic(value.toString(), token.decimals)} ${token.symbol} (${value} atomic)`;
+  const token = (address: string) =>
+    chain.tokens.find(
+      (item) => item.address.toLowerCase() === address.toLowerCase(),
+    );
+  const lines = [
+    `Atomic V1 quote ${exact(response.quoteId, 32, "quote ID")} — ${chain.key} (${chain.chainId})`,
+    `Search complete: ${String(response.searchComplete)}`,
+    `Input: ${amount(tokenIn, amountIn)}`,
+  ];
+  if (!response.searchComplete)
+    lines.push("WARNING: Search was partial; some candidates may be missing.");
+  for (const [candidateIndex, candidate] of response.candidates.entries()) {
+    const operations = candidate.program?.branches[0]?.operations ?? [];
+    const outputs = candidate.branchQuotes[0]?.operationOutputs ?? [];
+    lines.push(
+      "",
+      `Candidate ${candidateIndex + 1}: ${exact(candidate.candidateId, 32, "candidate ID")}`,
+      `Quote block: ${BigInt(exact(candidate.quoteBlock?.number, 32, "quote block number"))} (${exact(candidate.quoteBlock?.hash, 32, "quote block hash")})`,
+    );
+    for (const [hopIndex, operation] of operations.entries()) {
+      const outputAddress = exact(operation.tokenOut, 20, "operation output");
+      const metadata = token(outputAddress);
+      const output = BigInt(exact(outputs[hopIndex], 32, "operation output"));
+      const pool =
+        operation.pool.case === "uniswapV3" ? operation.pool.value : undefined;
+      lines.push(
+        `Hop ${hopIndex + 1}: ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool?.pool, 20, "pool")}; fee ${pool?.feePips} pips; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
+      );
+    }
+    const final = BigInt(exact(outputs.at(-1), 32, "final output"));
+    lines.push(`Aggregate/final output: ${amount(tokenOut, final)}`);
+  }
+  if (!response.candidates.length) lines.push("No candidates returned.");
+  lines.push(
+    "Candidates are ordered crossings, not a best or net-output recommendation.",
+  );
+  return lines.join("\n");
+}

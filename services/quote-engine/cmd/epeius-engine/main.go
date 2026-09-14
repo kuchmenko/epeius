@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1/atomicv1connect"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/generated/go/epeius/quote/v1/quotev1connect"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
@@ -173,7 +174,10 @@ func serve(ctx context.Context, settings config.Config, getenv func(string) stri
 		}
 	}
 	mux := http.NewServeMux()
-	path, handler := quotev1connect.NewQuoteServiceHandler(quote.Handler{Chains: chains, Store: quote.NewStore(), Simulator: simulator, QuoteConcurrency: settings.Engine.QuoteConcurrency})
+	service := quote.Handler{Chains: chains, Store: quote.NewStore(), Simulator: simulator, QuoteConcurrency: settings.Engine.QuoteConcurrency}
+	path, handler := quotev1connect.NewQuoteServiceHandler(service)
+	mux.Handle(path, handler)
+	path, handler = atomicv1connect.NewAtomicPlanServiceHandler(service)
 	mux.Handle(path, handler)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	served := make(chan error, 1)
