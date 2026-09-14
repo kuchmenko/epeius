@@ -16,6 +16,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestAtomicV1PublishedCommitmentVector(t *testing.T) {
@@ -43,28 +44,33 @@ func TestAtomicV1PublishedCommitmentVector(t *testing.T) {
 
 func TestAtomicV1BuildsExactOnePoolPlan(t *testing.T) {
 	strategy := atomicV1Preparation{chain: Chain{ChainID: "8453", Config: config.Chain{
-		AtomicExecutor: &config.AtomicExecutor{Address: "0x0000000000000000000000000000000000000044", RuntimeCodeHash: common.HexToHash("0xaa").Hex(), UniswapDeployment: "uni"},
+		AtomicExecutor: &config.AtomicExecutor{Address: "0x0000000000000000000000000000000000000044", RuntimeCodeHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", UniswapDeployment: "uni"},
 		Deployments:    map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Factory: "0x4444444444444444444444444444444444444444", Router: "0x5555555555555555555555555555555555555555"}},
 	}}}
 	route := &quotev1.RouteQuote{
 		RouteId: "uni:500", Provider: "uniswap-v3", DeploymentId: "uni", AmountOutAtomic: "347415981",
-		Legs: []*quotev1.RouteLeg{{Pool: "0x3333333333333333333333333333333333333333", TokenIn: "0x0000000000000000000000000000000000000011", TokenOut: "0x0000000000000000000000000000000000000022", Selector: &quotev1.RouteLeg_FeePips{FeePips: 500}}},
+		Block: &quotev1.BlockContext{Number: "12345678", Hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		Legs:  []*quotev1.RouteLeg{{Pool: "0x3333333333333333333333333333333333333333", TokenIn: "0x0000000000000000000000000000000000000011", TokenOut: "0x0000000000000000000000000000000000000022", Selector: &quotev1.RouteLeg_FeePips{FeePips: 500}}},
 	}
 	p := &quotev1.PrepareExecutionResponse{
 		Recipient: "0x0000000000000000000000000000000000000055", TokenIn: route.Legs[0].TokenIn, TokenOut: route.Legs[0].TokenOut,
-		AmountInAtomic: "37", AmountOutMinimumAtomic: "11", DeadlineUnix: "2000000000", Route: route,
+		AmountInAtomic: "37", AmountOutMinimumAtomic: "11", ExpiresAtUnix: "1999999900", DeadlineUnix: "2000000000", Route: route,
 	}
 	plan, message := strategy.Build(p)
 	if message != "" || plan.atomicPlan == nil || plan.atomicPlan.ExecutorPlanHash != "0x69c0ba7621841b73782fbd11f817d4b8fca74f7f5a24be110fdde434d174a6f5" {
 		t.Fatalf("plan mismatch: %s %+v", message, plan.atomicPlan)
 	}
-	var fixture struct{ Calldata string }
+	var fixture struct {
+		Calldata               string
+		PlanID                 string
+		TransactionFingerprint string
+	}
 	raw, err := os.ReadFile("../../../../contracts/fixtures/atomic-v1-plan.json")
 	if err != nil || json.Unmarshal(raw, &fixture) != nil {
 		t.Fatal("could not read Atomic V1 fixture")
 	}
-	if plan.transaction == nil || plan.transaction.To != "0x0000000000000000000000000000000000000044" || plan.transaction.Data != fixture.Calldata || len(plan.checks.ClearAllowances) != 1 {
-		t.Fatalf("execution plan incomplete: %+v", plan)
+	if plan.transaction == nil || plan.transaction.To != "0x0000000000000000000000000000000000000044" || plan.transaction.Data != fixture.Calldata || hexutil.Encode(plan.atomicPlan.PlanId) != fixture.PlanID || hexutil.Encode(plan.atomicPlan.TransactionFingerprint) != fixture.TransactionFingerprint || plan.atomicPlan.AcceptedTerms == nil || len(plan.checks.ClearAllowances) != 1 {
+		t.Fatalf("execution plan incomplete: %+v plan=%s fingerprint=%s", plan, hexutil.Encode(plan.atomicPlan.PlanId), hexutil.Encode(plan.atomicPlan.TransactionFingerprint))
 	}
 }
 
@@ -144,6 +150,10 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 	}))
 	if err != nil || response.Msg.Status != quotev1.PreparationStatus_PREPARATION_STATUS_READY || response.Msg.AtomicPlan == nil || response.Msg.Transaction == nil || !simulated {
 		t.Fatalf("Atomic V1 preparation failed: %+v %v", response, err)
+	}
+	rechecked, err := handler.PrepareExecution(t.Context(), connect.NewRequest(&quotev1.PrepareExecutionRequest{PreparationId: response.Msg.PreparationId}))
+	if err != nil || !proto.Equal(response.Msg.AtomicPlan, rechecked.Msg.AtomicPlan) || !proto.Equal(response.Msg.Transaction, rechecked.Msg.Transaction) {
+		t.Fatalf("Atomic V1 recheck changed frozen identities or transaction: %+v %v", rechecked, err)
 	}
 	wrongRuntime := chainConfig
 	wrongRuntime.AtomicExecutor = &config.AtomicExecutor{

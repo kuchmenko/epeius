@@ -102,7 +102,7 @@ bun run terminal -- prepare --chain CHAIN --config PATH \
   --keystore "$TERMINAL_KEYSTORE" --password-file "$TERMINAL_PASSWORD_FILE"
 ```
 
-`trade --execution-mode atomic-v1` also requires `--route-id`; this first slice never substitutes another route. Human review shows the exact executor plan hash and branch minimum. The terminal checks the local executor and deployment, reconstructs the final generic `Plan` calldata and on-chain commitment, and requires all three ordered ExecutorV2 amount events plus token deltas in the canonical receipt. No ExecutorV2 deployment is enabled by the checked-in configuration.
+`trade --execution-mode atomic-v1` also requires `--route-id`; this first slice never substitutes another route. Human review shows the accepted plan ID, executor plan hash, transaction fingerprint, transaction gas limit, and branch minimum. The terminal checks the local executor and deployment, independently reconstructs all three identities and the final generic `Plan` calldata, and requires all three ordered ExecutorV2 amount events plus token deltas in the canonical receipt. No ExecutorV2 deployment is enabled by the checked-in configuration.
 
 For swaps, `verification.outcome: "passed"` means the canonical successful receipt's exact-transaction ERC20 Transfer logs show full wallet input consumption, output at least the configured minimum, and no net intermediate-token residue in the router. `receipt_success` is used for approval receipts; it does not make the old quote executable. Obtain a fresh quote after approval.
 

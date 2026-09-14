@@ -43,6 +43,8 @@ export type ReceiptObligations = {
   atomicPlan?: {
     executor: string;
     planHash: string;
+    planId: string;
+    transactionFingerprint: string;
     operation: {
       kind: number;
       tokenIn: string;

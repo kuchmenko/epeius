@@ -65,14 +65,16 @@ type atomicV1ExecutorPlan struct {
 }
 
 func (s atomicV1Preparation) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
-	if p.Route == nil || len(p.Route.Legs) != 1 || s.chain.Config.AtomicExecutor == nil {
+	if p.Route == nil || p.Route.Block == nil || len(p.Route.Legs) != 1 || s.chain.Config.AtomicExecutor == nil {
 		return executionPlan{}, "invalid Atomic V1 route"
 	}
 	leg := p.Route.Legs[0]
 	amount, amountOK := new(big.Int).SetString(p.AmountInAtomic, 10)
 	minimum, minimumOK := new(big.Int).SetString(p.AmountOutMinimumAtomic, 10)
 	deadline, deadlineErr := strconv.ParseUint(p.DeadlineUnix, 10, 64)
-	if !amountOK || !minimumOK || amount.Sign() <= 0 || minimum.Sign() <= 0 || deadlineErr != nil {
+	expiresAt, expiresErr := strconv.ParseUint(p.ExpiresAtUnix, 10, 64)
+	quoteBlock, blockOK := new(big.Int).SetString(p.Route.Block.Number, 10)
+	if !amountOK || !minimumOK || !blockOK || amount.Sign() <= 0 || minimum.Sign() <= 0 || quoteBlock.Sign() < 0 || quoteBlock.BitLen() > 256 || deadlineErr != nil || expiresErr != nil || !common.IsHexHash(p.Route.Block.Hash) {
 		return executionPlan{}, "invalid Atomic V1 amounts"
 	}
 	branch := atomicV1Branch{
@@ -108,7 +110,24 @@ func (s atomicV1Preparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 		return executionPlan{}, "Atomic V1 plan could not be encoded"
 	}
 	tx := &quotev1.UnsignedTransaction{ChainId: s.chain.ChainID, To: executor.Hex(), From: sender.Hex(), Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "1000000"}
-	router := s.chain.Config.Deployments[s.chain.Config.AtomicExecutor.UniswapDeployment].Router
+	deployment := s.chain.Config.Deployments[s.chain.Config.AtomicExecutor.UniswapDeployment]
+	acceptedTerms, planID, err := atomicV1AcceptedTerms(
+		s.chain.ChainID, executor, common.HexToHash(s.chain.Config.AtomicExecutor.RuntimeCodeHash), sender,
+		common.HexToAddress(leg.TokenIn), common.HexToAddress(leg.TokenOut), amount, minimum,
+		common.HexToAddress(deployment.Factory), common.HexToAddress(deployment.Router), common.HexToAddress(leg.Pool), leg.GetFeePips(),
+		quoteBlock, common.HexToHash(p.Route.Block.Hash), expiresAt, deadline,
+	)
+	if err != nil {
+		return executionPlan{}, "Atomic V1 accepted terms could not be committed"
+	}
+	fingerprint, err := atomicV1TransactionFingerprint(planID, tx)
+	if err != nil {
+		return executionPlan{}, "Atomic V1 transaction could not be committed"
+	}
+	plan.AcceptedTerms = acceptedTerms
+	plan.PlanId = planID.Bytes()
+	plan.TransactionFingerprint = fingerprint.Bytes()
+	router := deployment.Router
 	checks := SimulationChecks{
 		Input: BalanceProbe{Token: leg.TokenIn, Owner: sender.Hex()}, Output: BalanceProbe{Token: leg.TokenOut, Owner: sender.Hex()},
 		Preserve:        []BalanceProbe{{Token: leg.TokenIn, Owner: executor.Hex()}, {Token: leg.TokenOut, Owner: executor.Hex()}, {Token: leg.TokenIn, Owner: router}, {Token: leg.TokenOut, Owner: router}},
@@ -120,6 +139,73 @@ func (s atomicV1Preparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 		}
 		return ""
 	}}, ""
+}
+
+func atomicUint256Bytes(value *big.Int) []byte {
+	return value.FillBytes(make([]byte, 32))
+}
+
+func atomicV1AcceptedTerms(chainID string, executor common.Address, runtimeHash common.Hash, signer, tokenIn, tokenOut common.Address, amountIn, minimum *big.Int, factory, router, pool common.Address, fee uint32, quoteBlock *big.Int, quoteBlockHash common.Hash, expiresAt, deadline uint64) (*atomicv1.AcceptedPlanTerms, common.Hash, error) {
+	chain, ok := new(big.Int).SetString(chainID, 10)
+	if !ok || chain.Sign() < 0 || chain.BitLen() > 256 {
+		return nil, common.Hash{}, errors.New("invalid chain ID")
+	}
+	providerHash, err := atomicHash(
+		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint24")}},
+		crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), uint8(1), factory, router, pool, new(big.Int).SetUint64(uint64(fee)),
+	)
+	if err != nil {
+		return nil, common.Hash{}, err
+	}
+	operationHash, err := atomicHash(
+		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}},
+		crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), uint8(1), tokenIn, tokenOut, providerHash,
+	)
+	if err != nil {
+		return nil, common.Hash{}, err
+	}
+	branchHash, err := atomicHash(
+		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
+		crypto.Keccak256Hash([]byte("Epeius.AtomicAcceptedBranch.v1")), amountIn, minimum, []common.Hash{operationHash},
+	)
+	if err != nil {
+		return nil, common.Hash{}, err
+	}
+	planID, err := atomicHash(
+		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint32")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
+		crypto.Keccak256Hash([]byte("Epeius.AtomicPlan.v1")), uint32(1), chain, executor, uint32(2), runtimeHash, signer, signer, tokenIn, tokenOut, amountIn, minimum, quoteBlock, quoteBlockHash, new(big.Int).SetUint64(expiresAt), new(big.Int).SetUint64(deadline), []common.Hash{branchHash},
+	)
+	if err != nil {
+		return nil, common.Hash{}, err
+	}
+	terms := &atomicv1.AcceptedPlanTerms{
+		Program: &atomicv1.PlanProgram{
+			FormatVersion: proto.Uint32(1), ChainId: atomicUint256Bytes(chain), TokenIn: tokenIn.Bytes(), TokenOut: tokenOut.Bytes(), AmountIn: atomicUint256Bytes(amountIn),
+			Branches: []*atomicv1.PlanBranch{{AmountIn: atomicUint256Bytes(amountIn), Operations: []*atomicv1.PoolOperation{{
+				TokenIn: tokenIn.Bytes(), TokenOut: tokenOut.Bytes(), Pool: &atomicv1.PoolOperation_UniswapV3{UniswapV3: &atomicv1.V3Pool{
+					Factory: factory.Bytes(), Router: router.Bytes(), Pool: pool.Bytes(), FeePips: proto.Uint32(fee),
+				}},
+			}}}},
+		},
+		Executor: &atomicv1.ExecutorIdentity{Address: executor.Bytes(), Version: proto.Uint32(2), RuntimeCodeHash: runtimeHash.Bytes()},
+		Signer:   signer.Bytes(), Recipient: signer.Bytes(), BranchMinima: [][]byte{atomicUint256Bytes(minimum)}, AmountOutMinimum: atomicUint256Bytes(minimum),
+		QuoteBlock: &atomicv1.PinnedBlock{Number: atomicUint256Bytes(quoteBlock), Hash: quoteBlockHash.Bytes()}, ExpiresAtUnix: atomicUint256Bytes(new(big.Int).SetUint64(expiresAt)), DeadlineUnix: atomicUint256Bytes(new(big.Int).SetUint64(deadline)),
+	}
+	return terms, planID, nil
+}
+
+func atomicV1TransactionFingerprint(planID common.Hash, tx *quotev1.UnsignedTransaction) (common.Hash, error) {
+	chain, chainOK := new(big.Int).SetString(tx.ChainId, 10)
+	value, valueOK := new(big.Int).SetString(tx.ValueAtomic, 10)
+	gas, gasOK := new(big.Int).SetString(tx.GasLimit, 10)
+	data, err := hexutil.Decode(tx.Data)
+	if !chainOK || !valueOK || !gasOK || err != nil {
+		return common.Hash{}, errors.New("invalid transaction")
+	}
+	return atomicHash(
+		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}},
+		crypto.Keccak256Hash([]byte("Epeius.AtomicTransaction.v1")), planID, chain, common.HexToAddress(tx.From), common.HexToAddress(tx.To), value, crypto.Keccak256Hash(data), gas,
+	)
 }
 
 func atomicABIType(name string) abi.Type {

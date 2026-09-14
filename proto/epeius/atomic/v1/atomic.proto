@@ -4,8 +4,8 @@ package epeius.atomic.v1;
 
 option go_package = "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1;atomicv1";
 
-// Plan carries the exact ExecutorV2 call and the context needed to reconstruct
-// its on-chain event commitment. It is not the broader quote-plan commitment.
+// Plan carries the accepted terms and transaction identities alongside the
+// exact ExecutorV2 call and its narrower on-chain event commitment.
 message Plan {
   string executor_plan_hash = 1;
   string chain_id = 2;
@@ -17,6 +17,10 @@ message Plan {
   string amount_out_minimum_atomic = 8;
   string deadline_unix = 9;
   repeated Branch branches = 10;
+  // Consent and unsigned-transaction identities. Both are raw 32-byte hashes.
+  optional bytes plan_id = 11;
+  optional bytes transaction_fingerprint = 12;
+  AcceptedPlanTerms accepted_terms = 13;
 }
 
 message Branch {
@@ -33,4 +37,63 @@ message Operation {
   uint32 fee_pips = 3;
   sint32 tick_spacing = 4;
   string pool_id = 5;
+}
+
+// The accepted economic program uses the final Wave 5 typed provider identity.
+// This slice implements only the Uniswap V3 oneof case; unknown future cases
+// must be rejected rather than treated as the current operation.
+message PlanProgram {
+  optional uint32 format_version = 1;
+  optional bytes chain_id = 2;
+  optional bytes token_in = 3;
+  optional bytes token_out = 4;
+  optional bytes amount_in = 5;
+  repeated PlanBranch branches = 6;
+}
+
+message PlanBranch {
+  optional bytes amount_in = 1;
+  repeated PoolOperation operations = 2;
+}
+
+message PoolOperation {
+  optional bytes token_in = 1;
+  optional bytes token_out = 2;
+  reserved 3 to 9;
+  reserved "calldata", "target", "amount_in", "input_index", "dependencies";
+  oneof pool {
+    V3Pool uniswap_v3 = 10;
+  }
+}
+
+message V3Pool {
+  optional bytes factory = 1;
+  optional bytes router = 2;
+  optional bytes pool = 3;
+  optional uint32 fee_pips = 4;
+}
+
+message PinnedBlock {
+  optional bytes number = 1;
+  optional bytes hash = 2;
+}
+
+message ExecutorIdentity {
+  optional bytes address = 1;
+  optional uint32 version = 2;
+  optional bytes runtime_code_hash = 3;
+}
+
+message AcceptedPlanTerms {
+  PlanProgram program = 1;
+  ExecutorIdentity executor = 2;
+  optional bytes signer = 3;
+  optional bytes recipient = 4;
+  repeated bytes branch_minima = 5;
+  optional bytes amount_out_minimum = 6;
+  PinnedBlock quote_block = 7;
+  optional bytes expires_at_unix = 8;
+  optional bytes deadline_unix = 9;
+  reserved 10 to 15;
+  reserved "slippage_bps", "simulation_block", "transaction_hash", "signature";
 }
