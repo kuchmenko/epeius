@@ -16,6 +16,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -157,30 +158,44 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 			deploymentID, expectedKind = executor.PancakeDeployment, "pancake-v3"
 		} else if kind == 3 {
 			deploymentID, expectedKind = executor.SlipstreamDeployment, "aerodrome-slipstream"
+		} else if kind == 4 {
+			deploymentID, expectedKind = executor.BalancerDeployment, "balancer-v2"
 		}
 		configured, ok := chain.Config.Deployments[deploymentID]
 		if deploymentID == "" || !ok || configured.Kind != expectedKind || chain.DeploymentErrors[deploymentID] != "" || (providerKind != 0 && providerKind != kind) {
 			return validatedAtomicTerms{}, errors.New("deployment unavailable")
 		}
 		deployment, providerKind = configured, kind
-		invalidSelector := !poolOK || pool.selector == nil || (kind == 3 && (pool.selector.Sign() <= 0 || pool.selector.Cmp(big.NewInt(1<<23-1)) > 0)) || (kind != 3 && (pool.selector.Sign() < 0 || pool.selector.Cmp(big.NewInt(1_000_000)) >= 0))
-		if operation == nil || len(operation.TokenIn) != 20 || len(operation.TokenOut) != 20 || invalidSelector || len(pool.factory) != 20 || len(pool.router) != 20 || len(pool.pool) != 20 || common.BytesToAddress(operation.TokenIn) != current || common.BytesToAddress(operation.TokenIn) == common.BytesToAddress(operation.TokenOut) || common.BytesToAddress(pool.factory) != common.HexToAddress(deployment.Factory) || common.BytesToAddress(pool.router) != common.HexToAddress(deployment.Router) || common.BytesToAddress(pool.pool) == (common.Address{}) {
+		invalidSelector := !poolOK || (kind != 4 && pool.selector == nil) || (kind == 3 && (pool.selector.Sign() <= 0 || pool.selector.Cmp(big.NewInt(1<<23-1)) > 0)) || (kind < 3 && (pool.selector.Sign() < 0 || pool.selector.Cmp(big.NewInt(1_000_000)) >= 0))
+		invalidPool := len(pool.factory) != 20 || len(pool.router) != 20 || len(pool.pool) != 20 || common.BytesToAddress(pool.factory) != common.HexToAddress(deployment.Factory) || common.BytesToAddress(pool.router) != common.HexToAddress(deployment.Router) || common.BytesToAddress(pool.pool) == (common.Address{})
+		if kind == 4 {
+			options, optionsOK := deployment.ProviderConfig.(balancer.Options)
+			member := false
+			for _, value := range options.Pools {
+				member = member || common.HexToHash(value) == common.BytesToHash(pool.poolID)
+			}
+			invalidPool = !optionsOK || len(branch.Operations) != 1 || len(pool.vault) != 20 || len(pool.poolID) != 32 || common.BytesToAddress(pool.vault) == (common.Address{}) || common.BytesToHash(pool.poolID) == (common.Hash{}) || common.BytesToAddress(pool.vault) != common.HexToAddress(options.Vault) || !member
+		}
+		if operation == nil || len(operation.TokenIn) != 20 || len(operation.TokenOut) != 20 || invalidSelector || invalidPool || common.BytesToAddress(operation.TokenIn) != current || common.BytesToAddress(operation.TokenIn) == common.BytesToAddress(operation.TokenOut) {
 			return validatedAtomicTerms{}, errors.New("invalid operation")
 		}
 		fee, spacing := uint32(0), int32(0)
 		if kind == 3 {
 			spacing = int32(pool.selector.Int64())
-		} else {
+		} else if kind < 3 {
 			fee = uint32(pool.selector.Uint64())
 		}
 		key := atomicV1PoolKeyFromValues(kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), fee, spacing)
 		address := common.BytesToAddress(pool.pool)
+		if kind == 4 {
+			key, address = string(pool.poolID), balancerPoolAddress(common.BytesToHash(pool.poolID))
+		}
 		if seenPools[address] || seenKeys[key] {
 			return validatedAtomicTerms{}, errors.New("repeated pool")
 		}
 		seenPools[address], seenKeys[key] = true, true
 		current = common.BytesToAddress(operation.TokenOut)
-		executorOperations[i] = atomicV1Operation{Kind: kind, TokenOut: current, Fee: new(big.Int).SetUint64(uint64(fee)), TickSpacing: big.NewInt(int64(spacing))}
+		executorOperations[i] = atomicV1Operation{Kind: kind, TokenOut: current, Fee: new(big.Int).SetUint64(uint64(fee)), TickSpacing: big.NewInt(int64(spacing)), PoolId: common.BytesToHash(pool.poolID)}
 	}
 	if current != common.BytesToAddress(terms.Program.TokenOut) {
 		return validatedAtomicTerms{}, errors.New("broken continuity")
@@ -208,13 +223,21 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 	checks := SimulationChecks{Input: BalanceProbe{Token: executorPlan.TokenIn.Hex(), Owner: signer.Hex()}, Output: BalanceProbe{Token: executorPlan.TokenOut.Hex(), Owner: signer.Hex()}}
 	seenTokens := map[common.Address]bool{}
 	for _, operation := range branch.Operations {
+		spender := common.HexToAddress(deployment.Router)
+		if providerKind == 4 {
+			options, _ := deployment.ProviderConfig.(balancer.Options)
+			spender = common.HexToAddress(options.Vault)
+		}
 		for _, token := range []common.Address{common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut)} {
 			if !seenTokens[token] {
 				seenTokens[token] = true
-				checks.Preserve = append(checks.Preserve, BalanceProbe{Token: token.Hex(), Owner: executorAddress.Hex()}, BalanceProbe{Token: token.Hex(), Owner: common.HexToAddress(deployment.Router).Hex()})
+				checks.Preserve = append(checks.Preserve, BalanceProbe{Token: token.Hex(), Owner: executorAddress.Hex()})
+				if providerKind != 4 {
+					checks.Preserve = append(checks.Preserve, BalanceProbe{Token: token.Hex(), Owner: spender.Hex()})
+				}
 			}
 		}
-		checks.ClearAllowances = append(checks.ClearAllowances, AllowanceProbe{Token: common.BytesToAddress(operation.TokenIn).Hex(), Owner: executorAddress.Hex(), Spender: common.HexToAddress(deployment.Router).Hex()})
+		checks.ClearAllowances = append(checks.ClearAllowances, AllowanceProbe{Token: common.BytesToAddress(operation.TokenIn).Hex(), Owner: executorAddress.Hex(), Spender: spender.Hex()})
 	}
 	return validatedAtomicTerms{terms: proto.CloneOf(terms), program: proto.CloneOf(terms.Program), planID: planID, executorPlanHash: executorPlanHash, transaction: transaction, checks: checks, amount: amount, minimum: minimum, expires: expires, deadline: deadline}, nil
 }
@@ -357,12 +380,18 @@ func verifyAtomicV1Program(ctx context.Context, reader Reader, chain config.Chai
 			operationProvider = "pancake-v3"
 		} else if pool.kind == 3 {
 			operationProvider = "aerodrome-slipstream"
+		} else if pool.kind == 4 {
+			operationProvider = "balancer-v2"
 		}
 		if provider != "" && provider != operationProvider {
 			return errors.New("mixed Atomic V1 providers")
 		}
 		provider = operationProvider
 		legs[i] = &quotev1.RouteLeg{TokenIn: common.BytesToAddress(operation.TokenIn).Hex(), TokenOut: common.BytesToAddress(operation.TokenOut).Hex(), Pool: common.BytesToAddress(pool.pool).Hex()}
+		if pool.kind == 4 {
+			legs[i].Pool = common.BytesToHash(pool.poolID).Hex()
+			continue
+		}
 		if pool.kind == 3 {
 			legs[i].Selector = &quotev1.RouteLeg_TickSpacing{TickSpacing: int32(pool.selector.Int64())}
 		} else {

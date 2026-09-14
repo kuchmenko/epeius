@@ -54,6 +54,7 @@ type AtomicExecutor struct {
 	UniswapDeployment    string `toml:"uniswap_deployment"`
 	PancakeDeployment    string `toml:"pancake_deployment"`
 	SlipstreamDeployment string `toml:"slipstream_deployment"`
+	BalancerDeployment   string `toml:"balancer_deployment"`
 }
 
 type Token struct {

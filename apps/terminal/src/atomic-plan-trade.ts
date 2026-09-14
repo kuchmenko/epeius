@@ -70,6 +70,15 @@ export async function runAtomicPlanTrade(
       io.executor,
       io.slippageBps,
     );
+    const selectedOperation = candidate.program?.branches[0]?.operations[0];
+    const balancer =
+      selectedOperation?.pool.case === "balancerV2"
+        ? {
+            kind: 4,
+            vault: bytes20(selectedOperation.pool.value.vault),
+            poolId: bytes(selectedOperation.pool.value.poolId),
+          }
+        : undefined;
     io.report({
       quote: toJson(PlanQuoteResponseSchema, quote),
       selection: {
@@ -87,6 +96,7 @@ export async function runAtomicPlanTrade(
         deadlineUnix: accepted.deadline.toString(),
         planId: accepted.planId,
         afterApproval,
+        ...(balancer ? { balancer } : {}),
       },
     });
     const response = await io.prepare({
@@ -224,6 +234,12 @@ function unknownReceipt(io: AtomicPlanTradeIO, hash: string): ExecutionResult {
 function bytes(value: Uint8Array | undefined) {
   if (value?.length !== 32)
     throw new Error("Atomic V1 identity has the wrong width.");
+  return `0x${Buffer.from(value).toString("hex")}`;
+}
+
+function bytes20(value: Uint8Array | undefined) {
+  if (value?.length !== 20)
+    throw new Error("Atomic V1 address has the wrong width.");
   return `0x${Buffer.from(value).toString("hex")}`;
 }
 

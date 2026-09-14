@@ -134,6 +134,7 @@ export async function readSettings(path: string) {
           uniswap_deployment?: string;
           pancake_deployment?: string;
           slipstream_deployment?: string;
+          balancer_deployment?: string;
           [key: string]: unknown;
         };
         tokens?: Array<{

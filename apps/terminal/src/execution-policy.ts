@@ -50,12 +50,15 @@ export type TrustedExecution = {
   atomicExecutor?: ExecutionImplementation & {
     address: string;
     runtimeCodeHash: string;
-    factory: string;
-    router: string;
+    factory?: string;
+    router?: string;
     pancakeFactory?: string;
     pancakeRouter?: string;
     slipstreamFactory?: string;
     slipstreamRouter?: string;
+    balancerVault?: string;
+    balancerPools?: string[];
+    balancerPoolsHash?: string;
   };
 };
 

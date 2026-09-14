@@ -36,7 +36,7 @@ contract SlipstreamExecutorV2ForkTest {
         if (block.chainid != 8453) return;
         forkActive = true;
         require(ROUTER.balance == 0, "router starts with native balance");
-        executor = new ExecutorV2(address(0), address(0), ROUTER);
+        executor = new ExecutorV2(address(0), address(0), ROUTER, address(0), new bytes32[](0));
         vm.deal(address(this), 1 ether);
         IWethSlipstreamExecutorV2Fork(WETH).deposit{value: INPUT}();
         IERC20(WETH).approve(address(executor), INPUT);

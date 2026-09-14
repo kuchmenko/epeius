@@ -16,6 +16,7 @@ import (
 	atomicv1 "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 	"google.golang.org/protobuf/proto"
 )
@@ -44,18 +45,23 @@ func atomicV3Pool(operation *atomicv1.PoolOperation) (*atomicv1.V3Pool, uint8) {
 
 type atomicPoolIdentity struct {
 	factory, router, pool []byte
+	vault, poolID         []byte
 	selector              *big.Int
 	kind                  uint8
 	slipstream            bool
+	balancer              bool
 }
 
 func atomicPool(operation *atomicv1.PoolOperation) (atomicPoolIdentity, bool) {
 	if pool, kind := atomicV3Pool(operation); pool != nil {
-		return atomicPoolIdentity{pool.Factory, pool.Router, pool.Pool, new(big.Int).SetUint64(uint64(pool.GetFeePips())), kind, false}, true
+		return atomicPoolIdentity{factory: pool.Factory, router: pool.Router, pool: pool.Pool, selector: new(big.Int).SetUint64(uint64(pool.GetFeePips())), kind: kind}, true
 	}
 	if operation != nil {
 		if pool := operation.GetSlipstreamInitial(); pool != nil && pool.TickSpacing != nil {
-			return atomicPoolIdentity{pool.Factory, pool.Router, pool.Pool, big.NewInt(int64(pool.GetTickSpacing())), 3, true}, true
+			return atomicPoolIdentity{factory: pool.Factory, router: pool.Router, pool: pool.Pool, selector: big.NewInt(int64(pool.GetTickSpacing())), kind: 3, slipstream: true}, true
+		}
+		if pool := operation.GetBalancerV2(); pool != nil {
+			return atomicPoolIdentity{vault: pool.Vault, poolID: pool.PoolId, kind: 4, balancer: true}, true
 		}
 	}
 	return atomicPoolIdentity{}, false
@@ -90,10 +96,16 @@ func atomicCandidateHash(program *atomicv1.PlanProgram, block *atomicv1.PinnedBl
 			if pool.slipstream {
 				selectorType = int24Type
 			}
-			providerHash, err := atomicHash(
-				abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: addressType}, {Type: selectorType}},
-				atomicCandidateProviderDomain, pool.kind, common.BytesToAddress(pool.factory), common.BytesToAddress(pool.router), common.BytesToAddress(pool.pool), pool.selector,
-			)
+			var providerHash common.Hash
+			var err error
+			if pool.balancer {
+				providerHash, err = atomicHash(abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: bytes32Type}}, atomicCandidateProviderDomain, pool.kind, common.BytesToAddress(pool.vault), common.BytesToHash(pool.poolID))
+			} else {
+				providerHash, err = atomicHash(
+					abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: addressType}, {Type: selectorType}},
+					atomicCandidateProviderDomain, pool.kind, common.BytesToAddress(pool.factory), common.BytesToAddress(pool.router), common.BytesToAddress(pool.pool), pool.selector,
+				)
+			}
 			if err != nil {
 				return common.Hash{}, err
 			}
@@ -134,6 +146,17 @@ func atomicCandidateHash(program *atomicv1.PlanProgram, block *atomicv1.PinnedBl
 		abi.Arguments{{Type: bytes32Type}, {Type: bytes32Type}, {Type: uint256Type}, {Type: bytes32Type}, {Type: bytes32ArrayType}},
 		atomicCandidateDomain, programHash, new(big.Int).SetBytes(block.Number), common.BytesToHash(block.Hash), quoteHashes,
 	)
+}
+
+func atomicBalancerCandidate(chainID, amount *big.Int, tokenIn, tokenOut, vault common.Address, poolID common.Hash, block *atomicv1.PinnedBlock, output *big.Int) (*atomicv1.PlanCandidate, error) {
+	operation := &atomicv1.PoolOperation{TokenIn: tokenIn.Bytes(), TokenOut: tokenOut.Bytes(), Pool: &atomicv1.PoolOperation_BalancerV2{BalancerV2: &atomicv1.BalancerPool{Vault: vault.Bytes(), PoolId: poolID.Bytes()}}}
+	program := &atomicv1.PlanProgram{FormatVersion: proto.Uint32(1), ChainId: uint256Bytes(chainID), TokenIn: tokenIn.Bytes(), TokenOut: tokenOut.Bytes(), AmountIn: uint256Bytes(amount), Branches: []*atomicv1.PlanBranch{{AmountIn: uint256Bytes(amount), Operations: []*atomicv1.PoolOperation{operation}}}}
+	quotes := []*atomicv1.BranchQuote{{OperationOutputs: [][]byte{uint256Bytes(output)}}}
+	hash, err := atomicCandidateHash(program, block, quotes)
+	if err != nil {
+		return nil, err
+	}
+	return &atomicv1.PlanCandidate{CandidateId: hash.Bytes(), Program: program, QuoteBlock: proto.CloneOf(block), BranchQuotes: quotes}, nil
 }
 
 func atomicPlanCandidate(chainID, amount *big.Int, tokenIn, tokenOut common.Address, deployment config.Deployment, item candidate, block *atomicv1.PinnedBlock, outputs []*big.Int, legsPools []common.Address) (*atomicv1.PlanCandidate, error) {
@@ -250,14 +273,14 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 executor is not configured"))
 	}
 	deployments := map[string]config.Deployment{}
-	for id, kind := range map[string]string{executor.UniswapDeployment: "uniswap-v3", executor.PancakeDeployment: "pancake-v3", executor.SlipstreamDeployment: "aerodrome-slipstream"} {
+	for id, kind := range map[string]string{executor.UniswapDeployment: "uniswap-v3", executor.PancakeDeployment: "pancake-v3", executor.SlipstreamDeployment: "aerodrome-slipstream", executor.BalancerDeployment: "balancer-v2"} {
 		deployment, ok := chain.Config.Deployments[id]
 		if id != "" && ok && deployment.Kind == kind && chain.DeploymentErrors[id] == "" {
 			deployments[id] = deployment
 		}
 	}
 	if len(deployments) == 0 {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 V3 deployments are unavailable"))
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 deployments are unavailable"))
 	}
 
 	searchCtx, cancel := context.WithTimeout(ctx, time.Duration(r.GetSearchBudgetMs())*time.Millisecond)
@@ -277,7 +300,52 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("invalid quote block"))
 	}
 	block := &atomicv1.PinnedBlock{Number: uint256Bytes(blockNumber), Hash: common.HexToHash(snapshot.BlockHash).Bytes()}
-	iterator := newCandidates(config.Chain{Tokens: chain.Config.Tokens, Deployments: deployments}, tokenIn, tokenOut)
+	type workItem struct {
+		deployment string
+		candidate  candidate
+		poolID     common.Hash
+	}
+	var deploymentIDs []string
+	for id := range deployments {
+		deploymentIDs = append(deploymentIDs, id)
+	}
+	sort.Strings(deploymentIDs)
+	var work []workItem
+	for _, id := range deploymentIDs {
+		deployment := deployments[id]
+		if deployment.Kind == "balancer-v2" {
+			options, ok := deployment.ProviderConfig.(balancer.Options)
+			if !ok {
+				continue
+			}
+			pools := append([]string(nil), options.Pools...)
+			sort.Strings(pools)
+			for _, pool := range pools {
+				work = append(work, workItem{deployment: id, poolID: common.HexToHash(pool)})
+			}
+			continue
+		}
+		iterator := newCandidates(config.Chain{Tokens: chain.Config.Tokens, Deployments: map[string]config.Deployment{id: deployment}}, tokenIn, tokenOut)
+		for {
+			_, item, exists := iterator.next(searchCtx)
+			if !exists {
+				break
+			}
+			work = append(work, workItem{deployment: id, candidate: item})
+		}
+	}
+	var workMu sync.Mutex
+	nextWork := 0
+	takeWork := func() (int, workItem, bool) {
+		workMu.Lock()
+		defer workMu.Unlock()
+		if nextWork >= len(work) || searchCtx.Err() != nil {
+			return 0, workItem{}, false
+		}
+		index := nextWork
+		nextWork++
+		return index, work[index], true
+	}
 	type originCheck struct {
 		once sync.Once
 		err  error
@@ -295,7 +363,7 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 	results := make(chan result)
 	var workers sync.WaitGroup
 	for range h.QuoteConcurrency {
-		index, item, exists := iterator.next(searchCtx)
+		index, atomicWork, exists := takeWork()
 		if !exists {
 			break
 		}
@@ -303,12 +371,24 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		go func() {
 			defer workers.Done()
 			for {
-				deployment := deployments[item.deployment]
+				deployment := deployments[atomicWork.deployment]
+				item := atomicWork.candidate
 				var legs []*quotev1.RouteLeg
 				var outputs []*big.Int
 				var quoteErr error
-				if deployment.Kind == "aerodrome-slipstream" {
-					check := originChecks[item.deployment]
+				if deployment.Kind == "balancer-v2" {
+					options, _ := deployment.ProviderConfig.(balancer.Options)
+					var output *big.Int
+					if !atomicBalancerPair(searchCtx, chain.Client, common.HexToAddress(options.Vault), atomicWork.poolID, tokenIn, tokenOut, common.HexToHash(snapshot.BlockHash)) {
+						quoteErr = errors.New("Balancer V2 pool is not an exact pair")
+					} else {
+						output, _, quoteErr = quoteBalancerPoolWithSender(searchCtx, chain.Client, common.HexToAddress(options.Vault), atomicWork.poolID, tokenIn, tokenOut, amount, common.HexToHash(snapshot.BlockHash), common.HexToAddress(executor.Address))
+					}
+					if quoteErr == nil && output != nil {
+						outputs = []*big.Int{output}
+					}
+				} else if deployment.Kind == "aerodrome-slipstream" {
+					check := originChecks[atomicWork.deployment]
 					check.once.Do(func() {
 						check.err = verifySlipstreamQuoteOrigin(searchCtx, chain.Client, common.HexToHash(snapshot.BlockHash), common.HexToAddress(deployment.Factory))
 					})
@@ -325,7 +405,10 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 				if deployment.Kind == "aerodrome-slipstream" {
 					expectedLegs = len(item.spacings)
 				}
-				if quoteErr == nil && len(legs) == expectedLegs {
+				if deployment.Kind == "balancer-v2" && quoteErr == nil && len(outputs) == 1 {
+					options, _ := deployment.ProviderConfig.(balancer.Options)
+					value, _ = atomicBalancerCandidate(chainID, amount, tokenIn, tokenOut, common.HexToAddress(options.Vault), atomicWork.poolID, block, outputs[0])
+				} else if quoteErr == nil && len(legs) == expectedLegs {
 					pools := make([]common.Address, len(legs))
 					for i, leg := range legs {
 						pools[i] = common.HexToAddress(leg.Pool)
@@ -333,7 +416,7 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 					value, _ = atomicPlanCandidate(chainID, amount, tokenIn, tokenOut, deployment, item, block, outputs, pools)
 				}
 				results <- result{index: index, value: value}
-				index, item, exists = iterator.next(searchCtx)
+				index, atomicWork, exists = takeWork()
 				if !exists {
 					return
 				}

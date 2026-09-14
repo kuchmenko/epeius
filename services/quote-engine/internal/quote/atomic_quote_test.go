@@ -7,11 +7,13 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -19,6 +21,7 @@ import (
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
@@ -33,6 +36,8 @@ type atomicCandidateFixture struct {
 	AmountIn          string   `json:"amountIn"`
 	Factory           string   `json:"factory"`
 	Router            string   `json:"router"`
+	Vault             string   `json:"vault"`
+	PoolID            string   `json:"poolId"`
 	Pools             []string `json:"pools"`
 	Fees              []uint32 `json:"fees"`
 	TickSpacings      []int32  `json:"tickSpacings"`
@@ -51,6 +56,21 @@ type atomicCandidateFixture struct {
 	ExecutorPlanHash  string   `json:"executorPlanHash"`
 	Fingerprint       string   `json:"transactionFingerprint"`
 	CalldataHash      string   `json:"executorCalldataHash"`
+	ProviderHashes    []string `json:"providerHashes"`
+	OperationHashes   []string `json:"operationHashes"`
+}
+
+func loadBalancerAtomicFixture(t *testing.T) atomicCandidateFixture {
+	t.Helper()
+	data, err := os.ReadFile("../../../../contracts/fixtures/atomic-v1-balancer.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result atomicCandidateFixture
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func loadSlipstreamAtomicFixture(t *testing.T) atomicCandidateFixture {
@@ -196,6 +216,45 @@ func TestSlipstreamAtomicIdentitiesMatchIndependentCastVector(t *testing.T) {
 	}
 }
 
+func TestBalancerAtomicIdentityVector(t *testing.T) {
+	f := loadBalancerAtomicFixture(t)
+	chainID, _ := new(big.Int).SetString(f.ChainID, 10)
+	amount, _ := new(big.Int).SetString(f.AmountIn, 10)
+	minimum, _ := new(big.Int).SetString(f.Minimum, 10)
+	blockNumber, _ := new(big.Int).SetString(f.QuoteBlockNumber, 10)
+	expires, _ := new(big.Int).SetString(f.ExpiresAtUnix, 10)
+	deadline, _ := new(big.Int).SetString(f.DeadlineUnix, 10)
+	output, _ := new(big.Int).SetString(f.OperationOutputs[0], 10)
+	vault, poolID := common.HexToAddress(f.Vault), common.HexToHash(f.PoolID)
+	in, out := common.HexToAddress(f.TokenIn), common.HexToAddress(f.TokenOut)
+	block := &atomicv1.PinnedBlock{Number: uint256Bytes(blockNumber), Hash: common.HexToHash(f.QuoteBlockHash).Bytes()}
+	candidate, err := atomicBalancerCandidate(chainID, amount, in, out, vault, poolID, block, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, _ := atomicHash(abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}}, atomicCandidateProviderDomain, uint8(4), vault, poolID)
+	operation, _ := atomicHash(abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}}, atomicCandidateOperationDomain, uint8(4), in, out, provider)
+	executor, signer := common.HexToAddress(f.Executor), common.HexToAddress(f.Signer)
+	terms := &atomicv1.AcceptedPlanTerms{Program: candidate.Program, Executor: &atomicv1.ExecutorIdentity{Address: executor.Bytes(), Version: proto.Uint32(2), RuntimeCodeHash: common.HexToHash(f.RuntimeCodeHash).Bytes()}, Signer: signer.Bytes(), Recipient: signer.Bytes(), BranchMinima: [][]byte{uint256Bytes(minimum)}, AmountOutMinimum: uint256Bytes(minimum), QuoteBlock: block, ExpiresAtUnix: uint256Bytes(expires), DeadlineUnix: uint256Bytes(deadline)}
+	planID, _ := atomicV1PlanID(terms)
+	plan := atomicV1ExecutorPlan{TokenIn: in, TokenOut: out, AmountIn: amount, MinAmountOut: minimum, Deadline: deadline, Branches: []atomicV1Branch{{AmountIn: amount, MinAmountOut: minimum, Operations: []atomicV1Operation{{Kind: 4, TokenOut: out, Fee: new(big.Int), TickSpacing: new(big.Int), PoolId: poolID}}}}}
+	data, _ := contractabi.ExecutorV2.Pack("execute", plan)
+	executorHash, _ := atomicV1ExecutorPlanHash(f.ChainID, executor, signer, plan)
+	tx := &quotev1.UnsignedTransaction{ChainId: f.ChainID, From: signer.Hex(), To: executor.Hex(), Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: f.GasLimit}
+	fingerprint, _ := atomicV1TransactionFingerprint(planID, tx)
+	want := []string{f.ProviderHashes[0], f.OperationHashes[0], f.CandidateID, f.PlanID, f.ExecutorPlanHash, f.CalldataHash, f.Fingerprint}
+	got := []string{provider.Hex(), operation.Hex(), common.BytesToHash(candidate.CandidateId).Hex(), planID.Hex(), executorHash.Hex(), crypto.Keccak256Hash(data).Hex(), fingerprint.Hex()}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Balancer identity vector differs: %v", got)
+	}
+	mutated := proto.CloneOf(candidate)
+	mutated.Program.Branches[0].Operations[0].GetBalancerV2().PoolId[31] ^= 1
+	mutatedHash, err := atomicCandidateHash(mutated.Program, mutated.QuoteBlock, mutated.BranchQuotes)
+	if err != nil || mutatedHash == common.BytesToHash(candidate.CandidateId) {
+		t.Fatal("full pool ID suffix is absent from candidate identity")
+	}
+}
+
 func TestAtomicPoolKeyIncludesProviderAndItsExactSelector(t *testing.T) {
 	tokenA := common.HexToAddress("0x0000000000000000000000000000000000000011")
 	tokenB := common.HexToAddress("0x0000000000000000000000000000000000000022")
@@ -276,6 +335,57 @@ func TestAtomicPlanQuoteCanonicalPathsUseSequentialOutputs(t *testing.T) {
 	}
 	if got.Candidates[0].Program.Branches[0].Operations[0].GetUniswapV3().GetFeePips() != 500 || got.Candidates[1].Program.Branches[0].Operations[0].GetUniswapV3().GetFeePips() != 3000 {
 		t.Fatal("direct candidates are not in canonical fee order")
+	}
+}
+
+func TestAtomicPlanQuoteBalancerUsesExecutorSenderAndCanonicalPoolOrder(t *testing.T) {
+	pool1 := common.HexToHash("0x1111111111111111111111111111111111111111000000000000000000000001")
+	pool2 := common.HexToHash("0x2222222222222222222222222222222222222222000000000000000000000002")
+	vault, executor := common.HexToAddress("0x3333333333333333333333333333333333333333"), common.HexToAddress("0x4444444444444444444444444444444444444444")
+	cfg := atomicQuoteConfig(common.HexToAddress("0x55"))
+	cfg.Deployments = map[string]config.Deployment{"bal": {Kind: "balancer-v2", ProviderConfig: balancer.Options{Vault: vault.Hex(), Pools: []string{pool1.Hex(), pool2.Hex()}}}}
+	cfg.AtomicExecutor = &config.AtomicExecutor{Address: executor.Hex(), RuntimeCodeHash: common.HexToHash("0x11").Hex(), BalancerDeployment: "bal"}
+	reader := readerFake{snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil }, call: func(_ context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
+		if to != vault {
+			return nil, errors.New("wrong target")
+		}
+		if bytes.Equal(data[:4], balancerVaultABI.Methods["getPoolTokens"].ID) {
+			return balancerTokensResult(t, testWETH.Hex(), common.HexToAddress("0x5555555555555555555555555555555555555555").Hex(), testUSDC.Hex()), nil
+		}
+		values, err := balancerVaultABI.Methods["queryBatchSwap"].Inputs.Unpack(data[4:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		funds := values[3].(struct {
+			Sender              common.Address `json:"sender"`
+			FromInternalBalance bool           `json:"fromInternalBalance"`
+			Recipient           common.Address `json:"recipient"`
+			ToInternalBalance   bool           `json:"toInternalBalance"`
+		})
+		if funds.Sender != executor || funds.Recipient != executor || funds.Sender == balancerQuerySender {
+			t.Fatal("Atomic quote did not use executor as Balancer sender")
+		}
+		steps := values[1].([]struct {
+			PoolId        [32]byte `json:"poolId"`
+			AssetInIndex  *big.Int `json:"assetInIndex"`
+			AssetOutIndex *big.Int `json:"assetOutIndex"`
+			Amount        *big.Int `json:"amount"`
+			UserData      []uint8  `json:"userData"`
+		})
+		if common.Hash(steps[0].PoolId) == pool1 {
+			time.Sleep(3 * time.Millisecond)
+		}
+		return balancerVaultABI.Methods["queryBatchSwap"].Outputs.Pack([]*big.Int{big.NewInt(37), big.NewInt(-31)})
+	}}
+	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: cfg}}, QuoteConcurrency: 2}).GetPlanQuote(t.Context(), connect.NewRequest(atomicQuoteRequest("8453", testWETH, testUSDC, "37")))
+	if err != nil || len(response.Msg.Candidates) != 2 {
+		t.Fatalf("Balancer quote failed: %+v %v", response, err)
+	}
+	for i, want := range []common.Hash{pool1, pool2} {
+		pool := response.Msg.Candidates[i].Program.Branches[0].Operations[0].GetBalancerV2()
+		if pool == nil || common.BytesToHash(pool.PoolId) != want || response.Msg.Candidates[i].NetworkCostOut != nil {
+			t.Fatal("Balancer candidates escaped canonical order")
+		}
 	}
 }
 

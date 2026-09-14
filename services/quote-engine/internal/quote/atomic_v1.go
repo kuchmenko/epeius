@@ -16,6 +16,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -354,10 +355,16 @@ func atomicV1PlanID(terms *atomicv1.AcceptedPlanTerms) (common.Hash, error) {
 			if pool.slipstream {
 				selectorType = atomicABIType("int24")
 			}
-			providerHash, err := atomicHash(
-				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: selectorType}},
-				crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), pool.kind, common.BytesToAddress(pool.factory), common.BytesToAddress(pool.router), common.BytesToAddress(pool.pool), pool.selector,
-			)
+			var providerHash common.Hash
+			var err error
+			if pool.balancer {
+				providerHash, err = atomicHash(abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}}, crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), pool.kind, common.BytesToAddress(pool.vault), common.BytesToHash(pool.poolID))
+			} else {
+				providerHash, err = atomicHash(
+					abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: selectorType}},
+					crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), pool.kind, common.BytesToAddress(pool.factory), common.BytesToAddress(pool.router), common.BytesToAddress(pool.pool), pool.selector,
+				)
+			}
 			if err != nil {
 				return common.Hash{}, err
 			}
@@ -455,12 +462,45 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 			return errors.New("Atomic V1 executor linkage failed")
 		}
 	}
+	balancerDeployment := chain.Deployments[e.BalancerDeployment]
+	balancerOptions, _ := balancerDeployment.ProviderConfig.(balancer.Options)
+	balancerVaultMethod := contractabi.ExecutorV2.Methods["balancerVault"]
+	data, err := reader.Call(ctx, target, balancerVaultMethod.ID, hash)
+	if err != nil {
+		return errors.New("Atomic V1 executor linkage failed")
+	}
+	values, err := evm.Unpack(balancerVaultMethod, data)
+	if err != nil || values[0].(common.Address) != common.HexToAddress(balancerOptions.Vault) {
+		return errors.New("Atomic V1 executor linkage failed")
+	}
+	if e.BalancerDeployment != "" {
+		poolIDs := make([][32]byte, len(balancerOptions.Pools))
+		for i, value := range balancerOptions.Pools {
+			poolIDs[i] = common.HexToHash(value)
+		}
+		encodedPools, _ := abi.Arguments{{Type: atomicABIType("bytes32[]")}}.Pack(poolIDs)
+		poolsHashMethod := contractabi.ExecutorV2.Methods["balancerPoolsHash"]
+		data, err = reader.Call(ctx, target, poolsHashMethod.ID, hash)
+		values, unpackErr := evm.Unpack(poolsHashMethod, data)
+		if err != nil || unpackErr != nil || values[0].([32]byte) != crypto.Keccak256Hash(encodedPools) {
+			return errors.New("Atomic V1 executor Balancer list failed")
+		}
+		membershipMethod := contractabi.ExecutorV2.Methods["isBalancerPoolAllowed"]
+		for _, poolID := range poolIDs {
+			arguments, _ := membershipMethod.Inputs.Pack(poolID)
+			data, err = reader.Call(ctx, target, append(membershipMethod.ID, arguments...), hash)
+			values, unpackErr = evm.Unpack(membershipMethod, data)
+			if err != nil || unpackErr != nil || !values[0].(bool) || verifyBalancerPool(ctx, code, common.HexToAddress(balancerOptions.Vault), poolID, hash) != nil {
+				return errors.New("Atomic V1 executor Balancer membership failed")
+			}
+		}
+	}
 	version := contractabi.ExecutorV2.Methods["version"]
-	data, err := reader.Call(ctx, target, version.ID, hash)
+	data, err = reader.Call(ctx, target, version.ID, hash)
 	if err != nil {
 		return errors.New("Atomic V1 executor version failed")
 	}
-	values, err := evm.Unpack(version, data)
+	values, err = evm.Unpack(version, data)
 	if err != nil || values[0].(*big.Int).Cmp(big.NewInt(2)) != 0 {
 		return errors.New("Atomic V1 executor version failed")
 	}
@@ -469,10 +509,18 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 		deploymentID = e.PancakeDeployment
 	} else if route.Provider == "aerodrome-slipstream" {
 		deploymentID = e.SlipstreamDeployment
+	} else if route.Provider == "balancer-v2" {
+		deploymentID = e.BalancerDeployment
 	}
 	deployment := chain.Deployments[deploymentID]
 	if deploymentID == "" || route.Provider != deployment.Kind {
 		return errors.New("Atomic V1 provider verification failed")
+	}
+	if route.Provider == "balancer-v2" {
+		if len(route.Legs) != 1 || verifyAtomicBalancerPool(ctx, code, target, balancerOptions, common.HexToHash(route.Legs[0].Pool), common.HexToAddress(route.Legs[0].TokenIn), common.HexToAddress(route.Legs[0].TokenOut), hash) != nil {
+			return errors.New("Atomic V1 pool verification failed")
+		}
+		return nil
 	}
 	method := contractabi.UniswapV3Factory.Methods["getPool"]
 	if route.Provider == "aerodrome-slipstream" {
@@ -494,4 +542,38 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 		}
 	}
 	return nil
+}
+
+func verifyAtomicBalancerPool(ctx context.Context, reader codeReader, executor common.Address, options balancer.Options, poolID common.Hash, tokenIn, tokenOut common.Address, hash common.Hash) error {
+	configured := false
+	for _, value := range options.Pools {
+		configured = configured || common.HexToHash(value) == poolID
+	}
+	if !configured || poolID == (common.Hash{}) || verifyBalancerPool(ctx, reader, common.HexToAddress(options.Vault), poolID, hash) != nil {
+		return errors.New("Balancer pool unavailable")
+	}
+	method := contractabi.ExecutorV2.Methods["isBalancerPoolAllowed"]
+	args, _ := method.Inputs.Pack(poolID)
+	raw, err := reader.Call(ctx, executor, append(method.ID, args...), hash)
+	values, unpackErr := evm.Unpack(method, raw)
+	if err != nil || unpackErr != nil || !values[0].(bool) {
+		return errors.New("Balancer pool membership mismatch")
+	}
+	if !atomicBalancerPair(ctx, reader, common.HexToAddress(options.Vault), poolID, tokenIn, tokenOut, hash) {
+		return errors.New("Balancer token mismatch")
+	}
+	return nil
+}
+
+func atomicBalancerPair(ctx context.Context, reader Reader, vault common.Address, poolID common.Hash, tokenIn, tokenOut common.Address, hash common.Hash) bool {
+	tokens, err := balancerPoolTokens(ctx, reader, vault, poolID, hash)
+	if err != nil || tokenIn == balancerPoolAddress(poolID) || tokenOut == balancerPoolAddress(poolID) {
+		return false
+	}
+	hasIn, hasOut := false, false
+	for _, token := range tokens {
+		hasIn = hasIn || token == tokenIn
+		hasOut = hasOut || token == tokenOut
+	}
+	return hasIn && hasOut
 }

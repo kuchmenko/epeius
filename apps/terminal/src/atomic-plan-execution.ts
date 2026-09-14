@@ -59,35 +59,46 @@ function rejectUnknown(value: unknown) {
 export type AtomicExecutorIdentity = {
   address: string;
   runtimeCodeHash: string;
-  factory: string;
-  router: string;
+  factory?: string;
+  router?: string;
   pancakeFactory?: string;
   pancakeRouter?: string;
   slipstreamFactory?: string;
   slipstreamRouter?: string;
+  balancerVault?: string;
+  balancerPools?: string[];
+  balancerPoolsHash?: string;
 };
 
 const operationPool = (operation: PoolOperation) => {
   if (operation.pool.case === "uniswapV3")
     return {
       pool: operation.pool.value,
-      kind: 1,
+      kind: 1 as const,
       fee: operation.pool.value.feePips,
       tickSpacing: 0,
     };
   if (operation.pool.case === "pancakeV3")
     return {
       pool: operation.pool.value,
-      kind: 2,
+      kind: 2 as const,
       fee: operation.pool.value.feePips,
       tickSpacing: 0,
     };
   if (operation.pool.case === "slipstreamInitial")
     return {
       pool: operation.pool.value,
-      kind: 3,
+      kind: 3 as const,
       fee: 0,
       tickSpacing: operation.pool.value.tickSpacing,
+    };
+  if (operation.pool.case === "balancerV2")
+    return {
+      pool: operation.pool.value,
+      kind: 4 as const,
+      fee: 0,
+      tickSpacing: 0,
+      poolId: exact(operation.pool.value.poolId, 32, "Balancer pool ID"),
     };
   throw new Error("Atomic V1 operation is unsupported.");
 };
@@ -107,9 +118,11 @@ export function acceptAtomicCandidate(
   if (!program || !quoteBlock || program.branches.length !== 1 || !quote)
     throw new Error("Atomic V1 candidate is incomplete.");
   const branch = program.branches[0];
+  const isBalancer = branch.operations[0]?.pool.case === "balancerV2";
   if (
     branch.operations.length < 1 ||
     branch.operations.length > 2 ||
+    (isBalancer && branch.operations.length !== 1) ||
     quote.operationOutputs.length !== branch.operations.length
   )
     throw new Error("Atomic V1 candidate path is unsupported.");
@@ -122,34 +135,46 @@ export function acceptAtomicCandidate(
     throw new Error("Atomic V1 minimum output must be positive.");
   const localExecutor = getAddress(executor.address);
   const first = operationPool(branch.operations[0]);
-  const localFactory = getAddress(
-    first.kind === 1
-      ? executor.factory
-      : first.kind === 2
-        ? (executor.pancakeFactory ?? "")
-        : (executor.slipstreamFactory ?? ""),
-  );
-  const localRouter = getAddress(
-    first.kind === 1
-      ? executor.router
-      : first.kind === 2
-        ? (executor.pancakeRouter ?? "")
-        : (executor.slipstreamRouter ?? ""),
-  );
+  const localFactory =
+    first.kind === 4
+      ? undefined
+      : getAddress(
+          first.kind === 1
+            ? (executor.factory ?? "")
+            : first.kind === 2
+              ? (executor.pancakeFactory ?? "")
+              : (executor.slipstreamFactory ?? ""),
+        );
+  const localRouter =
+    first.kind === 4
+      ? undefined
+      : getAddress(
+          first.kind === 1
+            ? (executor.router ?? "")
+            : first.kind === 2
+              ? (executor.pancakeRouter ?? "")
+              : (executor.slipstreamRouter ?? ""),
+        );
   const runtimeCodeHash = executor.runtimeCodeHash as `0x${string}`;
   if (!isHash(runtimeCodeHash))
     throw new Error("Local Atomic V1 runtime hash is invalid.");
   for (const operation of branch.operations) {
-    const { pool, kind, fee, tickSpacing } = operationPool(operation);
+    const { pool, kind, fee, tickSpacing, poolId } = operationPool(operation);
     if (
       kind !== first.kind ||
-      (kind === 3
-        ? tickSpacing === undefined ||
-          tickSpacing <= 0 ||
-          tickSpacing > 8_388_607
-        : fee === undefined || fee >= 1_000_000) ||
-      getAddress(exact(pool.factory, 20, "factory")) !== localFactory ||
-      getAddress(exact(pool.router, 20, "router")) !== localRouter
+      (kind === 4
+        ? getAddress(exact(pool.vault, 20, "Balancer Vault")) !==
+            getAddress(executor.balancerVault ?? "") ||
+          poolId === zeroHash ||
+          !executor.balancerPools?.includes(poolId)
+        : kind === 3
+          ? tickSpacing === undefined ||
+            tickSpacing <= 0 ||
+            tickSpacing > 8_388_607
+          : fee === undefined || fee >= 1_000_000) ||
+      (kind !== 4 &&
+        (getAddress(exact(pool.factory, 20, "factory")) !== localFactory ||
+          getAddress(exact(pool.router, 20, "router")) !== localRouter))
     )
       throw new Error("Atomic V1 candidate differs from local deployment.");
   }
@@ -369,7 +394,7 @@ function executorPlanFromTerms(
         amountIn: uint(branch.amountIn, "branch input"),
         minAmountOut: uint(terms.branchMinima[0], "branch minimum"),
         operations: branch.operations.map((operation) => {
-          const { kind, fee, tickSpacing } = operationPool(operation);
+          const { kind, fee, tickSpacing, poolId } = operationPool(operation);
           if (fee === undefined || tickSpacing === undefined)
             throw new Error("Atomic V1 operation is unsupported.");
           return {
@@ -379,7 +404,7 @@ function executorPlanFromTerms(
             ),
             fee,
             tickSpacing,
-            poolId: zeroHash,
+            poolId: poolId ?? zeroHash,
           };
         }),
       },
@@ -411,7 +436,11 @@ function receiptObligations(
   if (!program) throw new Error("Atomic V1 accepted program is absent.");
   const operations = program.branches[0].operations;
   const first = operationPool(operations[0]);
-  const router = getAddress(exact(first.pool.router, 20, "router"));
+  const endpoint = getAddress(
+    first.kind === 4
+      ? exact(first.pool.vault, 20, "Balancer Vault")
+      : exact(first.pool.router, 20, "router"),
+  );
   const tokenIn = exact(program.tokenIn, 20, "input token");
   const tokenOut = exact(program.tokenOut, 20, "output token");
   return {
@@ -422,7 +451,7 @@ function receiptObligations(
     amountOutMinimumAtomic: expected.minimum.toString(),
     intermediate: operations.slice(0, -1).map((operation) => ({
       token: exact(operation.tokenOut, 20, "intermediate token"),
-      owner: router,
+      owner: endpoint,
     })),
     touched: [
       tokenIn,
@@ -431,7 +460,7 @@ function receiptObligations(
       ),
     ].flatMap((token) => [
       { token, owner: executor },
-      { token, owner: router },
+      ...(first.kind === 4 ? [] : [{ token, owner: endpoint }]),
     ]),
     atomicPlan: {
       executor,

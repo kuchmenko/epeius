@@ -19,6 +19,7 @@ import type {
 } from "../../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import type { PrepareExecutionResponse } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type SwapTerms, uint256Decimal } from "../execution-policy";
+import { type BalancerV2Deployment, isBalancerPoolId } from "./balancer-v2";
 import { admitV3Route, type V3Deployment, v3Review } from "./v3";
 
 type AtomicOperation = {
@@ -87,23 +88,33 @@ const atomicPool = (operation: PoolOperation) => {
   if (operation.pool.case === "uniswapV3")
     return {
       pool: operation.pool.value,
-      kind: 1,
+      kind: 1 as const,
       selector: operation.pool.value.feePips,
       selectorType: "uint24" as const,
     };
   if (operation.pool.case === "pancakeV3")
     return {
       pool: operation.pool.value,
-      kind: 2,
+      kind: 2 as const,
       selector: operation.pool.value.feePips,
       selectorType: "uint24" as const,
     };
   if (operation.pool.case === "slipstreamInitial")
     return {
       pool: operation.pool.value,
-      kind: 3,
+      kind: 3 as const,
       selector: operation.pool.value.tickSpacing,
       selectorType: "int24" as const,
+    };
+  if (operation.pool.case === "balancerV2")
+    return {
+      pool: operation.pool.value,
+      kind: 4 as const,
+      poolId: requiredBytes(
+        operation.pool.value.poolId,
+        32,
+        "Balancer pool ID",
+      ),
     };
   throw new Error("Atomic V1 accepted operation is unsupported.");
 };
@@ -248,29 +259,49 @@ export function atomicV1AcceptedBranchHashes(
     throw new Error("Atomic V1 accepted branch cardinality is invalid.");
   return program.branches.map((branch, branchIndex) => {
     const operationHashes = branch.operations.map((operation) => {
-      const { pool, kind, selector, selectorType } = atomicPool(operation);
-      if (selector === undefined)
+      const identity = atomicPool(operation);
+      const { pool, kind } = identity;
+      const selector = kind === 4 ? undefined : identity.selector;
+      if (kind !== 4 && selector === undefined)
         throw new Error("Atomic V1 accepted operation is unsupported.");
-      const providerHash = keccak256(
-        encodeAbiParameters(
-          [
-            { type: "bytes32" },
-            { type: "uint8" },
-            { type: "address" },
-            { type: "address" },
-            { type: "address" },
-            { type: selectorType },
-          ],
-          [
-            domain("Epeius.AtomicProvider.v1"),
-            kind,
-            getAddress(requiredBytes(pool.factory, 20, "factory")),
-            getAddress(requiredBytes(pool.router, 20, "router")),
-            getAddress(requiredBytes(pool.pool, 20, "pool")),
-            selector,
-          ],
-        ),
-      );
+      const providerHash =
+        kind === 4
+          ? keccak256(
+              encodeAbiParameters(
+                [
+                  { type: "bytes32" },
+                  { type: "uint8" },
+                  { type: "address" },
+                  { type: "bytes32" },
+                ],
+                [
+                  domain("Epeius.AtomicProvider.v1"),
+                  4,
+                  getAddress(requiredBytes(pool.vault, 20, "Balancer Vault")),
+                  identity.poolId,
+                ],
+              ),
+            )
+          : keccak256(
+              encodeAbiParameters(
+                [
+                  { type: "bytes32" },
+                  { type: "uint8" },
+                  { type: "address" },
+                  { type: "address" },
+                  { type: "address" },
+                  { type: identity.selectorType },
+                ],
+                [
+                  domain("Epeius.AtomicProvider.v1"),
+                  kind,
+                  getAddress(requiredBytes(pool.factory, 20, "factory")),
+                  getAddress(requiredBytes(pool.router, 20, "router")),
+                  getAddress(requiredBytes(pool.pool, 20, "pool")),
+                  selector ?? 0,
+                ],
+              ),
+            );
       return keccak256(
         encodeAbiParameters(
           [
@@ -318,6 +349,7 @@ export function atomicExecutorV1(
     uniswapDeployment?: string;
     pancakeDeployment?: string;
     slipstreamDeployment?: string;
+    balancerDeployment?: string;
   },
   deployments: Record<string, { kind: string }>,
 ) {
@@ -346,39 +378,68 @@ export function atomicExecutorV1(
           }
         | undefined)
     : undefined;
+  const balancer = raw.balancerDeployment
+    ? (deployments[raw.balancerDeployment] as BalancerV2Deployment | undefined)
+    : undefined;
+  const endpoints = [uniswap, pancake, slipstream, balancer].flatMap((value) =>
+    value
+      ? [
+          "vault" in value
+            ? value.vault.toLowerCase()
+            : value.router.toLowerCase(),
+        ]
+      : [],
+  );
   if (
     (raw.uniswapDeployment && uniswap?.kind !== "uniswap-v3") ||
     (raw.pancakeDeployment && pancake?.kind !== "pancake-v3") ||
     (raw.slipstreamDeployment && slipstream?.kind !== "aerodrome-slipstream") ||
-    (!uniswap && !pancake && !slipstream) ||
+    (raw.balancerDeployment && balancer?.kind !== "balancer-v2") ||
+    (!uniswap && !pancake && !slipstream && !balancer) ||
     [uniswap, pancake, slipstream].some((value) => value && !value.factory) ||
-    new Set(
-      [uniswap, pancake, slipstream]
-        .filter(Boolean)
-        .map((value) => value?.router.toLowerCase()),
-    ).size !== [uniswap, pancake, slipstream].filter(Boolean).length
+    new Set(endpoints).size !== endpoints.length ||
+    (balancer &&
+      (!isAddress(balancer.vault) ||
+        getAddress(balancer.vault) === zeroAddress ||
+        !balancer.pools.length ||
+        !balancer.pools.every(isBalancerPoolId) ||
+        balancer.pools.includes(zeroHash) ||
+        [...balancer.pools]
+          .sort()
+          .some((pool, index) => pool !== balancer.pools[index])))
   )
     throw new Error(
-      "Local Atomic V1 executor needs at least one valid deployment with distinct routers.",
+      "Local Atomic V1 executor needs at least one valid deployment with distinct endpoints.",
     );
   const deployment = uniswap ?? pancake ?? slipstream;
-  if (!deployment?.factory) throw new Error("Invalid Atomic V1 deployment.");
-  const factory = deployment.factory;
+  const factory = deployment?.factory;
 
   return {
     address,
     runtimeCodeHash,
     factory,
-    router: deployment.router,
+    router: deployment?.router,
     pancakeFactory: pancake?.factory,
     pancakeRouter: pancake?.router,
     slipstreamFactory: slipstream?.factory,
     slipstreamRouter: slipstream?.router,
+    balancerVault: balancer?.vault,
+    balancerPools: balancer ? [...balancer.pools] : undefined,
+    balancerPoolsHash: balancer
+      ? keccak256(
+          encodeAbiParameters(
+            [{ type: "bytes32[]" }],
+            [balancer.pools as `0x${string}`[]],
+          ),
+        )
+      : undefined,
     plan(
       p: PrepareExecutionResponse,
       tokens: string[],
       slippageBps: number,
     ): SwapTerms {
+      if (!deployment || !factory)
+        throw new Error("Invalid Atomic V1 deployment.");
       const wirePlan = p.atomicPlan;
       const selected = p.route
         ? [{ amountInAtomic: p.amountInAtomic, route: p.route }]

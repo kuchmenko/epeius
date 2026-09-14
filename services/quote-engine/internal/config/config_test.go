@@ -308,6 +308,50 @@ pools = ["` + pool + `"]
 	}
 }
 
+func TestAtomicExecutorAcceptsCanonicalBalancerPoolsAndRejectsInvalidSelection(t *testing.T) {
+	const first = "0x1111111111111111111111111111111111111111000000000000000000000001"
+	const second = "0x2222222222222222222222222222222222222222000000000000000000000002"
+	text := validConfig + `
+[chains.test-net.deployments.balancer]
+kind = "balancer-v2"
+[chains.test-net.deployments.balancer.options]
+vault = "0x3333333333333333333333333333333333333333"
+pools = ["` + first + `", "` + second + `"]
+[chains.test-net.atomic_executor]
+address = "0x4444444444444444444444444444444444444444"
+runtime_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+balancer_deployment = "balancer"
+`
+	if got, err := loadText(t, text); err != nil || got.Chains["test-net"].AtomicExecutor.BalancerDeployment != "balancer" {
+		t.Fatalf("Balancer-only Atomic executor rejected: %v", err)
+	}
+	for _, changed := range []string{
+		strings.Replace(text, `pools = ["`+first+`", "`+second+`"]`, `pools = []`, 1),
+		strings.Replace(text, `pools = ["`+first+`", "`+second+`"]`, `pools = ["`+second+`", "`+first+`"]`, 1),
+		strings.Replace(text, `pools = ["`+first+`", "`+second+`"]`, `pools = ["`+first+`", "`+first+`"]`, 1),
+		strings.Replace(text, `kind = "balancer-v2"`, `kind = "uniswap-v3"`, 1),
+	} {
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatal("invalid Atomic Balancer config accepted")
+		}
+	}
+	mixed := strings.Replace(text, `[chains.test-net.atomic_executor]`, `[chains.test-net.deployments.uni]
+kind = "uniswap-v3"
+factory = "0x5555555555555555555555555555555555555555"
+quoter = "0x6666666666666666666666666666666666666666"
+router = "0x7777777777777777777777777777777777777777"
+fees = [500]
+[chains.test-net.atomic_executor]`, 1)
+	mixed = strings.Replace(mixed, `balancer_deployment = "balancer"`, "balancer_deployment = \"balancer\"\nuniswap_deployment = \"uni\"", 1)
+	if _, err := loadText(t, mixed); err != nil {
+		t.Fatalf("mixed Atomic providers rejected: %v", err)
+	}
+	collision := strings.Replace(mixed, "0x3333333333333333333333333333333333333333", "0x7777777777777777777777777777777777777777", 1)
+	if _, err := loadText(t, collision); err == nil {
+		t.Fatal("Vault/router collision accepted")
+	}
+}
+
 func TestUniswapV4ConfigRequiresCompleteAllowlistedNoHookPool(t *testing.T) {
 	if _, registered := deploymentValidators["uniswap-v4"]; !registered {
 		t.Fatal("Uniswap V4 config validator is not registered")

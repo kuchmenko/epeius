@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -17,18 +18,20 @@ import (
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 )
 
 type atomicPlanReader struct {
-	config    config.Chain
-	program   *atomicv1.PlanProgram
-	runtime   []byte
-	allowance *big.Int
-	discount  *big.Int
-	snapshots []rpc.Snapshot
-	canonical int
+	config             config.Chain
+	program            *atomicv1.PlanProgram
+	runtime            []byte
+	allowance          *big.Int
+	discount           *big.Int
+	snapshots          []rpc.Snapshot
+	canonical          int
+	deniedBalancerPool common.Hash
 }
 
 func (r *atomicPlanReader) Snapshot(context.Context) (rpc.Snapshot, error) {
@@ -56,6 +59,8 @@ func (r *atomicPlanReader) Call(_ context.Context, to common.Address, data []byt
 	uniswap := r.config.Deployments[r.config.AtomicExecutor.UniswapDeployment]
 	pancake := r.config.Deployments[r.config.AtomicExecutor.PancakeDeployment]
 	slipstream := r.config.Deployments[r.config.AtomicExecutor.SlipstreamDeployment]
+	balancerDeployment := r.config.Deployments[r.config.AtomicExecutor.BalancerDeployment]
+	balancerOptions, _ := balancerDeployment.ProviderConfig.(balancer.Options)
 	feeModule := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["uniswapRouter"].ID) {
 		return contractabi.ExecutorV2.Methods["uniswapRouter"].Outputs.Pack(common.HexToAddress(uniswap.Router))
@@ -68,6 +73,40 @@ func (r *atomicPlanReader) Call(_ context.Context, to common.Address, data []byt
 	}
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["version"].ID) {
 		return contractabi.ExecutorV2.Methods["version"].Outputs.Pack(big.NewInt(2))
+	}
+	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["balancerVault"].ID) {
+		return contractabi.ExecutorV2.Methods["balancerVault"].Outputs.Pack(common.HexToAddress(balancerOptions.Vault))
+	}
+	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["balancerPoolsHash"].ID) {
+		ids := make([][32]byte, len(balancerOptions.Pools))
+		for i, value := range balancerOptions.Pools {
+			ids[i] = common.HexToHash(value)
+		}
+		encoded, _ := abi.Arguments{{Type: atomicABIType("bytes32[]")}}.Pack(ids)
+		return contractabi.ExecutorV2.Methods["balancerPoolsHash"].Outputs.Pack(crypto.Keccak256Hash(encoded))
+	}
+	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["isBalancerPoolAllowed"].ID) {
+		values, _ := contractabi.ExecutorV2.Methods["isBalancerPoolAllowed"].Inputs.Unpack(data[4:])
+		return contractabi.ExecutorV2.Methods["isBalancerPoolAllowed"].Outputs.Pack(values[0].([32]byte) != r.deniedBalancerPool)
+	}
+	if len(balancerOptions.Pools) != 0 {
+		if to == common.HexToAddress(balancerOptions.Vault) && bytes.Equal(data[:4], balancerVaultABI.Methods["getPool"].ID) {
+			values, _ := balancerVaultABI.Methods["getPool"].Inputs.Unpack(data[4:])
+			poolID := common.Hash(values[0].([32]byte))
+			poolAddress := balancerPoolAddress(poolID)
+			return balancerVaultABI.Methods["getPool"].Outputs.Pack(poolAddress, uint8(0))
+		}
+		if bytes.Equal(data[:4], balancerPoolABI.Methods["getPoolId"].ID) {
+			for _, value := range balancerOptions.Pools {
+				poolID := common.HexToHash(value)
+				if to == balancerPoolAddress(poolID) {
+					return balancerPoolABI.Methods["getPoolId"].Outputs.Pack(poolID)
+				}
+			}
+		}
+		if to == common.HexToAddress(balancerOptions.Vault) && bytes.Equal(data[:4], balancerVaultABI.Methods["getPoolTokens"].ID) {
+			return balancerVaultABI.Methods["getPoolTokens"].Outputs.Pack([]common.Address{common.BytesToAddress(r.program.TokenIn), common.HexToAddress("0x5555555555555555555555555555555555555555"), common.BytesToAddress(r.program.TokenOut)}, []*big.Int{big.NewInt(1), big.NewInt(2), big.NewInt(3)}, big.NewInt(1))
+		}
 	}
 	if (to == common.HexToAddress(uniswap.Factory) || to == common.HexToAddress(pancake.Factory)) && bytes.Equal(data[:4], contractabi.UniswapV3Factory.Methods["getPool"].ID) {
 		values, _ := contractabi.UniswapV3Factory.Methods["getPool"].Inputs.Unpack(data[4:])
@@ -243,6 +282,80 @@ func slipstreamAtomicPlanTestData(t *testing.T) (Chain, *atomicv1.PlanCandidate,
 		t.Fatal(err)
 	}
 	return chain, candidate, terms, planID
+}
+
+func balancerAtomicPlanTestData(t *testing.T) (Chain, *atomicv1.PlanCandidate, *atomicv1.AcceptedPlanTerms, common.Hash) {
+	t.Helper()
+	chain, _, terms, _ := atomicPlanTestData(t)
+	vault := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	poolID := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000000000000000000000123")
+	secondPoolID := common.HexToHash("0xcccccccccccccccccccccccccccccccccccccccc000000000000000000000124")
+	block := proto.CloneOf(terms.QuoteBlock)
+	candidate, err := atomicBalancerCandidate(big.NewInt(8453), big.NewInt(37), common.BytesToAddress(terms.Program.TokenIn), common.BytesToAddress(terms.Program.TokenOut), vault, poolID, block, big.NewInt(77))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terms.Program = proto.CloneOf(candidate.Program)
+	chain.Config.Deployments = map[string]config.Deployment{"bal": {Kind: "balancer-v2", ProviderConfig: balancer.Options{Vault: vault.Hex(), Pools: []string{poolID.Hex(), secondPoolID.Hex()}}}}
+	chain.Config.AtomicExecutor.UniswapDeployment = ""
+	chain.Config.AtomicExecutor.BalancerDeployment = "bal"
+	planID, err := atomicV1PlanID(terms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return chain, candidate, terms, planID
+}
+
+func TestPrepareAndRecheckBalancerAtomicPlan(t *testing.T) {
+	chain, candidate, terms, planID := balancerAtomicPlanTestData(t)
+	reader := &atomicPlanReader{config: chain.Config, program: candidate.Program, runtime: []byte{1, 2, 3, 4}, allowance: big.NewInt(37), snapshots: []rpc.Snapshot{{ChainID: "8453", BlockNumber: "12345679", BlockHash: common.HexToHash("0xbb").Hex(), Timestamp: uint64(time.Now().Unix())}, {ChainID: "8453", BlockNumber: "12345680", BlockHash: common.HexToHash("0xcc").Hex(), Timestamp: uint64(time.Now().Unix())}}}
+	chain.Client = reader
+	validated, err := validateAcceptedAtomicTerms(chain, terms, planID.Bytes(), time.Now())
+	if err != nil || len(validated.checks.ClearAllowances) != 1 || validated.checks.ClearAllowances[0].Spender != common.HexToAddress(chain.Config.Deployments["bal"].ProviderConfig.(balancer.Options).Vault).Hex() || len(validated.checks.Preserve) != 2 {
+		t.Fatalf("Balancer terms invalid: %+v %v", validated.checks, err)
+	}
+	expectedPlan := atomicV1ExecutorPlan{TokenIn: common.BytesToAddress(terms.Program.TokenIn), TokenOut: common.BytesToAddress(terms.Program.TokenOut), AmountIn: big.NewInt(37), MinAmountOut: big.NewInt(60), Deadline: new(big.Int).SetBytes(terms.DeadlineUnix), Branches: []atomicV1Branch{{AmountIn: big.NewInt(37), MinAmountOut: big.NewInt(60), Operations: []atomicV1Operation{{Kind: 4, TokenOut: common.BytesToAddress(terms.Program.TokenOut), Fee: new(big.Int), TickSpacing: new(big.Int), PoolId: common.BytesToHash(candidate.Program.Branches[0].Operations[0].GetBalancerV2().PoolId)}}}}}
+	expectedData, packErr := contractabi.ExecutorV2.Pack("execute", expectedPlan)
+	if packErr != nil || validated.transaction.Data != hexutil.Encode(expectedData) {
+		t.Fatal("Balancer executor operation encoded incorrectly")
+	}
+	executor, signer := common.BytesToAddress(terms.Executor.Address), common.BytesToAddress(terms.Signer)
+	simulator := &atomicPlanSimulator{results: []SimulationResult{{Output: "67", Logs: atomicPlanLogs(t, executor, signer, validated.executorPlanHash, candidate.Program, 67)}, {Output: "68", Logs: atomicPlanLogs(t, executor, signer, validated.executorPlanHash, candidate.Program, 68)}}}
+	store := NewStore()
+	quoteID := bytes.Repeat([]byte{0x41}, 32)
+	store.saveAtomicQuote("base", &atomicv1.PlanQuoteResponse{QuoteId: quoteID, Candidates: []*atomicv1.PlanCandidate{candidate}, SearchComplete: proto.Bool(true)}, time.Now())
+	handler := Handler{Chains: map[string]Chain{"base": chain}, Store: store, Simulator: simulator}
+	prepared, err := handler.PreparePlan(t.Context(), connect.NewRequest(&atomicv1.PreparePlanRequest{QuoteId: quoteID, CandidateId: candidate.CandidateId, Terms: terms, PlanId: planID.Bytes()}))
+	if err != nil || prepared.Msg.GetStatus() != atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_READY {
+		t.Fatalf("Balancer prepare failed: %+v %v", prepared, err)
+	}
+	reader.deniedBalancerPool = common.HexToHash(chain.Config.Deployments["bal"].ProviderConfig.(balancer.Options).Pools[1])
+	route := &quotev1.RouteQuote{Provider: "balancer-v2", DeploymentId: "bal", Legs: []*quotev1.RouteLeg{{Pool: common.BytesToHash(candidate.Program.Branches[0].Operations[0].GetBalancerV2().PoolId).Hex(), TokenIn: common.BytesToAddress(terms.Program.TokenIn).Hex(), TokenOut: common.BytesToAddress(terms.Program.TokenOut).Hex()}}}
+	if err := verifyAtomicV1Executor(t.Context(), reader, chain.Config, route, common.BytesToHash(terms.QuoteBlock.Hash)); err == nil {
+		t.Fatal("unselected configured Balancer pool membership was not verified")
+	}
+	reader.deniedBalancerPool = common.Hash{}
+	rechecked, err := handler.RecheckPlan(t.Context(), connect.NewRequest(&atomicv1.RecheckPlanRequest{PreparationId: prepared.Msg.Preparation.PreparationId, PlanId: planID.Bytes()}))
+	if err != nil || rechecked.Msg.GetStatus() != atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_READY || !proto.Equal(prepared.Msg.Preparation, rechecked.Msg.Preparation) {
+		t.Fatalf("Balancer recheck failed: %+v %v", rechecked, err)
+	}
+	for _, mutate := range []func(*atomicv1.AcceptedPlanTerms){
+		func(v *atomicv1.AcceptedPlanTerms) {
+			v.Program.Branches[0].Operations[0].GetBalancerV2().PoolId = v.Program.Branches[0].Operations[0].GetBalancerV2().PoolId[:20]
+		},
+		func(v *atomicv1.AcceptedPlanTerms) {
+			v.Program.Branches[0].Operations[0].GetBalancerV2().PoolId[31] ^= 1
+		},
+		func(v *atomicv1.AcceptedPlanTerms) {
+			v.Program.Branches[0].Operations = append(v.Program.Branches[0].Operations, proto.CloneOf(v.Program.Branches[0].Operations[0]))
+		},
+	} {
+		changed := proto.CloneOf(terms)
+		mutate(changed)
+		if _, err := validateAcceptedAtomicTerms(chain, changed, planID.Bytes(), time.Now()); err == nil {
+			t.Fatal("invalid Balancer terms accepted")
+		}
+	}
 }
 
 func TestPrepareSlipstreamAtomicPlanUsesKindThreeMeasuredEventsAndZeroDiscount(t *testing.T) {

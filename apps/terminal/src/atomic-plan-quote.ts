@@ -58,7 +58,7 @@ const atomicPool = (operation: PoolOperation) => {
   if (operation.pool.case === "uniswapV3")
     return {
       pool: operation.pool.value,
-      kind: 1,
+      kind: 1 as const,
       name: "Uniswap V3",
       selector: operation.pool.value.feePips,
       selectorType: "uint24" as const,
@@ -66,7 +66,7 @@ const atomicPool = (operation: PoolOperation) => {
   if (operation.pool.case === "pancakeV3")
     return {
       pool: operation.pool.value,
-      kind: 2,
+      kind: 2 as const,
       name: "Pancake V3",
       selector: operation.pool.value.feePips,
       selectorType: "uint24" as const,
@@ -74,10 +74,17 @@ const atomicPool = (operation: PoolOperation) => {
   if (operation.pool.case === "slipstreamInitial")
     return {
       pool: operation.pool.value,
-      kind: 3,
+      kind: 3 as const,
       name: "Aerodrome Slipstream Initial",
       selector: operation.pool.value.tickSpacing,
       selectorType: "int24" as const,
+    };
+  if (operation.pool.case === "balancerV2")
+    return {
+      pool: operation.pool.value,
+      kind: 4 as const,
+      name: "Balancer V2",
+      poolId: exact(operation.pool.value.poolId, 32, "Balancer pool ID"),
     };
   throw new Error("Atomic V1 quote uses an unsupported operation.");
 };
@@ -96,34 +103,56 @@ export function atomicCandidateId(candidate: PlanCandidate) {
     if (!quote || quote.operationOutputs.length !== branch.operations.length)
       throw new Error("Atomic V1 operation output cardinality is invalid.");
     for (const operation of branch.operations) {
-      const { pool, kind, selector, selectorType } = atomicPool(operation);
-      if (
-        selector === undefined ||
-        (kind === 3
-          ? selector <= 0 || selector > 8_388_607
-          : selector < 0 || selector >= 1_000_000)
-      )
-        throw new Error("Atomic V1 quote has an invalid pool selector.");
-      const provider = keccak256(
-        encodeAbiParameters(
-          [
-            { type: "bytes32" },
-            { type: "uint8" },
-            { type: "address" },
-            { type: "address" },
-            { type: "address" },
-            { type: selectorType },
-          ],
-          [
-            domain("Epeius.AtomicProvider.v1"),
-            kind,
-            requiredAddress(pool.factory, "factory"),
-            requiredAddress(pool.router, "router"),
-            requiredAddress(pool.pool, "pool"),
-            selector,
-          ],
-        ),
-      );
+      const identity = atomicPool(operation);
+      const { pool, kind } = identity;
+      const selector = kind === 4 ? undefined : identity.selector;
+      if (kind !== 4) {
+        if (
+          selector === undefined ||
+          (kind === 3
+            ? selector <= 0 || selector > 8_388_607
+            : selector < 0 || selector >= 1_000_000)
+        )
+          throw new Error("Atomic V1 quote has an invalid pool selector.");
+      }
+      const provider =
+        kind === 4
+          ? keccak256(
+              encodeAbiParameters(
+                [
+                  { type: "bytes32" },
+                  { type: "uint8" },
+                  { type: "address" },
+                  { type: "bytes32" },
+                ],
+                [
+                  domain("Epeius.AtomicProvider.v1"),
+                  4,
+                  requiredAddress(pool.vault, "Balancer Vault"),
+                  identity.poolId,
+                ],
+              ),
+            )
+          : keccak256(
+              encodeAbiParameters(
+                [
+                  { type: "bytes32" },
+                  { type: "uint8" },
+                  { type: "address" },
+                  { type: "address" },
+                  { type: "address" },
+                  { type: identity.selectorType },
+                ],
+                [
+                  domain("Epeius.AtomicProvider.v1"),
+                  kind,
+                  requiredAddress(pool.factory, "factory"),
+                  requiredAddress(pool.router, "router"),
+                  requiredAddress(pool.pool, "pool"),
+                  selector ?? 0,
+                ],
+              ),
+            );
       operationHashes.push(
         keccak256(
           encodeAbiParameters(
@@ -262,7 +291,11 @@ export function validateAtomicPlanQuote(
         "Atomic V1 candidate program does not match the request.",
       );
     const operations = program.branches[0].operations;
-    if (operations.length < 1 || operations.length > 2)
+    if (
+      operations.length < 1 ||
+      operations.length > 2 ||
+      (operations[0]?.pool.case === "balancerV2" && operations.length !== 1)
+    )
       throw new Error("Atomic V1 candidate path length is unsupported.");
     let current = addressBytes(request.tokenIn);
     const pools = new Set<string>();
@@ -273,10 +306,16 @@ export function validateAtomicPlanQuote(
     for (const operation of operations) {
       if (!same(operation.tokenIn, current) || !operation.tokenOut)
         throw new Error("Atomic V1 candidate token continuity is invalid.");
-      const { pool, kind, selector } = atomicPool(operation);
-      const poolAddress = requiredAddress(pool.pool, "pool");
-      const nextFactory = requiredAddress(pool.factory, "factory");
-      const nextRouter = requiredAddress(pool.router, "router");
+      const identity = atomicPool(operation);
+      const { pool, kind } = identity;
+      const poolAddress =
+        kind === 4 ? identity.poolId : requiredAddress(pool.pool, "pool");
+      const nextFactory =
+        kind === 4 ? "" : requiredAddress(pool.factory, "factory");
+      const nextRouter =
+        kind === 4
+          ? requiredAddress(pool.vault, "Balancer Vault")
+          : requiredAddress(pool.router, "router");
       if (
         (!factory && !router && providerKind === 0) ||
         (factory === nextFactory &&
@@ -292,7 +331,10 @@ export function validateAtomicPlanQuote(
       if (input === output)
         throw new Error("Atomic V1 operation tokens must be distinct.");
       const pair = input < output ? `${input}:${output}` : `${output}:${input}`;
-      const physical = `${pair}:${selector}`;
+      const physical =
+        kind === 4
+          ? `4:${identity.poolId}`
+          : `${kind}:${pair}:${identity.selector}`;
       if (pools.has(poolAddress) || physicalPools.has(physical))
         throw new Error("Atomic V1 candidate reuses a pool.");
       pools.add(poolAddress);
@@ -301,9 +343,12 @@ export function validateAtomicPlanQuote(
     }
     if (!same(current, addressBytes(request.tokenOut)))
       throw new Error("Atomic V1 candidate final token is invalid.");
-    const selectors = operations.map((operation) =>
-      String(atomicPool(operation).selector).padStart(9, "0"),
-    );
+    const selectors = operations.map((operation) => {
+      const identity = atomicPool(operation);
+      return identity.kind === 4
+        ? identity.poolId
+        : String(identity.selector).padStart(9, "0");
+    });
     const middle =
       operations.length === 2
         ? getAddress(exact(operations[0].tokenOut, 20, "intermediate token"))
@@ -359,9 +404,12 @@ export function formatAtomicPlanQuote(
       const outputAddress = exact(operation.tokenOut, 20, "operation output");
       const metadata = token(outputAddress);
       const output = BigInt(exact(outputs[hopIndex], 32, "operation output"));
-      const { pool, name, selector, kind } = atomicPool(operation);
+      const identity = atomicPool(operation);
+      const { pool, name, kind } = identity;
       lines.push(
-        `Hop ${hopIndex + 1} (${name}): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool.pool, 20, "pool")}; ${kind === 3 ? `tick spacing ${selector}` : `fee ${selector} pips`}; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
+        kind === 4
+          ? `Hop ${hopIndex + 1} (${name}, kind 4): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ID ${identity.poolId}; Vault ${requiredAddress(pool.vault, "Balancer Vault")}; output ${metadata ? amount(metadata, output) : `${output} atomic`}`
+          : `Hop ${hopIndex + 1} (${name}): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool.pool, 20, "pool")}; ${kind === 3 ? `tick spacing ${identity.selector}` : `fee ${identity.selector} pips`}; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
       );
     }
     const final = BigInt(exact(outputs.at(-1), 32, "final output"));

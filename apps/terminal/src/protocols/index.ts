@@ -61,6 +61,7 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
             "uniswap_deployment",
             "pancake_deployment",
             "slipstream_deployment",
+            "balancer_deployment",
           ].includes(field),
       ) ||
       !["address", "runtime_code_hash"].every((field) =>
@@ -70,6 +71,7 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
         "uniswap_deployment",
         "pancake_deployment",
         "slipstream_deployment",
+        "balancer_deployment",
       ].some((field) => Object.hasOwn(atomicExecutor, field)))
   )
     throw new Error("Local Atomic V1 executor configuration is invalid.");
@@ -94,6 +96,7 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
             uniswapDeployment: atomicExecutor?.uniswap_deployment,
             pancakeDeployment: atomicExecutor?.pancake_deployment,
             slipstreamDeployment: atomicExecutor?.slipstream_deployment,
+            balancerDeployment: atomicExecutor?.balancer_deployment,
           },
         }
       : {}),
@@ -115,6 +118,7 @@ export function configureExecution(config: {
     uniswapDeployment?: string;
     pancakeDeployment?: string;
     slipstreamDeployment?: string;
+    balancerDeployment?: string;
   };
 }): TrustedExecution {
   const deployments = Object.fromEntries(
