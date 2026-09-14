@@ -13,7 +13,7 @@ import (
 // Build owns transaction fields and the checks needed to prove its execution.
 type PreparationStrategy interface {
 	Select(context.Context, storedQuote, *quotev1.PrepareExecutionRequest, *quotev1.RouteQuote) (executionSelection, string)
-	Build(*quotev1.PrepareExecutionResponse) (executionPlan, string)
+	Build(*quotev1.PrepareExecutionResponse, uint32) (executionPlan, string)
 }
 
 type executionSelection struct {

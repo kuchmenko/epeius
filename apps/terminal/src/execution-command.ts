@@ -123,8 +123,7 @@ export async function executionCommand(
       ? !!values["route-id"] ||
         !!values.allocations ||
         !!values["execution-mode"]
-      : !!values["route-id"] === !!values.allocations ||
-        (!!values["execution-mode"] && !values["route-id"]))
+      : !!values["route-id"] === !!values.allocations)
   )
     throw new Error(
       "Provide --keystore, --password-file, and either --preparation-id alone or --quote-id with --route-id or --allocations.",

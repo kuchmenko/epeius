@@ -255,7 +255,7 @@ func (s balancerV2Preparation) Select(_ context.Context, _ storedQuote, _ *quote
 	return executionSelection{route: route, output: output}, ""
 }
 
-func (s balancerV2Preparation) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
+func (s balancerV2Preparation) Build(p *quotev1.PrepareExecutionResponse, _ uint32) (executionPlan, string) {
 	amount, _ := new(big.Int).SetString(p.AmountInAtomic, 10)
 	minimum, _ := new(big.Int).SetString(p.AmountOutMinimumAtomic, 10)
 	if minimum.Sign() == 0 || !validBalancerRoute(p.Route, s.id, s.options) {

@@ -163,12 +163,13 @@ proof. Other deployments and production token admission require separate review.
 ## ExecutorV2 Atomic V1 slice
 
 `ExecutorV2` is a separate immutable contract. It does not change `Executor` or
-its ABI. This slice accepts exactly one branch containing one or two Uniswap V3
-operations over distinct pools. Its public plan uses the final generic tagged operation
-tuple; the current policy admits only kind 1 and requires the other provider
-fields to be zero. The constructor fixes the exact SwapRouter02. Pool identity
-is derived from that router's factory, the current token pair, and the fee; it
-is not caller-supplied calldata.
+its ABI. This local slice accepts one branch containing one or two Uniswap V3
+operations, or exactly two branches containing one direct Uniswap V3 operation
+each. Operations use globally distinct physical pools. Its public plan uses the
+final generic tagged operation tuple; current policy admits only kind 1 and
+requires the other provider fields to be zero. The constructor fixes the exact
+SwapRouter02. Pool identity is derived from that router's factory, unordered
+token pair, and fee; it is not caller-supplied calldata.
 
 `execute(Plan)` uses selector `0x661983c5`. It rejects noncanonical ABI bodies
 and emits the V2 on-chain commitment
@@ -179,7 +180,9 @@ Branch and aggregate minimum equality and deadline equality pass. Exact input
 spend, temporary allowance cleanup, entry-dust restoration, caller credit, and
 atomic rollback use measured token balances rather than router return values. For
 two operations, the complete positive first output above entry dust becomes the
-second input; no quoted amount or pre-existing intermediate balance is consumed.
+second input. For two branches, input is pulled once, each literal allocation is
+spent, and each branch output is its positive delta above the running output
+balance. Quoted amounts and pre-existing balances are never consumed as output.
 
 Every deployment configuration must pin the exact deployed runtime code hash in
 addition to the executor address and immutable router deployment. Both
@@ -189,9 +192,10 @@ then independently verifies the selected route's pool through the configured
 factory.
 
 Machine-readable ABI: [`abi/ExecutorV2.json`](abi/ExecutorV2.json). Independent
-one- and two-operation commitment and calldata values:
+one-operation, two-operation, and two-branch commitment and calldata values:
 [`fixtures/atomic-v1-plan.json`](fixtures/atomic-v1-plan.json) and
-[`fixtures/atomic-v1-two-hop-plan.json`](fixtures/atomic-v1-two-hop-plan.json).
+[`fixtures/atomic-v1-two-hop-plan.json`](fixtures/atomic-v1-two-hop-plan.json),
+and [`fixtures/atomic-v1-split-plan.json`](fixtures/atomic-v1-split-plan.json).
 No deployed address is supplied or enabled by this repository.
 
 Focused local verification:

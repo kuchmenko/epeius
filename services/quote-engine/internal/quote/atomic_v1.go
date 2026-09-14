@@ -21,9 +21,15 @@ import (
 
 type atomicV1Preparation struct{ chain Chain }
 
-func (s atomicV1Preparation) Select(_ context.Context, saved storedQuote, _ *quotev1.PrepareExecutionRequest, route *quotev1.RouteQuote) (executionSelection, string) {
+func (s atomicV1Preparation) Select(ctx context.Context, saved storedQuote, request *quotev1.PrepareExecutionRequest, route *quotev1.RouteQuote) (executionSelection, string) {
+	if route == nil {
+		if request != nil && len(request.Allocations) != 0 {
+			return s.selectSplit(ctx, saved, request.Allocations)
+		}
+		return executionSelection{}, "Selected route is not supported by the configured Atomic V1 executor."
+	}
 	e := s.chain.Config.AtomicExecutor
-	if e == nil || route == nil || route.Provider != "uniswap-v3" || route.DeploymentId != e.UniswapDeployment || !validAtomicV1Route(route, saved.request.TokenIn, saved.request.TokenOut) {
+	if e == nil || route.Provider != "uniswap-v3" || route.DeploymentId != e.UniswapDeployment || !validAtomicV1Route(route, saved.request.TokenIn, saved.request.TokenOut) {
 		return executionSelection{}, "Selected route is not supported by the configured Atomic V1 executor."
 	}
 	output, ok := new(big.Int).SetString(route.AmountOutAtomic, 10)
@@ -33,19 +39,97 @@ func (s atomicV1Preparation) Select(_ context.Context, saved storedQuote, _ *quo
 	return executionSelection{route: proto.CloneOf(route), output: output}, ""
 }
 
+func (s atomicV1Preparation) selectSplit(ctx context.Context, saved storedQuote, requested []*quotev1.RouteAllocation) (executionSelection, string) {
+	e := s.chain.Config.AtomicExecutor
+	if e == nil || saved.request == nil || len(requested) != 2 {
+		return executionSelection{}, "Selected routes are not supported by the configured Atomic V1 executor."
+	}
+	total := new(big.Int)
+	seenPools := map[string]bool{}
+	seenPoolKeys := map[string]bool{}
+	allocations := make([]*quotev1.QuotedAllocation, 0, 2)
+	for _, requestedAllocation := range requested {
+		if requestedAllocation == nil || !positiveInteger.MatchString(requestedAllocation.AmountInAtomic) {
+			return executionSelection{}, "Atomic V1 allocation inputs must be positive."
+		}
+		amount, ok := new(big.Int).SetString(requestedAllocation.AmountInAtomic, 10)
+		if !ok || amount.BitLen() > 256 {
+			return executionSelection{}, "Atomic V1 allocation inputs must be positive."
+		}
+		total.Add(total, amount)
+		var route *quotev1.RouteQuote
+		for _, candidate := range saved.final.Routes {
+			if candidate.RouteId == requestedAllocation.RouteId {
+				route = proto.CloneOf(candidate)
+				break
+			}
+		}
+		if route == nil || route.Provider != "uniswap-v3" || route.DeploymentId != e.UniswapDeployment || len(route.Legs) != 1 || !validAtomicV1Route(route, saved.request.TokenIn, saved.request.TokenOut) || !sameAtomicV1Block(route.Block, saved.final.Block) || s.chain.AllocationRequoters[route.DeploymentId] == nil || s.chain.DeploymentErrors[route.DeploymentId] != "" {
+			return executionSelection{}, "Selected routes are not supported by the configured Atomic V1 executor."
+		}
+		pool := strings.ToLower(route.Legs[0].Pool)
+		poolKey := atomicV1PoolKey(route.Legs[0])
+		if seenPools[pool] || seenPoolKeys[poolKey] {
+			return executionSelection{}, "Atomic V1 branches must use distinct pools."
+		}
+		seenPools[pool] = true
+		seenPoolKeys[poolKey] = true
+		allocations = append(allocations, &quotev1.QuotedAllocation{AmountInAtomic: amount.String(), Route: route})
+	}
+	if total.String() != saved.request.AmountInAtomic {
+		return executionSelection{}, "Atomic V1 allocation inputs must sum to the quoted input amount."
+	}
+	output := new(big.Int)
+	for _, allocation := range allocations {
+		amount, _ := new(big.Int).SetString(allocation.AmountInAtomic, 10)
+		quoted, err := s.chain.AllocationRequoters[allocation.Route.DeploymentId].Requote(ctx, allocation.Route, amount, saved.final.Block)
+		if err != nil || !validAtomicV1Route(quoted, saved.request.TokenIn, saved.request.TokenOut) || len(quoted.Legs) != 1 || !sameAtomicV1Block(quoted.Block, saved.final.Block) || !strings.EqualFold(quoted.Legs[0].Pool, allocation.Route.Legs[0].Pool) || atomicV1PoolKey(quoted.Legs[0]) != atomicV1PoolKey(allocation.Route.Legs[0]) {
+			return executionSelection{}, "Atomic V1 allocations could not be quoted."
+		}
+		allocation.Route = quoted
+		quotedOutput, ok := new(big.Int).SetString(quoted.AmountOutAtomic, 10)
+		if !ok || quotedOutput.Sign() <= 0 || quotedOutput.BitLen() > 256 {
+			return executionSelection{}, "invalid aggregate output"
+		}
+		output.Add(output, quotedOutput)
+	}
+	if output.BitLen() > 256 {
+		return executionSelection{}, "invalid aggregate output"
+	}
+	return executionSelection{allocations: allocations, output: output}, ""
+}
+
+func atomicV1PoolKey(leg *quotev1.RouteLeg) string {
+	token0, token1 := strings.ToLower(leg.TokenIn), strings.ToLower(leg.TokenOut)
+	if token0 > token1 {
+		token0, token1 = token1, token0
+	}
+	return token0 + ":" + token1 + ":" + strconv.FormatUint(uint64(leg.GetFeePips()), 10)
+}
+
+func sameAtomicV1Block(a, b *quotev1.BlockContext) bool {
+	return a != nil && b != nil && a.Number == b.Number && strings.EqualFold(a.Hash, b.Hash)
+}
+
 func validAtomicV1Route(route *quotev1.RouteQuote, tokenIn, tokenOut string) bool {
 	if route == nil || len(route.Legs) < 1 || len(route.Legs) > 2 {
 		return false
 	}
 	current := tokenIn
 	pools := make(map[string]bool, len(route.Legs))
+	poolKeys := make(map[string]bool, len(route.Legs))
 	for _, leg := range route.Legs {
+		if leg == nil {
+			return false
+		}
 		fee, ok := leg.GetSelector().(*quotev1.RouteLeg_FeePips)
 		pool := strings.ToLower(leg.GetPool())
-		if leg == nil || !ok || fee.FeePips >= 1000000 || !validAddress(pool) || pools[pool] || !validAddress(leg.TokenIn) || !validAddress(leg.TokenOut) || !strings.EqualFold(leg.TokenIn, current) || strings.EqualFold(leg.TokenIn, leg.TokenOut) {
+		poolKey := atomicV1PoolKey(leg)
+		if !ok || fee.FeePips >= 1000000 || !validAddress(pool) || pools[pool] || poolKeys[poolKey] || !validAddress(leg.TokenIn) || !validAddress(leg.TokenOut) || !strings.EqualFold(leg.TokenIn, current) || strings.EqualFold(leg.TokenIn, leg.TokenOut) {
 			return false
 		}
 		pools[pool] = true
+		poolKeys[poolKey] = true
 		current = leg.TokenOut
 	}
 	return strings.EqualFold(current, tokenOut)
@@ -74,31 +158,89 @@ type atomicV1ExecutorPlan struct {
 	Branches     []atomicV1Branch
 }
 
-func (s atomicV1Preparation) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
-	if p.Route == nil || p.Route.Block == nil || !validAtomicV1Route(p.Route, p.TokenIn, p.TokenOut) || s.chain.Config.AtomicExecutor == nil {
+type atomicV1PreparedBranch struct {
+	amount, minimum *big.Int
+	route           *quotev1.RouteQuote
+}
+
+func (s atomicV1Preparation) Build(p *quotev1.PrepareExecutionResponse, slippageBps uint32) (executionPlan, string) {
+	if s.chain.Config.AtomicExecutor == nil {
 		return executionPlan{}, "invalid Atomic V1 route"
 	}
 	amount, amountOK := new(big.Int).SetString(p.AmountInAtomic, 10)
 	minimum, minimumOK := new(big.Int).SetString(p.AmountOutMinimumAtomic, 10)
 	deadline, deadlineErr := strconv.ParseUint(p.DeadlineUnix, 10, 64)
 	expiresAt, expiresErr := strconv.ParseUint(p.ExpiresAtUnix, 10, 64)
-	quoteBlock, blockOK := new(big.Int).SetString(p.Route.Block.Number, 10)
-	if !amountOK || !minimumOK || !blockOK || amount.Sign() <= 0 || minimum.Sign() <= 0 || quoteBlock.Sign() < 0 || quoteBlock.BitLen() > 256 || deadlineErr != nil || expiresErr != nil || !common.IsHexHash(p.Route.Block.Hash) {
+	if !amountOK || !minimumOK || amount.Sign() <= 0 || minimum.Sign() <= 0 || deadlineErr != nil || expiresErr != nil || slippageBps >= 10000 {
 		return executionPlan{}, "invalid Atomic V1 amounts"
 	}
-	operations := make([]atomicV1Operation, len(p.Route.Legs))
-	wireOperations := make([]*atomicv1.Operation, len(p.Route.Legs))
-	for i, leg := range p.Route.Legs {
-		operations[i] = atomicV1Operation{Kind: 1, TokenOut: common.HexToAddress(leg.TokenOut), Fee: new(big.Int).SetUint64(uint64(leg.GetFeePips())), TickSpacing: new(big.Int)}
-		wireOperations[i] = &atomicv1.Operation{Kind: 1, TokenOut: leg.TokenOut, FeePips: leg.GetFeePips(), PoolId: (common.Hash{}).Hex()}
+	preparedBranches := make([]atomicV1PreparedBranch, 0, 2)
+	if p.Route != nil && len(p.Allocations) == 0 && validAtomicV1Route(p.Route, p.TokenIn, p.TokenOut) {
+		preparedBranches = append(preparedBranches, atomicV1PreparedBranch{amount: amount, minimum: minimum, route: p.Route})
+	} else if p.Route == nil && len(p.Allocations) == 2 {
+		total := new(big.Int)
+		seenPools := map[string]bool{}
+		seenPoolKeys := map[string]bool{}
+		for _, allocation := range p.Allocations {
+			if allocation == nil || allocation.Route == nil || len(allocation.Route.Legs) != 1 || !validAtomicV1Route(allocation.Route, p.TokenIn, p.TokenOut) {
+				return executionPlan{}, "invalid Atomic V1 route"
+			}
+			allocationAmount, ok := new(big.Int).SetString(allocation.AmountInAtomic, 10)
+			quotedOutput, outputOK := new(big.Int).SetString(allocation.Route.AmountOutAtomic, 10)
+			if !ok || !outputOK || allocationAmount.Sign() <= 0 || allocationAmount.BitLen() > 256 || quotedOutput.Sign() <= 0 || quotedOutput.BitLen() > 256 {
+				return executionPlan{}, "invalid Atomic V1 amounts"
+			}
+			pool := strings.ToLower(allocation.Route.Legs[0].Pool)
+			poolKey := atomicV1PoolKey(allocation.Route.Legs[0])
+			if seenPools[pool] || seenPoolKeys[poolKey] {
+				return executionPlan{}, "invalid Atomic V1 route"
+			}
+			seenPools[pool] = true
+			seenPoolKeys[poolKey] = true
+			branchMinimum := new(big.Int).Div(new(big.Int).Mul(quotedOutput, big.NewInt(int64(10000-slippageBps))), big.NewInt(10000))
+			if branchMinimum.Sign() <= 0 {
+				return executionPlan{}, "invalid Atomic V1 amounts"
+			}
+			total.Add(total, allocationAmount)
+			preparedBranches = append(preparedBranches, atomicV1PreparedBranch{amount: allocationAmount, minimum: branchMinimum, route: allocation.Route})
+		}
+		if total.Cmp(amount) != 0 {
+			return executionPlan{}, "invalid Atomic V1 amounts"
+		}
+	} else {
+		return executionPlan{}, "invalid Atomic V1 route"
 	}
-	branch := atomicV1Branch{AmountIn: amount, MinAmountOut: minimum, Operations: operations}
+	block := preparedBranches[0].route.Block
+	if block == nil {
+		return executionPlan{}, "invalid Atomic V1 route"
+	}
+	for _, prepared := range preparedBranches[1:] {
+		if !sameAtomicV1Block(prepared.route.Block, block) {
+			return executionPlan{}, "invalid Atomic V1 route"
+		}
+	}
+	quoteBlock, blockOK := new(big.Int).SetString(block.Number, 10)
+	if !blockOK || quoteBlock.Sign() < 0 || quoteBlock.BitLen() > 256 || !common.IsHexHash(block.Hash) {
+		return executionPlan{}, "invalid Atomic V1 amounts"
+	}
+	executorBranches := make([]atomicV1Branch, len(preparedBranches))
+	wireBranches := make([]*atomicv1.Branch, len(preparedBranches))
+	for i, prepared := range preparedBranches {
+		operations := make([]atomicV1Operation, len(prepared.route.Legs))
+		wireOperations := make([]*atomicv1.Operation, len(prepared.route.Legs))
+		for j, leg := range prepared.route.Legs {
+			operations[j] = atomicV1Operation{Kind: 1, TokenOut: common.HexToAddress(leg.TokenOut), Fee: new(big.Int).SetUint64(uint64(leg.GetFeePips())), TickSpacing: new(big.Int)}
+			wireOperations[j] = &atomicv1.Operation{Kind: 1, TokenOut: leg.TokenOut, FeePips: leg.GetFeePips(), PoolId: (common.Hash{}).Hex()}
+		}
+		executorBranches[i] = atomicV1Branch{AmountIn: prepared.amount, MinAmountOut: prepared.minimum, Operations: operations}
+		wireBranches[i] = &atomicv1.Branch{AmountInAtomic: prepared.amount.String(), AmountOutMinimumAtomic: prepared.minimum.String(), Operations: wireOperations}
+	}
 	executor := common.HexToAddress(s.chain.Config.AtomicExecutor.Address)
 	sender := common.HexToAddress(p.Recipient)
 	executorPlan := atomicV1ExecutorPlan{
 		TokenIn: common.HexToAddress(p.TokenIn), TokenOut: common.HexToAddress(p.TokenOut),
 		AmountIn: amount, MinAmountOut: minimum, Deadline: new(big.Int).SetUint64(deadline),
-		Branches: []atomicV1Branch{branch},
+		Branches: executorBranches,
 	}
 	planHash, err := atomicV1ExecutorPlanHash(s.chain.ChainID, executor, sender, executorPlan)
 	if err != nil {
@@ -107,10 +249,7 @@ func (s atomicV1Preparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 	plan := &atomicv1.Plan{
 		ExecutorPlanHash: planHash.Hex(), ChainId: s.chain.ChainID, Executor: executor.Hex(), Sender: sender.Hex(),
 		TokenIn: p.TokenIn, TokenOut: p.TokenOut, AmountInAtomic: amount.String(), AmountOutMinimumAtomic: minimum.String(), DeadlineUnix: p.DeadlineUnix,
-		Branches: []*atomicv1.Branch{{
-			AmountInAtomic: amount.String(), AmountOutMinimumAtomic: minimum.String(),
-			Operations: wireOperations,
-		}},
+		Branches: wireBranches,
 	}
 	data, err := contractabi.ExecutorV2.Pack("execute", executorPlan)
 	if err != nil {
@@ -121,8 +260,8 @@ func (s atomicV1Preparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 	acceptedTerms, planID, err := atomicV1AcceptedTerms(
 		s.chain.ChainID, executor, common.HexToHash(s.chain.Config.AtomicExecutor.RuntimeCodeHash), sender,
 		common.HexToAddress(p.TokenIn), common.HexToAddress(p.TokenOut), amount, minimum,
-		common.HexToAddress(deployment.Factory), common.HexToAddress(deployment.Router), p.Route.Legs,
-		quoteBlock, common.HexToHash(p.Route.Block.Hash), expiresAt, deadline,
+		common.HexToAddress(deployment.Factory), common.HexToAddress(deployment.Router), preparedBranches,
+		quoteBlock, common.HexToHash(block.Hash), expiresAt, deadline,
 	)
 	if err != nil {
 		return executionPlan{}, "Atomic V1 accepted terms could not be committed"
@@ -137,20 +276,24 @@ func (s atomicV1Preparation) Build(p *quotev1.PrepareExecutionResponse) (executi
 	router := deployment.Router
 	checks := SimulationChecks{Input: BalanceProbe{Token: p.TokenIn, Owner: sender.Hex()}, Output: BalanceProbe{Token: p.TokenOut, Owner: sender.Hex()}}
 	seen := map[string]bool{}
-	for _, leg := range p.Route.Legs {
-		checks.ClearAllowances = append(checks.ClearAllowances, AllowanceProbe{Token: leg.TokenIn, Owner: executor.Hex(), Spender: router})
-		for _, token := range []string{leg.TokenIn, leg.TokenOut} {
-			key := strings.ToLower(token)
-			if seen[key] {
-				continue
+	for _, prepared := range preparedBranches {
+		for _, leg := range prepared.route.Legs {
+			checks.ClearAllowances = append(checks.ClearAllowances, AllowanceProbe{Token: leg.TokenIn, Owner: executor.Hex(), Spender: router})
+			for _, token := range []string{leg.TokenIn, leg.TokenOut} {
+				key := strings.ToLower(token)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				checks.Preserve = append(checks.Preserve, BalanceProbe{Token: token, Owner: executor.Hex()}, BalanceProbe{Token: token, Owner: router})
 			}
-			seen[key] = true
-			checks.Preserve = append(checks.Preserve, BalanceProbe{Token: token, Owner: executor.Hex()}, BalanceProbe{Token: token, Owner: router})
 		}
 	}
 	return executionPlan{transaction: tx, atomicPlan: plan, spender: executor.Hex(), checks: checks, verify: func(ctx context.Context, reader Reader, hash common.Hash) string {
-		if verifyAtomicV1Executor(ctx, reader, s.chain.Config, p.Route, hash) != nil {
-			return "Atomic V1 executor verification failed"
+		for _, prepared := range preparedBranches {
+			if verifyAtomicV1Executor(ctx, reader, s.chain.Config, prepared.route, hash) != nil {
+				return "Atomic V1 executor verification failed"
+			}
 		}
 		return ""
 	}}, ""
@@ -160,44 +303,52 @@ func atomicUint256Bytes(value *big.Int) []byte {
 	return value.FillBytes(make([]byte, 32))
 }
 
-func atomicV1AcceptedTerms(chainID string, executor common.Address, runtimeHash common.Hash, signer, tokenIn, tokenOut common.Address, amountIn, minimum *big.Int, factory, router common.Address, legs []*quotev1.RouteLeg, quoteBlock *big.Int, quoteBlockHash common.Hash, expiresAt, deadline uint64) (*atomicv1.AcceptedPlanTerms, common.Hash, error) {
+func atomicV1AcceptedTerms(chainID string, executor common.Address, runtimeHash common.Hash, signer, tokenIn, tokenOut common.Address, amountIn, minimum *big.Int, factory, router common.Address, branches []atomicV1PreparedBranch, quoteBlock *big.Int, quoteBlockHash common.Hash, expiresAt, deadline uint64) (*atomicv1.AcceptedPlanTerms, common.Hash, error) {
 	chain, ok := new(big.Int).SetString(chainID, 10)
 	if !ok || chain.Sign() < 0 || chain.BitLen() > 256 {
 		return nil, common.Hash{}, errors.New("invalid chain ID")
 	}
-	operationHashes := make([]common.Hash, len(legs))
-	acceptedOperations := make([]*atomicv1.PoolOperation, len(legs))
-	for i, leg := range legs {
-		providerHash, err := atomicHash(
-			abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint24")}},
-			crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), uint8(1), factory, router, common.HexToAddress(leg.Pool), new(big.Int).SetUint64(uint64(leg.GetFeePips())),
+	branchHashes := make([]common.Hash, len(branches))
+	acceptedBranches := make([]*atomicv1.PlanBranch, len(branches))
+	branchMinima := make([][]byte, len(branches))
+	for i, branch := range branches {
+		operationHashes := make([]common.Hash, len(branch.route.Legs))
+		acceptedOperations := make([]*atomicv1.PoolOperation, len(branch.route.Legs))
+		for j, leg := range branch.route.Legs {
+			providerHash, err := atomicHash(
+				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint24")}},
+				crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), uint8(1), factory, router, common.HexToAddress(leg.Pool), new(big.Int).SetUint64(uint64(leg.GetFeePips())),
+			)
+			if err != nil {
+				return nil, common.Hash{}, err
+			}
+			operationHashes[j], err = atomicHash(
+				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}},
+				crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), uint8(1), common.HexToAddress(leg.TokenIn), common.HexToAddress(leg.TokenOut), providerHash,
+			)
+			if err != nil {
+				return nil, common.Hash{}, err
+			}
+			acceptedOperations[j] = &atomicv1.PoolOperation{
+				TokenIn: common.HexToAddress(leg.TokenIn).Bytes(), TokenOut: common.HexToAddress(leg.TokenOut).Bytes(), Pool: &atomicv1.PoolOperation_UniswapV3{UniswapV3: &atomicv1.V3Pool{
+					Factory: factory.Bytes(), Router: router.Bytes(), Pool: common.HexToAddress(leg.Pool).Bytes(), FeePips: proto.Uint32(leg.GetFeePips()),
+				}},
+			}
+		}
+		var err error
+		branchHashes[i], err = atomicHash(
+			abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
+			crypto.Keccak256Hash([]byte("Epeius.AtomicAcceptedBranch.v1")), branch.amount, branch.minimum, operationHashes,
 		)
 		if err != nil {
 			return nil, common.Hash{}, err
 		}
-		operationHashes[i], err = atomicHash(
-			abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}},
-			crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), uint8(1), common.HexToAddress(leg.TokenIn), common.HexToAddress(leg.TokenOut), providerHash,
-		)
-		if err != nil {
-			return nil, common.Hash{}, err
-		}
-		acceptedOperations[i] = &atomicv1.PoolOperation{
-			TokenIn: common.HexToAddress(leg.TokenIn).Bytes(), TokenOut: common.HexToAddress(leg.TokenOut).Bytes(), Pool: &atomicv1.PoolOperation_UniswapV3{UniswapV3: &atomicv1.V3Pool{
-				Factory: factory.Bytes(), Router: router.Bytes(), Pool: common.HexToAddress(leg.Pool).Bytes(), FeePips: proto.Uint32(leg.GetFeePips()),
-			}},
-		}
-	}
-	branchHash, err := atomicHash(
-		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
-		crypto.Keccak256Hash([]byte("Epeius.AtomicAcceptedBranch.v1")), amountIn, minimum, operationHashes,
-	)
-	if err != nil {
-		return nil, common.Hash{}, err
+		acceptedBranches[i] = &atomicv1.PlanBranch{AmountIn: atomicUint256Bytes(branch.amount), Operations: acceptedOperations}
+		branchMinima[i] = atomicUint256Bytes(branch.minimum)
 	}
 	planID, err := atomicHash(
 		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint32")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
-		crypto.Keccak256Hash([]byte("Epeius.AtomicPlan.v1")), uint32(1), chain, executor, uint32(2), runtimeHash, signer, signer, tokenIn, tokenOut, amountIn, minimum, quoteBlock, quoteBlockHash, new(big.Int).SetUint64(expiresAt), new(big.Int).SetUint64(deadline), []common.Hash{branchHash},
+		crypto.Keccak256Hash([]byte("Epeius.AtomicPlan.v1")), uint32(1), chain, executor, uint32(2), runtimeHash, signer, signer, tokenIn, tokenOut, amountIn, minimum, quoteBlock, quoteBlockHash, new(big.Int).SetUint64(expiresAt), new(big.Int).SetUint64(deadline), branchHashes,
 	)
 	if err != nil {
 		return nil, common.Hash{}, err
@@ -205,10 +356,10 @@ func atomicV1AcceptedTerms(chainID string, executor common.Address, runtimeHash 
 	terms := &atomicv1.AcceptedPlanTerms{
 		Program: &atomicv1.PlanProgram{
 			FormatVersion: proto.Uint32(1), ChainId: atomicUint256Bytes(chain), TokenIn: tokenIn.Bytes(), TokenOut: tokenOut.Bytes(), AmountIn: atomicUint256Bytes(amountIn),
-			Branches: []*atomicv1.PlanBranch{{AmountIn: atomicUint256Bytes(amountIn), Operations: acceptedOperations}},
+			Branches: acceptedBranches,
 		},
 		Executor: &atomicv1.ExecutorIdentity{Address: executor.Bytes(), Version: proto.Uint32(2), RuntimeCodeHash: runtimeHash.Bytes()},
-		Signer:   signer.Bytes(), Recipient: signer.Bytes(), BranchMinima: [][]byte{atomicUint256Bytes(minimum)}, AmountOutMinimum: atomicUint256Bytes(minimum),
+		Signer:   signer.Bytes(), Recipient: signer.Bytes(), BranchMinima: branchMinima, AmountOutMinimum: atomicUint256Bytes(minimum),
 		QuoteBlock: &atomicv1.PinnedBlock{Number: atomicUint256Bytes(quoteBlock), Hash: quoteBlockHash.Bytes()}, ExpiresAtUnix: atomicUint256Bytes(new(big.Int).SetUint64(expiresAt)), DeadlineUnix: atomicUint256Bytes(new(big.Int).SetUint64(deadline)),
 	}
 	return terms, planID, nil

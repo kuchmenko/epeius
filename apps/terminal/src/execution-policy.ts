@@ -36,7 +36,11 @@ export type SwapTerms = {
 };
 
 export type ExecutionImplementation = {
-  plan: (prepared: PrepareExecutionResponse, tokens: string[]) => SwapTerms;
+  plan: (
+    prepared: PrepareExecutionResponse,
+    tokens: string[],
+    slippageBps: number,
+  ) => SwapTerms;
 };
 
 export type TrustedExecution = {
@@ -165,11 +169,7 @@ export function validatePreparation(
     throw new Error("Invalid swap amount or token terms.");
   const allocated = p.allocations.length > 0;
   const atomic = p.atomicPlan !== undefined;
-  if (
-    (atomic && (!p.route || allocated)) ||
-    (!atomic && allocated === !!p.route) ||
-    p.allocations.length > 2
-  )
+  if (allocated === !!p.route || p.allocations.length > 2)
     throw new Error("Provide either a direct route or executor allocations.");
   const implementation = atomic
     ? trusted.atomicExecutor
@@ -180,7 +180,7 @@ export function validatePreparation(
     throw new Error(
       "Route is not allowed by local token and deployment config.",
     );
-  const terms = implementation.plan(p, trusted.tokens);
+  const terms = implementation.plan(p, trusted.tokens, slippageBps);
   if (!approval && (permission || p.approvalTransaction || p.approvalSpender))
     throw new Error("READY preparation must not contain approval fields.");
   const quoted = uint256Decimal(terms.quotedOutput, "Aggregate output");

@@ -63,7 +63,7 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
     tokens,
     chainId: settings.chain_id,
     deployments: settings.deployments ?? {},
-    ...(allocations
+    ...(allocations && !atomic
       ? {
           executor: {
             address: settings.executor?.address,

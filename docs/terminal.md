@@ -93,7 +93,7 @@ Uniswap V4 routes display the complete configured pool key. The terminal separat
 
 For a verified, TOML-configured executor, replace `--route-id` with `--allocations '[{"routeId":"UNI_ROUTE","amountInAtomic":"37"},{"routeId":"PANCAKE_ROUTE","amountInAtomic":"64"}]'`. This example requires an original quote of 101 atomic units. One or two explicit allocations are supported; two must use different venues. Slipstream is direct-router only and cannot be an executor allocation. See [executor preparation and evidence](execution.md#configured-executor) for admission, exact re-quotes, aggregate slippage, approval spender, and remaining live checks. `trade` remains a single direct-router route; it does not choose allocations or use the executor.
 
-Atomic V1 uses an explicit returned one- or two-pool Uniswap V3 route and a separately configured ExecutorV2:
+Atomic V1 uses either one explicit returned one- or two-pool Uniswap V3 route, or two explicit returned direct Uniswap V3 routes, with a separately configured ExecutorV2:
 
 ```bash
 bun run terminal -- prepare --chain CHAIN --config PATH \
@@ -102,7 +102,7 @@ bun run terminal -- prepare --chain CHAIN --config PATH \
   --keystore "$TERMINAL_KEYSTORE" --password-file "$TERMINAL_PASSWORD_FILE"
 ```
 
-`trade --execution-mode atomic-v1` also requires `--route-id`; this slice never substitutes another route. Human review shows accepted plan ID, executor plan hash, transaction fingerprint, transaction gas limit, and branch minimum. Terminal checks local executor and deployment, independently reconstructs all three identities and final generic `Plan` calldata, and requires one or two ordered operation events followed by branch and plan events plus token deltas in canonical receipt. For two operations, second event input must equal first event measured output. No ExecutorV2 deployment is enabled by checked-in configuration.
+For two direct branches, replace `--route-id` with `--allocations '[{"routeId":"ROUTE_A","amountInAtomic":"13"},{"routeId":"ROUTE_B","amountInAtomic":"24"}]'`. `trade --execution-mode atomic-v1` still requires `--route-id`; it never chooses allocations. Human review shows accepted plan ID, executor plan hash, transaction fingerprint, transaction gas limit, and each branch minimum. Terminal checks local executor and deployment, independently reconstructs all three identities and final generic `Plan` calldata, and requires exact ordered operation, branch, and plan events plus token deltas in canonical receipt. For two operations, second event input must equal first event measured output. For two branches, each event must match its branch allocation and measured output, and totals must match the plan. No ExecutorV2 deployment is enabled by checked-in configuration.
 
 For swaps, `verification.outcome: "passed"` means the canonical successful receipt's exact-transaction ERC20 Transfer logs show full wallet input consumption, output at least the configured minimum, and no net intermediate-token residue in the router. `receipt_success` is used for approval receipts; it does not make the old quote executable. Obtain a fresh quote after approval.
 

@@ -18,7 +18,7 @@ interface IUniswapRouter02V2 {
     function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
 }
 
-/// @notice Executes the first narrow slice of the ExecutorV2 plan ABI: one branch of up to two Uniswap V3 operations.
+/// @notice Executes one Uniswap V3 branch of up to two operations or two direct Uniswap V3 branches.
 contract ExecutorV2 {
     using SafeERC20 for IERC20;
 
@@ -114,36 +114,62 @@ contract ExecutorV2 {
         _validate(plan);
 
         bytes32 planHash = keccak256(abi.encode(uint256(2), block.chainid, address(this), msg.sender, plan));
-        Branch calldata branch = plan.branches[0];
         IERC20 input = IERC20(plan.tokenIn);
         IERC20 output = IERC20(plan.tokenOut);
         uint256 entryInput = input.balanceOf(address(this));
         uint256 entryOutput = output.balanceOf(address(this));
         uint256 entryIntermediate;
-        if (branch.operations.length == 2) {
-            entryIntermediate = IERC20(branch.operations[0].tokenOut).balanceOf(address(this));
+        if (plan.branches[0].operations.length == 2) {
+            entryIntermediate = IERC20(plan.branches[0].operations[0].tokenOut).balanceOf(address(this));
         }
 
         _pullInput(input, plan.amountIn, entryInput);
-        amountOut =
-            _executeBranch(planHash, branch, plan.tokenIn, plan.amountIn, entryInput, entryIntermediate, entryOutput);
-
-        if (amountOut < branch.minAmountOut) revert BranchMinimumNotMet(0, branch.minAmountOut, amountOut);
-        emit BranchExecuted(planHash, 0, branch.amountIn, amountOut);
+        amountOut = _executeBranches(planHash, plan, entryInput, entryIntermediate, entryOutput);
+        _requireBalance(output, address(this), entryOutput + amountOut);
         if (amountOut < plan.minAmountOut) revert PlanMinimumNotMet(plan.minAmountOut, amountOut);
 
         _payOutput(output, amountOut);
         _requireBalance(input, address(this), entryInput);
-        if (branch.operations.length == 2) {
-            _requireBalance(IERC20(branch.operations[0].tokenOut), address(this), entryIntermediate);
+        if (plan.branches[0].operations.length == 2) {
+            _requireBalance(IERC20(plan.branches[0].operations[0].tokenOut), address(this), entryIntermediate);
         }
         _requireBalance(output, address(this), entryOutput);
         emit PlanExecuted(planHash, msg.sender, plan.tokenOut, plan.tokenIn, plan.amountIn, amountOut);
     }
 
+    function _executeBranches(
+        bytes32 planHash,
+        Plan calldata plan,
+        uint256 entryInput,
+        uint256 entryIntermediate,
+        uint256 entryOutput
+    ) private returns (uint256 amountOut) {
+        uint256 remainingInput = plan.amountIn;
+        for (uint256 i; i < plan.branches.length; ++i) {
+            Branch calldata branch = plan.branches[i];
+            remainingInput -= branch.amountIn;
+            uint256 branchOutput = _executeBranch(
+                planHash,
+                branch,
+                i,
+                plan.tokenIn,
+                branch.amountIn,
+                entryInput + remainingInput,
+                entryIntermediate,
+                entryOutput + amountOut
+            );
+            if (branchOutput < branch.minAmountOut) {
+                revert BranchMinimumNotMet(i, branch.minAmountOut, branchOutput);
+            }
+            amountOut += branchOutput;
+            emit BranchExecuted(planHash, i, branch.amountIn, branchOutput);
+        }
+    }
+
     function _executeBranch(
         bytes32 planHash,
         Branch calldata branch,
+        uint256 branchIndex,
         address tokenIn,
         uint256 amountIn,
         uint256 entryInput,
@@ -163,13 +189,25 @@ contract ExecutorV2 {
                 finalOperation ? entryOutput : entryIntermediate,
                 i
             );
-            amountOut = _swap(operation, request);
-            emit OperationExecuted(
-                planHash, 0, i, operation.kind, currentToken, operation.tokenOut, currentAmount, amountOut
-            );
+            amountOut = _swap(operation, request, branchIndex);
+            _emitOperation(planHash, branchIndex, i, operation, currentToken, currentAmount, amountOut);
             currentToken = operation.tokenOut;
             currentAmount = amountOut;
         }
+    }
+
+    function _emitOperation(
+        bytes32 planHash,
+        uint256 branchIndex,
+        uint256 operationIndex,
+        Operation calldata operation,
+        address tokenIn,
+        uint256 amountIn,
+        uint256 amountOut
+    ) private {
+        emit OperationExecuted(
+            planHash, branchIndex, operationIndex, operation.kind, tokenIn, operation.tokenOut, amountIn, amountOut
+        );
     }
 
     function _validate(Plan calldata plan) private view {
@@ -177,40 +215,37 @@ contract ExecutorV2 {
             plan.tokenIn == address(0) || plan.tokenOut == address(0) || plan.tokenIn == plan.tokenOut
                 || plan.tokenIn == address(this) || plan.tokenOut == address(this) || plan.tokenIn.code.length == 0
                 || plan.tokenOut.code.length == 0 || plan.amountIn == 0 || plan.minAmountOut == 0
-                || plan.branches.length != 1
+                || plan.branches.length == 0 || plan.branches.length > 2
         ) revert InvalidPlan();
 
-        Branch calldata branch = plan.branches[0];
-        if (
-            branch.amountIn != plan.amountIn || branch.minAmountOut == 0 || branch.operations.length == 0
-                || branch.operations.length > 2
-        ) {
-            revert InvalidPlan();
-        }
+        uint256 totalInput;
+        bytes32 firstPool;
+        for (uint256 branchIndex; branchIndex < plan.branches.length; ++branchIndex) {
+            Branch calldata branch = plan.branches[branchIndex];
+            if (
+                branch.amountIn == 0 || branch.minAmountOut == 0 || branch.operations.length == 0
+                    || branch.operations.length > 2 || (plan.branches.length == 2 && branch.operations.length != 1)
+            ) revert InvalidPlan();
+            totalInput += branch.amountIn;
 
-        address currentToken = plan.tokenIn;
-        for (uint256 i; i < branch.operations.length; ++i) {
-            Operation calldata operation = branch.operations[i];
-            if (operation.kind != UNISWAP_V3) revert UnsupportedKind(operation.kind);
-            if (
-                operation.tokenOut == currentToken || operation.tokenOut.code.length == 0 || operation.fee >= 1_000_000
-                    || operation.tickSpacing != 0 || operation.poolId != bytes32(0)
-            ) revert InvalidOperation(0, i);
-            currentToken = operation.tokenOut;
-        }
-        if (currentToken != plan.tokenOut) revert InvalidOperation(0, branch.operations.length - 1);
-        if (branch.operations.length == 2) {
-            Operation calldata first = branch.operations[0];
-            Operation calldata second = branch.operations[1];
-            // One immutable router means a V3 pool is uniquely identified by its unordered token pair and fee.
-            // https://docs.uniswap.org/contracts/v3/reference/core/interfaces/IUniswapV3Factory#getpool
-            if (
-                _poolKey(plan.tokenIn, first.tokenOut, first.fee)
-                    == _poolKey(first.tokenOut, second.tokenOut, second.fee)
-            ) {
-                revert InvalidOperation(0, 1);
+            address currentToken = plan.tokenIn;
+            for (uint256 operationIndex; operationIndex < branch.operations.length; ++operationIndex) {
+                Operation calldata operation = branch.operations[operationIndex];
+                if (operation.kind != UNISWAP_V3) revert UnsupportedKind(operation.kind);
+                if (
+                    operation.tokenOut == currentToken || operation.tokenOut.code.length == 0
+                        || operation.fee >= 1_000_000 || operation.tickSpacing != 0 || operation.poolId != bytes32(0)
+                ) revert InvalidOperation(branchIndex, operationIndex);
+                bytes32 pool = _poolKey(currentToken, operation.tokenOut, operation.fee);
+                if (branchIndex == 0 && operationIndex == 0) firstPool = pool;
+                else if (pool == firstPool) revert InvalidOperation(branchIndex, operationIndex);
+                currentToken = operation.tokenOut;
+            }
+            if (currentToken != plan.tokenOut) {
+                revert InvalidOperation(branchIndex, branch.operations.length - 1);
             }
         }
+        if (totalInput != plan.amountIn) revert InvalidPlan();
     }
 
     function _pullInput(IERC20 input, uint256 amountIn, uint256 entryInput) private {
@@ -220,7 +255,10 @@ contract ExecutorV2 {
         _requireBalance(input, msg.sender, callerInput - amountIn);
     }
 
-    function _swap(Operation calldata operation, SwapRequest memory request) private returns (uint256 amountOut) {
+    function _swap(Operation calldata operation, SwapRequest memory request, uint256 branchIndex)
+        private
+        returns (uint256 amountOut)
+    {
         IERC20 input = IERC20(request.tokenIn);
         input.forceApprove(uniswapRouter, request.amountIn);
         try IUniswapRouter02V2(uniswapRouter)
@@ -236,13 +274,13 @@ contract ExecutorV2 {
                 )
             ) {}
         catch (bytes memory reason) {
-            revert ProtocolCallFailed(0, request.operationIndex, reason);
+            revert ProtocolCallFailed(branchIndex, request.operationIndex, reason);
         }
         input.forceApprove(uniswapRouter, 0);
         _requireBalance(input, address(this), request.entryInput);
 
         uint256 finalOutput = IERC20(operation.tokenOut).balanceOf(address(this));
-        if (finalOutput <= request.entryOutput) revert OutputNotIncreased(0, request.operationIndex);
+        if (finalOutput <= request.entryOutput) revert OutputNotIncreased(branchIndex, request.operationIndex);
         return finalOutput - request.entryOutput;
     }
 

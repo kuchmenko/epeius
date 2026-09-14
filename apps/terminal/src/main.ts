@@ -49,7 +49,7 @@ Usage:
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
   bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH [--route-id ID] [--execution-mode atomic-v1] [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
-  bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID [--execution-mode atomic-v1] | --allocations JSON) [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID | --allocations JSON) [--execution-mode atomic-v1] [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
 prepare previews without sending. execute displays terms and asks approval or swap confirmation.

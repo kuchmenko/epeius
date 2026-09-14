@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { create } from "@bufbuild/protobuf";
+import { create, toJsonString } from "@bufbuild/protobuf";
 import {
   encodeAbiParameters,
   encodeEventTopics,
+  encodeFunctionData,
   erc20Abi,
   hexToBytes,
 } from "viem";
@@ -23,7 +24,10 @@ import {
   PreparationStatus,
   PrepareExecutionResponseSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
-import { validatePreparation } from "./execution-policy";
+import {
+  assertPreparationUnchanged,
+  validatePreparation,
+} from "./execution-policy";
 import { configureExecution } from "./protocols";
 import {
   atomicV1ExecutorPlanHash,
@@ -51,6 +55,7 @@ type Fixture = {
   quoteBlockNumber: string;
   quoteBlockHash: string;
   gasLimit: string;
+  quotedOutputs?: string[];
   branches: Array<{
     amountInAtomic: string;
     amountOutMinimumAtomic: string;
@@ -65,7 +70,8 @@ type Fixture = {
   calldata: string;
   calldataKeccak: string;
   executorPlanHash: string;
-  branchHash: string;
+  branchHash?: string;
+  branchHashes?: string[];
   planId: string;
   transactionFingerprint: string;
 };
@@ -76,6 +82,12 @@ const fixture = (await Bun.file(
 const twoHopFixture = (await Bun.file(
   new URL(
     "../../../contracts/fixtures/atomic-v1-two-hop-plan.json",
+    import.meta.url,
+  ),
+).json()) as Fixture;
+const splitFixture = (await Bun.file(
+  new URL(
+    "../../../contracts/fixtures/atomic-v1-split-plan.json",
     import.meta.url,
   ),
 ).json()) as Fixture;
@@ -122,9 +134,46 @@ const twoHopTrusted = configureExecution({
   },
 });
 
+const splitTrusted = configureExecution({
+  tokens: [splitFixture.tokenIn, splitFixture.tokenOut],
+  atomicExecutor: {
+    address: splitFixture.executor,
+    runtimeCodeHash: splitFixture.runtimeCodeHash,
+    uniswapDeployment: "uni",
+  },
+  deployments: {
+    uni: {
+      kind: "uniswap-v3",
+      factory: splitFixture.factory,
+      router: splitFixture.router,
+      fees: splitFixture.branches.map((branch) => branch.operations[0].feePips),
+    },
+  },
+});
+
 function preparation(source = fixture) {
   const pools = source.pools ?? [source.pool ?? ""];
-  let currentToken = source.tokenIn;
+  let poolIndex = 0;
+  const routes = source.branches.map((branch, branchIndex) => {
+    let currentToken = source.tokenIn;
+    return {
+      routeId: `uni:${branch.operations.map((operation) => operation.feePips).join(":")}`,
+      provider: "uniswap-v3",
+      deploymentId: "uni",
+      amountOutAtomic: source.quotedOutputs?.[branchIndex] ?? "12",
+      block: { number: source.quoteBlockNumber, hash: source.quoteBlockHash },
+      legs: branch.operations.map((operation) => {
+        const leg = {
+          pool: pools[poolIndex++],
+          tokenIn: currentToken,
+          tokenOut: operation.tokenOut,
+          selector: { case: "feePips" as const, value: operation.feePips },
+        };
+        currentToken = operation.tokenOut;
+        return leg;
+      }),
+    };
+  });
   return create(PrepareExecutionResponseSchema, {
     status: PreparationStatus.READY,
     preparationId: "atomic-preparation",
@@ -143,23 +192,14 @@ function preparation(source = fixture) {
       valueAtomic: "0",
       gasLimit: source.gasLimit,
     },
-    route: {
-      routeId: "uni:500",
-      provider: "uniswap-v3",
-      deploymentId: "uni",
-      amountOutAtomic: "12",
-      block: { number: source.quoteBlockNumber, hash: source.quoteBlockHash },
-      legs: source.branches[0].operations.map((operation, i) => {
-        const leg = {
-          pool: pools[i],
-          tokenIn: currentToken,
-          tokenOut: operation.tokenOut,
-          selector: { case: "feePips" as const, value: operation.feePips },
-        };
-        currentToken = operation.tokenOut;
-        return leg;
-      }),
-    },
+    ...(routes.length === 1
+      ? { route: routes[0] }
+      : {
+          allocations: routes.map((route, i) => ({
+            amountInAtomic: source.branches[i].amountInAtomic,
+            route,
+          })),
+        }),
     atomicPlan: create(PlanSchema, {
       executorPlanHash: source.executorPlanHash,
       chainId: source.chainId,
@@ -181,15 +221,15 @@ function preparation(source = fixture) {
           tokenIn: hexToBytes(source.tokenIn as `0x${string}`),
           tokenOut: hexToBytes(source.tokenOut as `0x${string}`),
           amountIn: uintBytes(source.amountInAtomic),
-          branches: [
+          branches: source.branches.map((branch, branchIndex) =>
             create(PlanBranchSchema, {
-              amountIn: uintBytes(source.amountInAtomic),
-              operations: source.branches[0].operations.map((operation, i) =>
+              amountIn: uintBytes(branch.amountInAtomic),
+              operations: branch.operations.map((operation, operationIndex) =>
                 create(PoolOperationSchema, {
                   tokenIn: hexToBytes(
-                    (i === 0
+                    (operationIndex === 0
                       ? source.tokenIn
-                      : source.branches[0].operations[i - 1]
+                      : branch.operations[operationIndex - 1]
                           .tokenOut) as `0x${string}`,
                   ),
                   tokenOut: hexToBytes(operation.tokenOut as `0x${string}`),
@@ -198,14 +238,17 @@ function preparation(source = fixture) {
                     value: create(V3PoolSchema, {
                       factory: hexToBytes(source.factory as `0x${string}`),
                       router: hexToBytes(source.router as `0x${string}`),
-                      pool: hexToBytes(pools[i] as `0x${string}`),
+                      pool: hexToBytes(
+                        routes[branchIndex].legs[operationIndex]
+                          .pool as `0x${string}`,
+                      ),
                       feePips: operation.feePips,
                     }),
                   },
                 }),
               ),
             }),
-          ],
+          ),
         }),
         executor: create(ExecutorIdentitySchema, {
           address: hexToBytes(source.executor as `0x${string}`),
@@ -214,7 +257,9 @@ function preparation(source = fixture) {
         }),
         signer: hexToBytes(source.sender as `0x${string}`),
         recipient: hexToBytes(source.sender as `0x${string}`),
-        branchMinima: [uintBytes(source.amountOutMinimumAtomic)],
+        branchMinima: source.branches.map((branch) =>
+          uintBytes(branch.amountOutMinimumAtomic),
+        ),
         amountOutMinimum: uintBytes(source.amountOutMinimumAtomic),
         quoteBlock: create(PinnedBlockSchema, {
           number: uintBytes(source.quoteBlockNumber),
@@ -337,9 +382,9 @@ test("Atomic V1 matches independent commitment and calldata vectors", () => {
       gasLimit: BigInt(fixture.gasLimit),
     }),
   ).toBe(fixture.transactionFingerprint as `0x${string}`);
-  expect(trusted.atomicExecutor?.plan(preparation(), trusted.tokens).data).toBe(
-    fixture.calldata,
-  );
+  expect(
+    trusted.atomicExecutor?.plan(preparation(), trusted.tokens, 50).data,
+  ).toBe(fixture.calldata);
 });
 
 test("Atomic V1 consent and transaction identities reject each changed field", () => {
@@ -500,9 +545,13 @@ test("Atomic V1 admits independent two-hop vectors and binds operation order", (
         planHash: twoHopFixture.executorPlanHash,
         planId: twoHopFixture.planId,
         transactionFingerprint: twoHopFixture.transactionFingerprint,
-        operations: [
-          { tokenIn: twoHopFixture.tokenIn },
-          { tokenIn: twoHopFixture.intermediateToken },
+        branches: [
+          {
+            operations: [
+              { tokenIn: twoHopFixture.tokenIn },
+              { tokenIn: twoHopFixture.intermediateToken },
+            ],
+          },
         ],
       },
     },
@@ -536,6 +585,167 @@ test("Atomic V1 admits independent two-hop vectors and binds operation order", (
       1,
     ),
   ).toThrow("distinct pools");
+});
+
+test("Atomic V1 admits exact split vector and binds ordered branches", () => {
+  const p = preparation(splitFixture);
+  const result = validatePreparation(
+    p,
+    splitFixture.sender,
+    splitFixture.chainId,
+    50,
+    splitTrusted,
+    1,
+  );
+  expect(result).toMatchObject({
+    action: "swap",
+    transaction: { data: splitFixture.calldata },
+    receipt: {
+      atomicPlan: {
+        planHash: splitFixture.executorPlanHash,
+        planId: splitFixture.planId,
+        transactionFingerprint: splitFixture.transactionFingerprint,
+        branches: [
+          { amountInAtomic: "13", minimumAtomic: "28" },
+          { amountInAtomic: "24", minimumAtomic: "52" },
+        ],
+      },
+    },
+  });
+  expect(
+    BigInt(splitFixture.amountOutMinimumAtomic) -
+      splitFixture.branches.reduce(
+        (total, branch) => total + BigInt(branch.amountOutMinimumAtomic),
+        0n,
+      ),
+  ).toBe(1n);
+  expect(
+    atomicV1PlanId({
+      chainId: BigInt(splitFixture.chainId),
+      executor: splitFixture.executor as `0x${string}`,
+      runtimeCodeHash: splitFixture.runtimeCodeHash as `0x${string}`,
+      signer: splitFixture.sender as `0x${string}`,
+      recipient: splitFixture.sender as `0x${string}`,
+      tokenIn: splitFixture.tokenIn as `0x${string}`,
+      tokenOut: splitFixture.tokenOut as `0x${string}`,
+      amountIn: 37n,
+      minimum: 81n,
+      quoteBlockNumber: BigInt(splitFixture.quoteBlockNumber),
+      quoteBlockHash: splitFixture.quoteBlockHash as `0x${string}`,
+      expiresAt: BigInt(splitFixture.expiresAtUnix),
+      deadline: BigInt(splitFixture.deadlineUnix),
+      branchHashes: splitFixture.branchHashes as `0x${string}`[],
+    }),
+  ).toBe(splitFixture.planId as `0x${string}`);
+
+  const plan = {
+    tokenIn: splitFixture.tokenIn as `0x${string}`,
+    tokenOut: splitFixture.tokenOut as `0x${string}`,
+    amountIn: 37n,
+    minAmountOut: 81n,
+    deadline: BigInt(splitFixture.deadlineUnix),
+    branches: [...splitFixture.branches].reverse().map((branch) => ({
+      amountIn: BigInt(branch.amountInAtomic),
+      minAmountOut: BigInt(branch.amountOutMinimumAtomic),
+      operations: branch.operations.map((operation) => ({
+        kind: operation.kind,
+        tokenOut: operation.tokenOut as `0x${string}`,
+        fee: operation.feePips,
+        tickSpacing: operation.tickSpacing,
+        poolId: operation.poolId as `0x${string}`,
+      })),
+    })),
+  };
+  const reorderedPlanId = atomicV1PlanId({
+    chainId: 8453n,
+    executor: splitFixture.executor as `0x${string}`,
+    runtimeCodeHash: splitFixture.runtimeCodeHash as `0x${string}`,
+    signer: splitFixture.sender as `0x${string}`,
+    recipient: splitFixture.sender as `0x${string}`,
+    tokenIn: splitFixture.tokenIn as `0x${string}`,
+    tokenOut: splitFixture.tokenOut as `0x${string}`,
+    amountIn: 37n,
+    minimum: 81n,
+    quoteBlockNumber: BigInt(splitFixture.quoteBlockNumber),
+    quoteBlockHash: splitFixture.quoteBlockHash as `0x${string}`,
+    expiresAt: BigInt(splitFixture.expiresAtUnix),
+    deadline: BigInt(splitFixture.deadlineUnix),
+    branchHashes: [...(splitFixture.branchHashes as `0x${string}`[])].reverse(),
+  });
+  const reorderedExecutorHash = atomicV1ExecutorPlanHash({
+    chainId: 8453n,
+    executor: splitFixture.executor as `0x${string}`,
+    sender: splitFixture.sender as `0x${string}`,
+    plan,
+  });
+  const reorderedData = encodeFunctionData({
+    abi: executorV2Abi,
+    functionName: "execute",
+    args: [plan],
+  });
+  const reorderedFingerprint = atomicV1TransactionFingerprint({
+    planId: reorderedPlanId,
+    chainId: 8453n,
+    from: splitFixture.sender as `0x${string}`,
+    to: splitFixture.executor as `0x${string}`,
+    value: 0n,
+    data: reorderedData,
+    gasLimit: 1_000_000n,
+  });
+  expect(reorderedPlanId).not.toBe(splitFixture.planId);
+  expect(reorderedExecutorHash).not.toBe(splitFixture.executorPlanHash);
+  expect(reorderedData).not.toBe(splitFixture.calldata);
+  expect(reorderedFingerprint).not.toBe(splitFixture.transactionFingerprint);
+
+  const frozen = preparation(splitFixture);
+  const snapshot = toJsonString(PrepareExecutionResponseSchema, frozen);
+  const rechecked = structuredClone(frozen);
+  expect(() =>
+    assertPreparationUnchanged(frozen, rechecked, snapshot),
+  ).not.toThrow();
+  rechecked.allocations.reverse();
+  expect(() => assertPreparationUnchanged(frozen, rechecked, snapshot)).toThrow(
+    "Preparation changed",
+  );
+
+  for (const mutate of [
+    (value: ReturnType<typeof preparation>) => {
+      value.allocations[0].amountInAtomic = "12";
+    },
+    (value: ReturnType<typeof preparation>) => {
+      value.allocations[1].amountInAtomic = "25";
+    },
+    (value: ReturnType<typeof preparation>) => {
+      if (!value.allocations[1].route || !value.allocations[0].route)
+        throw new Error("missing split route");
+      value.allocations[1].route.legs[0].pool =
+        value.allocations[0].route.legs[0].pool;
+    },
+    (value: ReturnType<typeof preparation>) => {
+      if (!value.allocations[1].route) throw new Error("missing split route");
+      value.allocations[1].route.legs[0].selector = {
+        case: "feePips",
+        value: 500,
+      };
+    },
+    (value: ReturnType<typeof preparation>) => {
+      if (!value.allocations[1].route) throw new Error("missing split route");
+      value.allocations[1].route.legs.push(value.allocations[1].route.legs[0]);
+    },
+  ]) {
+    const changed = preparation(splitFixture);
+    mutate(changed);
+    expect(() =>
+      validatePreparation(
+        changed,
+        splitFixture.sender,
+        splitFixture.chainId,
+        50,
+        splitTrusted,
+        1,
+      ),
+    ).toThrow();
+  }
 });
 
 test("Atomic V1 receipt requires ordered exact executor events and token deltas", () => {
@@ -833,4 +1043,143 @@ test("Atomic V1 receipt proves measured two-hop chaining and exact event cardina
         .outcome,
     ).toBe("failed");
   }
+});
+
+test("Atomic V1 receipt proves exact split branch events and totals", () => {
+  const hash = `0x${"7".repeat(64)}`;
+  const pools = splitFixture.pools ?? [];
+  const transfer = (
+    token: string,
+    from: string,
+    to: string,
+    value: bigint,
+  ) => ({
+    address: token,
+    topics: encodeEventTopics({
+      abi: erc20Abi,
+      eventName: "Transfer",
+      args: { from: from as `0x${string}`, to: to as `0x${string}` },
+    }) as string[],
+    data: encodeAbiParameters([{ type: "uint256" }], [value]),
+    transactionHash: hash,
+  });
+  const operation = (
+    branchIndex: bigint,
+    amountIn: bigint,
+    amountOut: bigint,
+  ) => ({
+    address: splitFixture.executor,
+    topics: encodeEventTopics({
+      abi: executorV2Abi,
+      eventName: "OperationExecuted",
+      args: {
+        planHash: splitFixture.executorPlanHash as `0x${string}`,
+        branchIndex,
+        operationIndex: 0n,
+      },
+    }) as string[],
+    data: encodeAbiParameters(
+      [
+        { type: "uint8" },
+        { type: "address" },
+        { type: "address" },
+        { type: "uint256" },
+        { type: "uint256" },
+      ],
+      [
+        1,
+        splitFixture.tokenIn as `0x${string}`,
+        splitFixture.tokenOut as `0x${string}`,
+        amountIn,
+        amountOut,
+      ],
+    ),
+    transactionHash: hash,
+  });
+  const branch = (index: bigint, amountIn: bigint, amountOut: bigint) => ({
+    address: splitFixture.executor,
+    topics: encodeEventTopics({
+      abi: executorV2Abi,
+      eventName: "BranchExecuted",
+      args: {
+        planHash: splitFixture.executorPlanHash as `0x${string}`,
+        branchIndex: index,
+      },
+    }) as string[],
+    data: encodeAbiParameters(
+      [{ type: "uint256" }, { type: "uint256" }],
+      [amountIn, amountOut],
+    ),
+    transactionHash: hash,
+  });
+  const plan = (amountIn: bigint, amountOut: bigint) => ({
+    address: splitFixture.executor,
+    topics: encodeEventTopics({
+      abi: executorV2Abi,
+      eventName: "PlanExecuted",
+      args: {
+        planHash: splitFixture.executorPlanHash as `0x${string}`,
+        caller: splitFixture.sender as `0x${string}`,
+        tokenOut: splitFixture.tokenOut as `0x${string}`,
+      },
+    }) as string[],
+    data: encodeAbiParameters(
+      [{ type: "address" }, { type: "uint256" }, { type: "uint256" }],
+      [splitFixture.tokenIn as `0x${string}`, amountIn, amountOut],
+    ),
+    transactionHash: hash,
+  });
+  const logs = [
+    transfer(
+      splitFixture.tokenIn,
+      splitFixture.sender,
+      splitFixture.executor,
+      37n,
+    ),
+    transfer(splitFixture.tokenIn, splitFixture.executor, pools[0], 13n),
+    transfer(splitFixture.tokenOut, pools[0], splitFixture.executor, 31n),
+    operation(0n, 13n, 31n),
+    branch(0n, 13n, 31n),
+    transfer(splitFixture.tokenIn, splitFixture.executor, pools[1], 24n),
+    transfer(splitFixture.tokenOut, pools[1], splitFixture.executor, 57n),
+    operation(1n, 24n, 57n),
+    branch(1n, 24n, 57n),
+    transfer(
+      splitFixture.tokenOut,
+      splitFixture.executor,
+      splitFixture.sender,
+      88n,
+    ),
+    plan(37n, 88n),
+  ];
+  const obligations = validatePreparation(
+    preparation(splitFixture),
+    splitFixture.sender,
+    splitFixture.chainId,
+    50,
+    splitTrusted,
+    1,
+  );
+  if (obligations.action !== "swap") throw new Error("missing receipt terms");
+  const receipt: Receipt = { transactionHash: hash, status: "0x1", logs };
+  expect(verifyReceipt(receipt, hash, obligations.receipt).outcome).toBe(
+    "passed",
+  );
+
+  const mutations = [
+    logs.filter((_, i) => i !== 7),
+    [...logs.slice(0, 8), logs[7], ...logs.slice(8)],
+    [...logs.slice(0, 3), logs[4], logs[3], ...logs.slice(5)],
+    [...logs.slice(0, 7), operation(0n, 24n, 57n), ...logs.slice(8)],
+    [...logs.slice(0, 8), branch(1n, 24n, 56n), ...logs.slice(9)],
+    [...logs.slice(0, 7), operation(1n, 24n, 56n), ...logs.slice(8)],
+    [...logs.slice(0, 8), branch(1n, 23n, 57n), ...logs.slice(9)],
+    [...logs.slice(0, 10), plan(36n, 88n)],
+    [...logs.slice(0, 10), plan(37n, 87n)],
+  ];
+  for (const changed of mutations)
+    expect(
+      verifyReceipt({ ...receipt, logs: changed }, hash, obligations.receipt)
+        .outcome,
+    ).not.toBe("passed");
 });

@@ -218,7 +218,7 @@ func TestBalancerPreparationMatchesIndependentCastCalldataAndHasNoVaultProbe(t *
 	if message != "" || selection.output.String() != "1000023" {
 		t.Fatal("route rejected", message)
 	}
-	plan, message := strategy.Build(p)
+	plan, message := strategy.Build(p, 0)
 	if message != "" {
 		t.Fatal(message)
 	}

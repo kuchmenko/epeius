@@ -19,6 +19,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type atomicSplitRequoter struct{ calls *[]string }
+
+func (q atomicSplitRequoter) Requote(_ context.Context, route *quotev1.RouteQuote, amount *big.Int, block *quotev1.BlockContext) (*quotev1.RouteQuote, error) {
+	*q.calls = append(*q.calls, amount.String())
+	result := proto.CloneOf(route)
+	result.Block = proto.CloneOf(block)
+	result.AmountOutAtomic = map[string]string{"13": "29", "24": "53"}[amount.String()]
+	return result, nil
+}
+
 func TestAtomicV1PublishedCommitmentVector(t *testing.T) {
 	operation := atomicV1Operation{
 		Kind:        1,
@@ -56,7 +66,7 @@ func TestAtomicV1BuildsExactOnePoolPlan(t *testing.T) {
 		Recipient: "0x0000000000000000000000000000000000000055", TokenIn: route.Legs[0].TokenIn, TokenOut: route.Legs[0].TokenOut,
 		AmountInAtomic: "37", AmountOutMinimumAtomic: "11", ExpiresAtUnix: "1999999900", DeadlineUnix: "2000000000", Route: route,
 	}
-	plan, message := strategy.Build(p)
+	plan, message := strategy.Build(p, 50)
 	if message != "" || plan.atomicPlan == nil || plan.atomicPlan.ExecutorPlanHash != "0x69c0ba7621841b73782fbd11f817d4b8fca74f7f5a24be110fdde434d174a6f5" {
 		t.Fatalf("plan mismatch: %s %+v", message, plan.atomicPlan)
 	}
@@ -101,7 +111,7 @@ func TestAtomicV1BuildsIndependentTwoHopVector(t *testing.T) {
 		Recipient: fixture.Sender, TokenIn: fixture.TokenIn, TokenOut: fixture.TokenOut, AmountInAtomic: fixture.AmountInAtomic,
 		AmountOutMinimumAtomic: fixture.AmountOutMinimumAtomic, ExpiresAtUnix: fixture.ExpiresAtUnix, DeadlineUnix: fixture.DeadlineUnix, Route: route,
 	}
-	plan, message := strategy.Build(p)
+	plan, message := strategy.Build(p, 50)
 	if message != "" || plan.atomicPlan == nil || plan.transaction == nil {
 		t.Fatalf("two-hop build failed: %s", message)
 	}
@@ -129,6 +139,79 @@ func TestAtomicV1BuildsIndependentTwoHopVector(t *testing.T) {
 		if _, message := strategy.Select(t.Context(), saved, nil, changed); message == "" {
 			t.Fatalf("%s accepted", name)
 		}
+	}
+}
+
+func TestAtomicV1BuildsIndependentSplitVectorAndBindsBranchOrder(t *testing.T) {
+	var fixture struct {
+		ChainID, Executor, Sender, RuntimeCodeHash, Factory, Router, TokenIn, TokenOut                        string
+		AmountInAtomic, AmountOutMinimumAtomic, DeadlineUnix, ExpiresAtUnix, QuoteBlockNumber, QuoteBlockHash string
+		Pools                                                                                                 []string
+		Calldata, ExecutorPlanHash, PlanID, TransactionFingerprint                                            string
+		BranchHashes                                                                                          []string
+	}
+	raw, err := os.ReadFile("../../../../contracts/fixtures/atomic-v1-split-plan.json")
+	if err != nil || json.Unmarshal(raw, &fixture) != nil {
+		t.Fatal("could not read split Atomic V1 fixture")
+	}
+	routes := []*quotev1.RouteQuote{
+		{RouteId: "uni:500:first", Provider: "uniswap-v3", DeploymentId: "uni", Block: &quotev1.BlockContext{Number: fixture.QuoteBlockNumber, Hash: fixture.QuoteBlockHash}, Legs: []*quotev1.RouteLeg{{Pool: fixture.Pools[0], TokenIn: fixture.TokenIn, TokenOut: fixture.TokenOut, Selector: &quotev1.RouteLeg_FeePips{FeePips: 500}}}},
+		{RouteId: "uni:3000:second", Provider: "uniswap-v3", DeploymentId: "uni", Block: &quotev1.BlockContext{Number: fixture.QuoteBlockNumber, Hash: fixture.QuoteBlockHash}, Legs: []*quotev1.RouteLeg{{Pool: fixture.Pools[1], TokenIn: fixture.TokenIn, TokenOut: fixture.TokenOut, Selector: &quotev1.RouteLeg_FeePips{FeePips: 3000}}}},
+	}
+	calls := []string{}
+	strategy := atomicV1Preparation{chain: Chain{ChainID: fixture.ChainID, Config: config.Chain{
+		AtomicExecutor: &config.AtomicExecutor{Address: fixture.Executor, RuntimeCodeHash: fixture.RuntimeCodeHash, UniswapDeployment: "uni"},
+		Deployments:    map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Factory: fixture.Factory, Router: fixture.Router}},
+	}, AllocationRequoters: map[string]allocationRequoter{"uni": atomicSplitRequoter{calls: &calls}}}}
+	saved := storedQuote{
+		request: &quotev1.QuoteRequest{TokenIn: fixture.TokenIn, TokenOut: fixture.TokenOut, AmountInAtomic: fixture.AmountInAtomic},
+		final:   &quotev1.QuoteFinal{Routes: routes, Block: routes[0].Block},
+	}
+	request := &quotev1.PrepareExecutionRequest{Allocations: []*quotev1.RouteAllocation{{RouteId: routes[0].RouteId, AmountInAtomic: "13"}, {RouteId: routes[1].RouteId, AmountInAtomic: "24"}}}
+	selection, message := strategy.Select(t.Context(), saved, request, nil)
+	if message != "" || selection.output.String() != "82" || len(selection.allocations) != 2 || len(calls) != 2 {
+		t.Fatalf("split selection failed: %s %+v %v", message, selection, calls)
+	}
+	p := &quotev1.PrepareExecutionResponse{
+		Recipient: fixture.Sender, TokenIn: fixture.TokenIn, TokenOut: fixture.TokenOut, AmountInAtomic: fixture.AmountInAtomic,
+		AmountOutMinimumAtomic: fixture.AmountOutMinimumAtomic, ExpiresAtUnix: fixture.ExpiresAtUnix, DeadlineUnix: fixture.DeadlineUnix, Allocations: selection.allocations,
+	}
+	plan, message := strategy.Build(p, 50)
+	if message != "" || plan.atomicPlan == nil || plan.transaction == nil {
+		t.Fatalf("split build failed: %s", message)
+	}
+	if plan.transaction.Data != fixture.Calldata || plan.atomicPlan.ExecutorPlanHash != fixture.ExecutorPlanHash || hexutil.Encode(plan.atomicPlan.PlanId) != fixture.PlanID || hexutil.Encode(plan.atomicPlan.TransactionFingerprint) != fixture.TransactionFingerprint {
+		t.Fatalf("split vector mismatch: plan=%+v transaction=%+v", plan.atomicPlan, plan.transaction)
+	}
+	if len(plan.atomicPlan.Branches) != 2 || plan.atomicPlan.Branches[0].AmountOutMinimumAtomic != "28" || plan.atomicPlan.Branches[1].AmountOutMinimumAtomic != "52" || len(plan.atomicPlan.AcceptedTerms.GetProgram().GetBranches()) != 2 || len(plan.checks.ClearAllowances) != 2 {
+		t.Fatalf("split obligations incomplete: %+v", plan)
+	}
+	branchMinimumTotal := new(big.Int)
+	for _, branch := range plan.atomicPlan.Branches {
+		value, _ := new(big.Int).SetString(branch.AmountOutMinimumAtomic, 10)
+		branchMinimumTotal.Add(branchMinimumTotal, value)
+	}
+	if branchMinimumTotal.String() != "80" || p.AmountOutMinimumAtomic != "81" {
+		t.Fatal("aggregate minimum was replaced by branch minimum sum")
+	}
+
+	reorderedRequest := &quotev1.PrepareExecutionRequest{Allocations: []*quotev1.RouteAllocation{{RouteId: routes[1].RouteId, AmountInAtomic: "24"}, {RouteId: routes[0].RouteId, AmountInAtomic: "13"}}}
+	reorderedSelection, message := strategy.Select(t.Context(), saved, reorderedRequest, nil)
+	if message != "" {
+		t.Fatal(message)
+	}
+	reordered := proto.CloneOf(p)
+	reordered.Allocations = reorderedSelection.allocations
+	reorderedPlan, message := strategy.Build(reordered, 50)
+	if message != "" || reorderedPlan.transaction.Data == plan.transaction.Data || reorderedPlan.atomicPlan.ExecutorPlanHash == plan.atomicPlan.ExecutorPlanHash || string(reorderedPlan.atomicPlan.PlanId) == string(plan.atomicPlan.PlanId) || string(reorderedPlan.atomicPlan.TransactionFingerprint) == string(plan.atomicPlan.TransactionFingerprint) {
+		t.Fatal("branch reorder did not change every ordered identity")
+	}
+
+	calls = nil
+	duplicateFee := proto.CloneOf(request)
+	routes[1].Legs[0].Selector = &quotev1.RouteLeg_FeePips{FeePips: 500}
+	if _, message := strategy.Select(t.Context(), saved, duplicateFee, nil); message == "" || len(calls) != 0 {
+		t.Fatal("duplicate physical pool reached requote", message, calls)
 	}
 }
 

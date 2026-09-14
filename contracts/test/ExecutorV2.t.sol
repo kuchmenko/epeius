@@ -147,6 +147,23 @@ contract ExecutorV2Test {
         result.branches[0].operations[1] = ExecutorV2.Operation(1, address(tokenOut), 322, 0, bytes32(0));
     }
 
+    function splitPlan(uint256 firstMinimum, uint256 secondMinimum, uint256 planMinimum)
+        private
+        view
+        returns (ExecutorV2.Plan memory result)
+    {
+        result = plan(37, firstMinimum, planMinimum, 500);
+        result.branches = new ExecutorV2.Branch[](2);
+        result.branches[0].amountIn = 13;
+        result.branches[0].minAmountOut = firstMinimum;
+        result.branches[0].operations = new ExecutorV2.Operation[](1);
+        result.branches[0].operations[0] = ExecutorV2.Operation(1, address(tokenOut), 500, 0, bytes32(0));
+        result.branches[1].amountIn = 24;
+        result.branches[1].minAmountOut = secondMinimum;
+        result.branches[1].operations = new ExecutorV2.Operation[](1);
+        result.branches[1].operations[0] = ExecutorV2.Operation(1, address(tokenOut), 3000, 0, bytes32(0));
+    }
+
     function execute(ExecutorV2.Plan memory value) private returns (uint256) {
         return executor.execute(value);
     }
@@ -229,6 +246,32 @@ contract ExecutorV2Test {
         require(
             keccak256(abi.encode(uint256(2), uint256(8453), address(0x44), address(0x55), value))
                 == 0xc35a48eee0631dcbb1aea8df8504702345c36298f200668ce8db9c97f46f85b9,
+            "plan hash"
+        );
+    }
+
+    function testPublishedSplitPlanVector() public pure {
+        ExecutorV2.Plan memory value;
+        value.tokenIn = address(0x11);
+        value.tokenOut = address(0x33);
+        value.amountIn = 37;
+        value.minAmountOut = 81;
+        value.deadline = 2_000_000_000;
+        value.branches = new ExecutorV2.Branch[](2);
+        value.branches[0].amountIn = 13;
+        value.branches[0].minAmountOut = 28;
+        value.branches[0].operations = new ExecutorV2.Operation[](1);
+        value.branches[0].operations[0] = ExecutorV2.Operation(1, address(0x33), 500, 0, bytes32(0));
+        value.branches[1].amountIn = 24;
+        value.branches[1].minAmountOut = 52;
+        value.branches[1].operations = new ExecutorV2.Operation[](1);
+        value.branches[1].operations[0] = ExecutorV2.Operation(1, address(0x33), 3000, 0, bytes32(0));
+        bytes memory data = abi.encodeWithSelector(ExecutorV2.execute.selector, value);
+        require(bytes4(data) == 0x661983c5, "selector");
+        require(keccak256(data) == 0x7a5c7e47bb1732236201fe67f3bea58ff669dd5fcb73adb8ad857b4d00411366, "calldata");
+        require(
+            keccak256(abi.encode(uint256(2), uint256(8453), address(0x44), address(0x55), value))
+                == 0x297bbd553b9c322ff5e3c5aaa88be7d24651e8f165d34b513407fffc648ffbf8,
             "plan hash"
         );
     }
@@ -329,6 +372,123 @@ contract ExecutorV2Test {
         router.configureCall(1, 61, 0, 999);
         vm.expectPartialRevert(ExecutorV2.PlanMinimumNotMet.selector);
         execute(twoHopPlan(41, 1, 62));
+    }
+
+    function testSplitSpendsLiteralAllocationsMeasuresEachBranchAndPreservesDust() public {
+        ExecutorV2.Plan memory value = splitPlan(30, 56, 87);
+        router.configureCall(0, 31, 0, 777);
+        router.configureCall(1, 57, 0, 888);
+        tokenIn.mint(address(executor), 17);
+        tokenOut.mint(address(executor), 23);
+        tokenOut.mint(address(this), 29);
+
+        vm.recordLogs();
+        require(execute(value) == 88, "aggregate output");
+        require(router.amountIns(0) == 13 && router.amountIns(1) == 24, "literal allocations");
+        require(router.minimums(0) == 30 && router.minimums(1) == 56, "branch minima");
+        require(tokenIn.balanceOf(address(executor)) == 17 && tokenOut.balanceOf(address(executor)) == 23, "dust");
+        require(tokenOut.balanceOf(address(this)) == 117, "payout");
+        require(tokenIn.allowance(address(executor), address(router)) == 0, "allowance");
+
+        ExecutorV2Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 operationTopic =
+            keccak256("OperationExecuted(bytes32,uint256,uint256,uint8,address,address,uint256,uint256)");
+        bytes32 branchTopic = keccak256("BranchExecuted(bytes32,uint256,uint256,uint256)");
+        bytes32 planTopic = keccak256("PlanExecuted(bytes32,address,address,address,uint256,uint256)");
+        uint256 found;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(executor)) continue;
+            bytes32 expectedTopic =
+                found == 0 || found == 2 ? operationTopic : found == 1 || found == 3 ? branchTopic : planTopic;
+            require(found < 5 && logs[i].topics[0] == expectedTopic, "event order");
+            if (expectedTopic == operationTopic) {
+                uint256 branchIndex = found / 2;
+                (, address operationIn, address operationOut, uint256 operationAmountIn, uint256 operationAmountOut) =
+                    abi.decode(logs[i].data, (uint8, address, address, uint256, uint256));
+                require(uint256(logs[i].topics[2]) == branchIndex && uint256(logs[i].topics[3]) == 0, "operation index");
+                require(
+                    operationIn == address(tokenIn) && operationOut == address(tokenOut)
+                        && operationAmountIn == (branchIndex == 0 ? 13 : 24)
+                        && operationAmountOut == (branchIndex == 0 ? 31 : 57),
+                    "operation values"
+                );
+            }
+            ++found;
+        }
+        require(found == 5, "event count");
+    }
+
+    function testSplitMinimumsAreIndependent() public {
+        router.configureCall(0, 31, 0, 999);
+        router.configureCall(1, 57, 0, 999);
+        execute(splitPlan(31, 57, 88));
+
+        router.configureCall(0, 31, 0, 999);
+        router.configureCall(1, 57, 0, 999);
+        vm.expectPartialRevert(ExecutorV2.BranchMinimumNotMet.selector);
+        execute(splitPlan(32, 1, 1));
+
+        router.configureCall(0, 31, 0, 999);
+        router.configureCall(1, 57, 0, 999);
+        vm.expectPartialRevert(ExecutorV2.BranchMinimumNotMet.selector);
+        execute(splitPlan(1, 58, 1));
+
+        router.configureCall(0, 31, 0, 999);
+        router.configureCall(1, 57, 0, 999);
+        vm.expectPartialRevert(ExecutorV2.PlanMinimumNotMet.selector);
+        execute(splitPlan(1, 1, 89));
+    }
+
+    function testSplitZeroOutputAndPartialSpendRollBackBothBranches() public {
+        ExecutorV2.Plan memory value = splitPlan(1, 1, 1);
+        router.configureCall(0, 0, 0, 999);
+        router.configureCall(1, 57, 0, 999);
+        vm.expectPartialRevert(ExecutorV2.OutputNotIncreased.selector);
+        execute(value);
+        require(router.calls() == 0 && tokenIn.balanceOf(address(this)) == 10_000, "first rollback");
+
+        router.configureCall(0, 31, 0, 999);
+        router.configureCall(1, 0, 0, 999);
+        vm.expectPartialRevert(ExecutorV2.OutputNotIncreased.selector);
+        execute(value);
+        require(router.calls() == 0 && tokenIn.balanceOf(address(this)) == 10_000, "second zero rollback");
+
+        router.configureCall(0, 31, 0, 999);
+        router.configureCall(1, 57, 1, 999);
+        vm.expectPartialRevert(ExecutorV2.BalanceMismatch.selector);
+        execute(value);
+        require(router.calls() == 0 && tokenIn.balanceOf(address(this)) == 10_000, "second rollback");
+
+        router.configureCall(0, 31, 1, 999);
+        router.configureCall(1, 57, 0, 999);
+        vm.expectPartialRevert(ExecutorV2.BalanceMismatch.selector);
+        execute(value);
+        require(router.calls() == 0 && tokenIn.balanceOf(address(this)) == 10_000, "first partial rollback");
+        require(tokenIn.allowance(address(executor), address(router)) == 0, "rollback allowance");
+    }
+
+    function testSplitRejectsAllocationTotalsDuplicatePoolAndTwoByTwo() public {
+        ExecutorV2.Plan memory value = splitPlan(1, 1, 1);
+        value.branches[1].amountIn = 23;
+        vm.expectRevert(ExecutorV2.InvalidPlan.selector);
+        execute(value);
+
+        value = splitPlan(1, 1, 1);
+        value.branches[1].amountIn = 25;
+        vm.expectRevert(ExecutorV2.InvalidPlan.selector);
+        execute(value);
+
+        value = splitPlan(1, 1, 1);
+        value.branches[1].operations[0].fee = 500;
+        vm.expectPartialRevert(ExecutorV2.InvalidOperation.selector);
+        execute(value);
+
+        value = splitPlan(1, 1, 1);
+        value.branches[1].operations = new ExecutorV2.Operation[](2);
+        value.branches[1].operations[0] = ExecutorV2.Operation(1, address(intermediate), 3000, 0, bytes32(0));
+        value.branches[1].operations[1] = ExecutorV2.Operation(1, address(tokenOut), 3001, 0, bytes32(0));
+        vm.expectRevert(ExecutorV2.InvalidPlan.selector);
+        execute(value);
     }
 
     function testRejectsNonCanonicalTrailingWord() public {

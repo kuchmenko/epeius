@@ -232,55 +232,91 @@ export function atomicExecutorV1(
   return {
     address,
     runtimeCodeHash,
-    plan(p: PrepareExecutionResponse, tokens: string[]): SwapTerms {
+    plan(
+      p: PrepareExecutionResponse,
+      tokens: string[],
+      slippageBps: number,
+    ): SwapTerms {
       const wirePlan = p.atomicPlan;
-      const route = p.route;
-      if (
-        !wirePlan ||
-        !route ||
-        p.allocations.length ||
-        !route.legs.length ||
-        route.legs.length > 2
-      )
+      const selected = p.route
+        ? [{ amountInAtomic: p.amountInAtomic, route: p.route }]
+        : p.allocations;
+      const single =
+        !!p.route &&
+        p.allocations.length === 0 &&
+        p.route.legs.length >= 1 &&
+        p.route.legs.length <= 2;
+      const split =
+        !p.route &&
+        p.allocations.length === 2 &&
+        p.allocations.every(
+          (allocation) => allocation.route?.legs.length === 1,
+        );
+      if (!wirePlan || (!single && !split))
         throw new Error("Invalid Atomic V1 plan.");
-      admitV3Route(route, p, deployment, tokens);
+      const routes = selected.map((selection) => {
+        if (!selection.route) throw new Error("Invalid Atomic V1 plan.");
+        admitV3Route(selection.route, p, deployment, tokens);
+        return selection.route;
+      });
+      const block = routes[0].block;
       if (
-        new Set(route.legs.map((leg) => leg.pool.toLowerCase())).size !==
-        route.legs.length
+        !block ||
+        !isHash(block.hash) ||
+        !/^[0-9]+$/.test(block.number) ||
+        routes.some(
+          (route) =>
+            !route.block ||
+            route.block.number !== block.number ||
+            !same(route.block.hash, block.hash),
+        )
+      )
+        throw new Error("Atomic V1 routes must share one pinned block.");
+      const legs = routes.flatMap((route) => route.legs);
+      const poolAddresses = legs.map((leg) => leg.pool.toLowerCase());
+      const poolKeys = legs.map((leg) => {
+        const [token0, token1] = [leg.tokenIn, leg.tokenOut]
+          .map((token) => token.toLowerCase())
+          .sort();
+        return `${token0}:${token1}:${leg.selector.value}`;
+      });
+      if (
+        new Set(poolAddresses).size !== poolAddresses.length ||
+        new Set(poolKeys).size !== poolKeys.length
       )
         throw new Error("Atomic V1 operations must use distinct pools.");
-      const branch = wirePlan.branches[0];
       if (
-        wirePlan.branches.length !== 1 ||
-        !branch ||
-        branch.operations.length !== route.legs.length
+        wirePlan.branches.length !== selected.length ||
+        wirePlan.branches.some(
+          (branch, i) => branch.operations.length !== routes[i].legs.length,
+        )
       )
         throw new Error(
-          "Atomic V1 requires one branch with one or two operations.",
+          "Atomic V1 requires one branch with up to two operations or two direct branches.",
         );
       const accepted = wirePlan.acceptedTerms;
       const program = accepted?.program;
-      const acceptedBranch = program?.branches[0];
-      const acceptedOperations = acceptedBranch?.operations;
       const quoteBlock = accepted?.quoteBlock;
       const acceptedExecutor = accepted?.executor;
       rejectUnknownFields(wirePlan);
       if (
         !accepted ||
         !program ||
-        !acceptedBranch ||
-        !acceptedOperations ||
         !quoteBlock ||
         !acceptedExecutor ||
         program.formatVersion !== 1 ||
-        program.branches.length !== 1 ||
-        acceptedOperations.length !== route.legs.length ||
-        accepted.branchMinima.length !== 1 ||
+        program.branches.length !== selected.length ||
+        program.branches.some(
+          (branch, i) => branch.operations.length !== routes[i].legs.length,
+        ) ||
+        accepted.branchMinima.length !== selected.length ||
         acceptedExecutor.version !== 2 ||
-        acceptedOperations.some(
-          (operation) =>
-            operation.pool.case !== "uniswapV3" ||
-            operation.pool.value.feePips === undefined,
+        program.branches.some((branch) =>
+          branch.operations.some(
+            (operation) =>
+              operation.pool.case !== "uniswapV3" ||
+              operation.pool.value.feePips === undefined,
+          ),
         ) ||
         !wirePlan.planId ||
         wirePlan.planId.length !== 32 ||
@@ -302,21 +338,36 @@ export function atomicExecutorV1(
         wirePlan.amountInAtomic !== p.amountInAtomic ||
         wirePlan.amountOutMinimumAtomic !== p.amountOutMinimumAtomic ||
         wirePlan.deadlineUnix !== p.deadlineUnix ||
-        branch.amountInAtomic !== p.amountInAtomic ||
-        branch.amountOutMinimumAtomic !== p.amountOutMinimumAtomic ||
-        branch.operations.some((operation, i) => {
-          const leg = route.legs[i];
+        wirePlan.branches.some((branch, branchIndex) => {
+          const selectedBranch = selected[branchIndex];
+          const expectedMinimum = single
+            ? p.amountOutMinimumAtomic
+            : (
+                (uint256Decimal(
+                  routes[branchIndex].amountOutAtomic,
+                  "Route quoted output",
+                ) *
+                  BigInt(10000 - slippageBps)) /
+                10000n
+              ).toString();
           return (
-            operation.kind !== 1 ||
-            !same(operation.tokenOut, leg.tokenOut) ||
-            operation.feePips !== leg.selector.value ||
-            operation.tickSpacing !== 0 ||
-            !same(operation.poolId, zeroHash)
+            branch.amountInAtomic !== selectedBranch.amountInAtomic ||
+            branch.amountOutMinimumAtomic !== expectedMinimum ||
+            branch.operations.some((operation, operationIndex) => {
+              const leg = routes[branchIndex].legs[operationIndex];
+              return (
+                operation.kind !== 1 ||
+                !same(operation.tokenOut, leg.tokenOut) ||
+                operation.feePips !== leg.selector.value ||
+                operation.tickSpacing !== 0 ||
+                !same(operation.poolId, zeroHash)
+              );
+            })
           );
         })
       )
         throw new Error("Atomic V1 plan differs from prepared route terms.");
-      const plan = {
+      const plan: AtomicExecutorPlan = {
         tokenIn: getAddress(wirePlan.tokenIn),
         tokenOut: getAddress(wirePlan.tokenOut),
         amountIn: uint256Decimal(wirePlan.amountInAtomic, "Input amount"),
@@ -325,24 +376,29 @@ export function atomicExecutorV1(
           "Minimum output amount",
         ),
         deadline: uint256Decimal(wirePlan.deadlineUnix, "Deadline"),
-        branches: [
-          {
-            amountIn: uint256Decimal(branch.amountInAtomic, "Branch input"),
-            minAmountOut: uint256Decimal(
-              branch.amountOutMinimumAtomic,
-              "Branch minimum output",
-            ),
-            operations: branch.operations.map((operation) => ({
-              kind: operation.kind,
-              tokenOut: getAddress(operation.tokenOut),
-              fee: operation.feePips,
-              tickSpacing: operation.tickSpacing,
-              poolId: operation.poolId as `0x${string}`,
-            })),
-          },
-        ],
-      } as const;
-      if (plan.minAmountOut === 0n || plan.branches[0].minAmountOut === 0n)
+        branches: wirePlan.branches.map((branch) => ({
+          amountIn: uint256Decimal(branch.amountInAtomic, "Branch input"),
+          minAmountOut: uint256Decimal(
+            branch.amountOutMinimumAtomic,
+            "Branch minimum output",
+          ),
+          operations: branch.operations.map((operation) => ({
+            kind: operation.kind,
+            tokenOut: getAddress(operation.tokenOut),
+            fee: operation.feePips,
+            tickSpacing: operation.tickSpacing,
+            poolId: operation.poolId as `0x${string}`,
+          })),
+        })),
+      };
+      if (
+        plan.minAmountOut === 0n ||
+        plan.branches.some(
+          (branch) => branch.amountIn === 0n || branch.minAmountOut === 0n,
+        ) ||
+        plan.branches.reduce((total, branch) => total + branch.amountIn, 0n) !==
+          plan.amountIn
+      )
         throw new Error("Atomic V1 minimum output must be positive.");
 
       const acceptedChainId = requiredUint(program.chainId, "chain ID");
@@ -353,45 +409,45 @@ export function atomicExecutorV1(
         "output token",
       );
       const acceptedAmountIn = requiredUint(program.amountIn, "input amount");
-      const acceptedBranchAmount = requiredUint(
-        acceptedBranch.amountIn,
-        "branch input",
-      );
-      const decodedOperations = acceptedOperations.map((operation, i) => {
-        if (
-          operation.pool.case !== "uniswapV3" ||
-          operation.pool.value.feePips === undefined
-        )
-          throw new Error("Invalid Atomic V1 accepted provider.");
-        return {
-          tokenIn: requiredBytes(
-            operation.tokenIn,
-            20,
-            `operation ${i} input token`,
-          ),
-          tokenOut: requiredBytes(
-            operation.tokenOut,
-            20,
-            `operation ${i} output token`,
-          ),
-          factory: requiredBytes(
-            operation.pool.value.factory,
-            20,
-            `operation ${i} factory`,
-          ),
-          router: requiredBytes(
-            operation.pool.value.router,
-            20,
-            `operation ${i} router`,
-          ),
-          pool: requiredBytes(
-            operation.pool.value.pool,
-            20,
-            `operation ${i} pool`,
-          ),
-          fee: operation.pool.value.feePips,
-        };
-      });
+      const decodedBranches = program.branches.map((branch, branchIndex) => ({
+        amountIn: requiredUint(branch.amountIn, `branch ${branchIndex} input`),
+        minimum: requiredUint(
+          accepted.branchMinima[branchIndex],
+          `branch ${branchIndex} minimum`,
+        ),
+        operations: branch.operations.map((operation, operationIndex) => {
+          if (
+            operation.pool.case !== "uniswapV3" ||
+            operation.pool.value.feePips === undefined
+          )
+            throw new Error("Invalid Atomic V1 accepted provider.");
+          const label = `branch ${branchIndex} operation ${operationIndex}`;
+          return {
+            tokenIn: requiredBytes(
+              operation.tokenIn,
+              20,
+              `${label} input token`,
+            ),
+            tokenOut: requiredBytes(
+              operation.tokenOut,
+              20,
+              `${label} output token`,
+            ),
+            factory: requiredBytes(
+              operation.pool.value.factory,
+              20,
+              `${label} factory`,
+            ),
+            router: requiredBytes(
+              operation.pool.value.router,
+              20,
+              `${label} router`,
+            ),
+            pool: requiredBytes(operation.pool.value.pool, 20, `${label} pool`),
+            fee: operation.pool.value.feePips,
+          };
+        }),
+      }));
       const acceptedExecutorAddress = requiredBytes(
         acceptedExecutor.address,
         20,
@@ -407,10 +463,6 @@ export function atomicExecutorV1(
         accepted.recipient,
         20,
         "recipient",
-      );
-      const branchMinimum = requiredUint(
-        accepted.branchMinima[0],
-        "branch minimum",
       );
       const aggregateMinimum = requiredUint(
         accepted.amountOutMinimum,
@@ -432,91 +484,97 @@ export function atomicExecutorV1(
         !same(acceptedTokenIn, p.tokenIn) ||
         !same(acceptedTokenOut, p.tokenOut) ||
         acceptedAmountIn !== plan.amountIn ||
-        acceptedBranchAmount !== plan.amountIn ||
-        decodedOperations.some((operation, i) => {
-          const leg = route.legs[i];
-          return (
-            !same(operation.tokenIn, leg.tokenIn) ||
-            !same(operation.tokenOut, leg.tokenOut) ||
-            !same(operation.factory, factory) ||
-            !same(operation.router, deployment.router) ||
-            !same(operation.pool, leg.pool) ||
-            operation.fee !== leg.selector.value
-          );
-        }) ||
+        decodedBranches.some(
+          (branch, branchIndex) =>
+            branch.amountIn !== plan.branches[branchIndex].amountIn ||
+            branch.minimum !== plan.branches[branchIndex].minAmountOut ||
+            branch.operations.some((operation, operationIndex) => {
+              const leg = routes[branchIndex].legs[operationIndex];
+              return (
+                !same(operation.tokenIn, leg.tokenIn) ||
+                !same(operation.tokenOut, leg.tokenOut) ||
+                !same(operation.factory, factory) ||
+                !same(operation.router, deployment.router) ||
+                !same(operation.pool, leg.pool) ||
+                operation.fee !== leg.selector.value
+              );
+            }),
+        ) ||
         new Set(
-          decodedOperations.map((operation) => operation.pool.toLowerCase()),
-        ).size !== decodedOperations.length ||
+          decodedBranches.flatMap((branch) =>
+            branch.operations.map((operation) => operation.pool.toLowerCase()),
+          ),
+        ).size !== legs.length ||
         !same(acceptedExecutorAddress, address) ||
         !same(acceptedRuntimeHash, runtimeCodeHash) ||
         !same(acceptedSigner, p.recipient) ||
         !same(acceptedRecipient, p.recipient) ||
-        branchMinimum !== plan.branches[0].minAmountOut ||
         aggregateMinimum !== plan.minAmountOut ||
-        !route.block ||
-        quoteBlockNumber !== BigInt(route.block.number) ||
-        !same(quoteBlockHash, route.block.hash) ||
+        quoteBlockNumber !== BigInt(block.number) ||
+        !same(quoteBlockHash, block.hash) ||
         expiresAt !== BigInt(p.expiresAtUnix) ||
         acceptedDeadline !== plan.deadline
       )
         throw new Error("Atomic V1 accepted terms differ from preparation.");
 
-      const operationHashes = decodedOperations.map((operation) => {
-        const providerHash = keccak256(
-          encodeAbiParameters(
-            [
-              { type: "bytes32" },
-              { type: "uint8" },
-              { type: "address" },
-              { type: "address" },
-              { type: "address" },
-              { type: "uint24" },
-            ],
-            [
-              domain("Epeius.AtomicProvider.v1"),
-              1,
-              getAddress(operation.factory),
-              getAddress(operation.router),
-              getAddress(operation.pool),
-              operation.fee,
-            ],
-          ),
-        );
+      const branchHashes = decodedBranches.map((branch) => {
+        const operationHashes = branch.operations.map((operation) => {
+          const providerHash = keccak256(
+            encodeAbiParameters(
+              [
+                { type: "bytes32" },
+                { type: "uint8" },
+                { type: "address" },
+                { type: "address" },
+                { type: "address" },
+                { type: "uint24" },
+              ],
+              [
+                domain("Epeius.AtomicProvider.v1"),
+                1,
+                getAddress(operation.factory),
+                getAddress(operation.router),
+                getAddress(operation.pool),
+                operation.fee,
+              ],
+            ),
+          );
+          return keccak256(
+            encodeAbiParameters(
+              [
+                { type: "bytes32" },
+                { type: "uint8" },
+                { type: "address" },
+                { type: "address" },
+                { type: "bytes32" },
+              ],
+              [
+                domain("Epeius.AtomicOperation.v1"),
+                1,
+                getAddress(operation.tokenIn),
+                getAddress(operation.tokenOut),
+                providerHash,
+              ],
+            ),
+          );
+        });
         return keccak256(
           encodeAbiParameters(
             [
               { type: "bytes32" },
-              { type: "uint8" },
-              { type: "address" },
-              { type: "address" },
-              { type: "bytes32" },
+              { type: "uint256" },
+              { type: "uint256" },
+              { type: "bytes32[]" },
             ],
             [
-              domain("Epeius.AtomicOperation.v1"),
-              1,
-              getAddress(operation.tokenIn),
-              getAddress(operation.tokenOut),
-              providerHash,
+              domain("Epeius.AtomicAcceptedBranch.v1"),
+              branch.amountIn,
+              branch.minimum,
+              operationHashes,
             ],
           ),
         );
       });
-      const branchHash = keccak256(
-        encodeAbiParameters(
-          [
-            { type: "bytes32" },
-            { type: "uint256" },
-            { type: "uint256" },
-            { type: "bytes32[]" },
-          ],
-          [
-            domain("Epeius.AtomicAcceptedBranch.v1"),
-            acceptedBranchAmount,
-            branchMinimum,
-            operationHashes,
-          ],
-        ),
-      );
       const planId = atomicV1PlanId({
         chainId: acceptedChainId,
         executor: getAddress(acceptedExecutorAddress),
@@ -531,7 +589,7 @@ export function atomicExecutorV1(
         quoteBlockHash,
         expiresAt,
         deadline: acceptedDeadline,
-        branchHashes: [branchHash],
+        branchHashes,
       });
       if (!same(planId, bytesToHex(wirePlan.planId)))
         throw new Error("Atomic V1 plan ID does not match accepted terms.");
@@ -575,38 +633,50 @@ export function atomicExecutorV1(
         target: address,
         spender: address,
         data,
-        quotedOutput: route.amountOutAtomic,
-        routeDetails: [v3Review(route)],
+        quotedOutput: routes
+          .reduce(
+            (total, route) =>
+              total +
+              uint256Decimal(route.amountOutAtomic, "Route quoted output"),
+            0n,
+          )
+          .toString(),
+        routeDetails: routes.map(v3Review),
         receipt: {
           atomicPlan: {
             executor: address,
             planHash: wirePlan.executorPlanHash,
             planId,
             transactionFingerprint: bytesToHex(wirePlan.transactionFingerprint),
-            operations: route.legs.map((leg, i) => ({
-              kind: 1,
-              tokenIn: leg.tokenIn,
-              tokenOut: leg.tokenOut,
-              amountInAtomic: i === 0 ? p.amountInAtomic : undefined,
+            branches: routes.map((route, i) => ({
+              amountInAtomic: wirePlan.branches[i].amountInAtomic,
+              minimumAtomic: wirePlan.branches[i].amountOutMinimumAtomic,
+              operations: route.legs.map((leg) => ({
+                kind: 1,
+                tokenIn: leg.tokenIn,
+                tokenOut: leg.tokenOut,
+              })),
             })),
-            branchAmountInAtomic: branch.amountInAtomic,
-            branchMinimumAtomic: branch.amountOutMinimumAtomic,
           },
-          intermediate: route.legs.slice(0, -1).map((leg) => ({
-            token: leg.tokenOut,
-            owner: deployment.router,
-          })),
-          touched: [
-            { token: p.tokenIn, owner: address },
-            ...route.legs
-              .slice(0, -1)
-              .map((leg) => ({ token: leg.tokenOut, owner: address })),
-            { token: p.tokenOut, owner: address },
-            { token: p.tokenIn, owner: deployment.router },
-            ...route.legs.slice(0, -1).map((leg) => ({
+          intermediate: routes
+            .flatMap((route) => route.legs.slice(0, -1))
+            .map((leg) => ({
               token: leg.tokenOut,
               owner: deployment.router,
             })),
+          touched: [
+            { token: p.tokenIn, owner: address },
+            ...routes
+              .flatMap((route) => route.legs.slice(0, -1))
+              .map((leg) => ({ token: leg.tokenOut, owner: address })),
+            { token: p.tokenOut, owner: address },
+            { token: p.tokenIn, owner: deployment.router },
+            ...routes
+              .flatMap((route) => route.legs.slice(0, -1))
+              .map((leg) => ({
+                token: leg.tokenOut,
+                owner: deployment.router,
+              })),
             { token: p.tokenOut, owner: deployment.router },
           ],
         },
