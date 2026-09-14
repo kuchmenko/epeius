@@ -75,6 +75,15 @@ const executor = {
   slipstreamRouter: "0x00000000000000000000000000000000000000bb",
 } as const;
 
+function addUnknown(value: object) {
+  (value as { $unknown?: unknown[] }).$unknown = [{}];
+}
+
+function required<T>(value: T | undefined, name: string): T {
+  if (!value) throw new Error(`test ${name} missing`);
+  return value;
+}
+
 function candidate(kind: 1 | 2 | 3 = 1) {
   const tokens = [fixture.tokenIn, fixture.intermediateToken, fixture.tokenOut];
   return create(PlanCandidateSchema, {
@@ -239,6 +248,30 @@ function ready(kind: 1 | 2 | 3 = 1) {
     }),
   });
   return { accepted, response, planHash, fingerprint };
+}
+
+type ReadyResponse = ReturnType<typeof ready>["response"];
+
+function responsePreparation(value: ReadyResponse) {
+  if (!value.preparation) throw new Error("test preparation missing");
+  return value.preparation;
+}
+
+function responseTerms(value: ReadyResponse) {
+  const result = responsePreparation(value).terms;
+  if (!result) throw new Error("test terms missing");
+  return result;
+}
+
+function responseProgram(value: ReadyResponse) {
+  const result = responseTerms(value).program;
+  if (!result) throw new Error("test program missing");
+  return result;
+}
+
+function responseSimulation(value: ReadyResponse) {
+  if (!value.simulation) throw new Error("test simulation missing");
+  return value.simulation;
 }
 
 test("Atomic plan preparation validates calldata and measured evidence independently", () => {
@@ -532,6 +565,67 @@ test("Atomic plan preparation rejects identity, transaction, and evidence mutati
   }
 });
 
+test("Atomic preparation rejects unknown fields in every executable response record", () => {
+  const mutations: Array<[string, (value: ReadyResponse) => void]> = [
+    ["response", addUnknown],
+    ["preparation", (value) => addUnknown(responsePreparation(value))],
+    ["accepted terms", (value) => addUnknown(responseTerms(value))],
+    [
+      "executor",
+      (value) =>
+        addUnknown(required(responseTerms(value).executor, "executor")),
+    ],
+    ["program", (value) => addUnknown(responseProgram(value))],
+    ["branch", (value) => addUnknown(responseProgram(value).branches[0])],
+    [
+      "operation",
+      (value) => addUnknown(responseProgram(value).branches[0].operations[0]),
+    ],
+    [
+      "pool",
+      (value) => {
+        const operation = responseProgram(value).branches[0].operations[0];
+        if (operation.pool.case !== "uniswapV3")
+          throw new Error("missing pool");
+        addUnknown(operation.pool.value);
+      },
+    ],
+    [
+      "accepted block",
+      (value) =>
+        addUnknown(required(responseTerms(value).quoteBlock, "accepted block")),
+    ],
+    [
+      "transaction",
+      (value) =>
+        addUnknown(
+          required(responsePreparation(value).transaction, "transaction"),
+        ),
+    ],
+    ["simulation", (value) => addUnknown(responseSimulation(value))],
+    [
+      "simulation block",
+      (value) =>
+        addUnknown(
+          required(responseSimulation(value).block, "simulation block"),
+        ),
+    ],
+    [
+      "branch result",
+      (value) => addUnknown(responseSimulation(value).branchResults[0]),
+    ],
+  ];
+  for (const [name, mutate] of mutations) {
+    const value = ready();
+    mutate(value.response);
+    expect(
+      () =>
+        validateAtomicPlanPreparation(value.response, value.accepted, executor),
+      name,
+    ).toThrow("unsupported fields");
+  }
+});
+
 test("Atomic plan recheck permits new evidence only and freezes unsigned preparation", () => {
   const value = ready();
   const initial = validateAtomicPlanPreparation(
@@ -580,6 +674,18 @@ test("Atomic plan approval is exact and contains no swap preparation", () => {
   expect(
     validateAtomicPlanPreparation(response, value.accepted, executor).kind,
   ).toBe("approval");
+  const approval = response.approval;
+  if (!approval?.transaction) throw new Error("test approval missing");
+  addUnknown(approval);
+  expect(() =>
+    validateAtomicPlanPreparation(response, value.accepted, executor),
+  ).toThrow("unsupported fields");
+  approval.$unknown = [];
+  addUnknown(approval.transaction);
+  expect(() =>
+    validateAtomicPlanPreparation(response, value.accepted, executor),
+  ).toThrow("unsupported fields");
+  approval.transaction.$unknown = [];
   response.preparation = value.response.preparation;
   expect(() =>
     validateAtomicPlanPreparation(response, value.accepted, executor),

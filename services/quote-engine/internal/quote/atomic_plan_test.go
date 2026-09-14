@@ -474,6 +474,11 @@ func TestPrepareAndRecheckAtomicPlanUseMeasuredEventsAndFrozenTransaction(t *tes
 	if err != nil || rechecked.Msg.GetStatus() != atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_READY || !proto.Equal(frozen, rechecked.Msg.Preparation) || new(big.Int).SetBytes(rechecked.Msg.Simulation.BranchResults[0].OperationOutputs[1]).Int64() != 64 || bytes.Equal(prepared.Msg.Simulation.Block.Number, rechecked.Msg.Simulation.Block.Number) {
 		t.Fatalf("recheck failed or changed frozen terms: %+v %v", rechecked, err)
 	}
+	unknownRecheck := &atomicv1.RecheckPlanRequest{PreparationId: frozen.PreparationId, PlanId: planID.Bytes()}
+	unknownRecheck.ProtoReflect().SetUnknown([]byte{0x38, 0x01})
+	if _, err := handler.RecheckPlan(t.Context(), connect.NewRequest(unknownRecheck)); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("recheck unknown field was not rejected: %v", err)
+	}
 	if reader.canonical != 3 || len(simulator.checks) != 2 || len(simulator.checks[0].ClearAllowances) != 2 {
 		t.Fatalf("checks were not rerun: canonical=%d checks=%+v", reader.canonical, simulator.checks)
 	}
@@ -556,6 +561,9 @@ func TestPrepareAtomicPlanRejectsQuoteCandidateAndTermsSubstitution(t *testing.T
 		"quote block":  func(v *atomicv1.PreparePlanRequest) { v.Terms.QuoteBlock.Hash[31]++ },
 		"plan ID":      func(v *atomicv1.PreparePlanRequest) { v.PlanId[31]++ },
 		"unknown":      func(v *atomicv1.PreparePlanRequest) { v.ProtoReflect().SetUnknown([]byte{0x38, 0x01}) },
+		"nested unknown": func(v *atomicv1.PreparePlanRequest) {
+			v.Terms.Executor.ProtoReflect().SetUnknown([]byte{0x38, 0x01})
+		},
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -565,6 +573,48 @@ func TestPrepareAtomicPlanRejectsQuoteCandidateAndTermsSubstitution(t *testing.T
 				t.Fatalf("substitution was not rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestAtomicUnknownFieldsAreDetectedRecursivelyAcrossExecutableRecords(t *testing.T) {
+	_, _, terms, _ := atomicPlanTestData(t)
+	unknown := []byte{0xf8, 0x07, 0x01}
+	records := map[string]func() proto.Message{
+		"request":              func() proto.Message { return &atomicv1.PreparePlanRequest{} },
+		"recheck request":      func() proto.Message { return &atomicv1.RecheckPlanRequest{} },
+		"terms":                func() proto.Message { return &atomicv1.AcceptedPlanTerms{} },
+		"program":              func() proto.Message { return &atomicv1.PlanProgram{} },
+		"branch":               func() proto.Message { return &atomicv1.PlanBranch{} },
+		"operation":            func() proto.Message { return &atomicv1.PoolOperation{} },
+		"uniswap v3 pool":      func() proto.Message { return &atomicv1.V3Pool{} },
+		"pancake v3 pool":      func() proto.Message { return &atomicv1.V3Pool{} },
+		"slipstream pool":      func() proto.Message { return &atomicv1.SlipstreamPool{} },
+		"balancer pool":        func() proto.Message { return &atomicv1.BalancerPool{} },
+		"uniswap v4 pool":      func() proto.Message { return &atomicv1.V4Pool{} },
+		"uniswap v4 pool key":  func() proto.Message { return &atomicv1.V4PoolKey{} },
+		"executor":             func() proto.Message { return &atomicv1.ExecutorIdentity{} },
+		"accepted quote block": func() proto.Message { return &atomicv1.PinnedBlock{} },
+		"transaction":          func() proto.Message { return &atomicv1.PlanTransaction{} },
+		"preparation":          func() proto.Message { return &atomicv1.UnsignedPreparation{} },
+		"simulation":           func() proto.Message { return &atomicv1.SimulationEvidence{} },
+		"branch result":        func() proto.Message { return &atomicv1.BranchQuote{} },
+		"approval":             func() proto.Message { return &atomicv1.Erc20Approval{} },
+		"response":             func() proto.Message { return &atomicv1.PreparePlanResponse{} },
+	}
+	for name, makeMessage := range records {
+		t.Run(name, func(t *testing.T) {
+			message := makeMessage()
+			message.ProtoReflect().SetUnknown(unknown)
+			if !hasUnknown(message.ProtoReflect()) {
+				t.Fatal("unknown field was not detected")
+			}
+		})
+	}
+
+	request := &atomicv1.PreparePlanRequest{Terms: proto.CloneOf(terms)}
+	request.Terms.Executor.ProtoReflect().SetUnknown(unknown)
+	if !hasUnknown(request.ProtoReflect()) {
+		t.Fatal("nested unknown field was not detected from the request root")
 	}
 }
 

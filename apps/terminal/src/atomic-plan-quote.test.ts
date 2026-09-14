@@ -8,6 +8,7 @@ import {
   stringToHex,
 } from "viem";
 import {
+  BalancerPoolSchema,
   BranchQuoteSchema,
   PinnedBlockSchema,
   PlanBranchSchema,
@@ -17,6 +18,8 @@ import {
   PoolOperationSchema,
   SlipstreamPoolSchema,
   V3PoolSchema,
+  V4PoolKeySchema,
+  V4PoolSchema,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import { TokenSchema } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import {
@@ -168,6 +171,15 @@ function quoteBlock(value: ReturnType<typeof response>) {
   return result;
 }
 
+function addUnknown(value: object) {
+  (value as { $unknown?: unknown[] }).$unknown = [{}];
+}
+
+function required<T>(value: T | undefined, name: string): T {
+  if (!value) throw new Error(`test ${name} missing`);
+  return value;
+}
+
 test("Atomic candidate identity matches the independent Cast two-hop vector", () => {
   const value = response();
   expect(atomicCandidateId(value.candidates[0])).toBe(fixture.candidateId);
@@ -299,14 +311,19 @@ test("Atomic quote rejects every identity and recursive structure mutation", () 
       },
     ],
     ["network cost", (v) => (v.candidates[0].networkCostOut = word("1"))],
+    ["unknown response", addUnknown],
+    ["unknown candidate", (v) => addUnknown(v.candidates[0])],
+    ["unknown program", (v) => addUnknown(program(v))],
+    ["unknown branch", (v) => addUnknown(program(v).branches[0])],
     [
-      "unknown response",
-      (v) => ((v as unknown as { $unknown: unknown[] }).$unknown = [{}]),
+      "unknown operation",
+      (v) => addUnknown(program(v).branches[0].operations[0]),
     ],
+    ["unknown V3 pool", (v) => addUnknown(pool(v, 0))],
+    ["unknown quote block", (v) => addUnknown(quoteBlock(v))],
     [
-      "unknown nested",
-      (v) =>
-        ((program(v) as unknown as { $unknown: unknown[] }).$unknown = [{}]),
+      "unknown branch quote",
+      (v) => addUnknown(v.candidates[0].branchQuotes[0]),
     ],
   ];
   for (const [name, mutate] of cases) {
@@ -314,6 +331,100 @@ test("Atomic quote rejects every identity and recursive structure mutation", () 
     mutate(value);
     expect(() => validateAtomicPlanQuote(value, request), name).toThrow();
   }
+});
+
+test("Atomic quote rejects unknown fields in every typed pool case and V4 key", () => {
+  const pancake = response(pancakeFixture, "pancakeV3");
+  const pancakeOperation = program(pancake).branches[0].operations[0];
+  if (pancakeOperation.pool.case !== "pancakeV3")
+    throw new Error("missing Pancake pool");
+  addUnknown(pancakeOperation.pool.value);
+
+  const slipstream = slipstreamResponse();
+  const slipstreamOperation = program(slipstream).branches[0].operations[0];
+  if (slipstreamOperation.pool.case !== "slipstreamInitial")
+    throw new Error("missing Slipstream pool");
+  addUnknown(slipstreamOperation.pool.value);
+
+  const balancer = response();
+  program(balancer).branches[0].operations[0].pool = {
+    case: "balancerV2",
+    value: create(BalancerPoolSchema, {
+      vault: address(fixture.router),
+      poolId: word("1"),
+    }),
+  };
+  addUnknown(
+    required(
+      program(balancer).branches[0].operations[0].pool.value,
+      "Balancer pool",
+    ),
+  );
+
+  const v4 = response();
+  const key = create(V4PoolKeySchema, {
+    currency0: address(fixture.tokenIn),
+    currency1: address(fixture.intermediateToken),
+    feePips: 500,
+    tickSpacing: 10,
+    hooks: new Uint8Array(20),
+  });
+  program(v4).branches[0].operations[0].pool = {
+    case: "uniswapV4",
+    value: create(V4PoolSchema, {
+      poolManager: address(fixture.router),
+      key,
+    }),
+  };
+  addUnknown(
+    required(program(v4).branches[0].operations[0].pool.value, "V4 pool"),
+  );
+
+  const v4Key = response();
+  const unknownKey = create(V4PoolKeySchema, {
+    currency0: address(fixture.tokenIn),
+    currency1: address(fixture.intermediateToken),
+    feePips: 500,
+    tickSpacing: 10,
+    hooks: new Uint8Array(20),
+  });
+  program(v4Key).branches[0].operations[0].pool = {
+    case: "uniswapV4",
+    value: create(V4PoolSchema, {
+      poolManager: address(fixture.router),
+      key: unknownKey,
+    }),
+  };
+  addUnknown(unknownKey);
+
+  for (const [name, value, expectedRequest] of [
+    [
+      "Pancake",
+      pancake,
+      {
+        ...request,
+        tokenIn: pancakeFixture.tokenIn,
+        tokenOut: pancakeFixture.tokenOut,
+        amountIn: BigInt(pancakeFixture.amountIn),
+      },
+    ],
+    [
+      "Slipstream",
+      slipstream,
+      {
+        ...request,
+        tokenIn: slipstreamFixture.tokenIn,
+        tokenOut: slipstreamFixture.tokenOut,
+        amountIn: BigInt(slipstreamFixture.amountIn),
+      },
+    ],
+    ["Balancer", balancer, request],
+    ["V4 pool", v4, request],
+    ["V4 key", v4Key, request],
+  ] as const)
+    expect(() => validateAtomicPlanQuote(value, expectedRequest), name).toThrow(
+      "unsupported fields",
+    );
 });
 
 test("Atomic quote preserves false completion and canonical candidate order", () => {
