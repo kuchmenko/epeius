@@ -10,6 +10,7 @@ import {
   QuoteFinalSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
+import { AtomicIntentJournal } from "./atomic-intent-journal";
 import {
   atomicPlanQuoteRequest,
   formatAtomicPlanQuote,
@@ -60,7 +61,7 @@ Usage:
   bun run terminal -- status [--engine-url URL] [--json]
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--execution-mode atomic-v1] [--search-budget-ms N] [--engine-url URL] [--json]
-  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH ([--route-id ID] | --execution-mode atomic-v1 --candidate-index N) [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH ([--route-id ID] | --execution-mode atomic-v1 --candidate-index N --atomic-journal PATH) [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
   bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID | --allocations JSON) [--execution-mode atomic-v1] [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
@@ -315,6 +316,7 @@ export async function main(rawArgs: string[]) {
                     "candidate-index",
                     "keystore",
                     "password-file",
+                    "atomic-journal",
                     "slippage-bps",
                     "execution-mode",
                     "confirm-approval",
@@ -323,6 +325,17 @@ export async function main(rawArgs: string[]) {
                 : []),
             ],
     );
+    if (command === "trade") {
+      const atomic = values["execution-mode"] === "atomic-v1";
+      if (atomic && !values["atomic-journal"])
+        throw new Error(
+          "Atomic V1 trade requires an explicit --atomic-journal path.",
+        );
+      if (!atomic && values["atomic-journal"])
+        throw new Error(
+          "--atomic-journal is only valid with trade --execution-mode atomic-v1.",
+        );
+    }
     const engineUrl = parsed.engineUrl
       ? validateEngineUrl(parsed.engineUrl)
       : config.engineUrl;
@@ -469,72 +482,80 @@ export async function main(rawArgs: string[]) {
           amountIn: BigInt(amountInAtomic),
         };
         const atomicClient = atomicPlanClient(engineUrl);
-        return executionExitCode(
-          await runAtomicPlanTrade({
-            request,
-            candidateIndex: candidateIndex - 1,
-            signer: context.signer,
-            executor: trustedExecutor,
-            slippageBps: Number(slippage),
-            quote: () =>
-              atomicClient.getPlanQuote(
-                atomicPlanQuoteRequest(request, searchBudgetMs),
-                {
-                  signal: abort.signal,
-                  timeoutMs: searchBudgetMs + 5000,
-                },
-              ),
-            prepare: (request) =>
-              atomicClient.preparePlan(request, {
-                signal: abort.signal,
-                timeoutMs: 25000,
-              }),
-            recheck: (request) =>
-              atomicClient.recheckPlan(request, {
-                signal: abort.signal,
-                timeoutMs: 25000,
-              }),
-            chainId: context.rpc.chainId,
-            send: context.wallet.send,
-            receipt: context.rpc.waitCanonicalReceipt,
-            report: (event) => console.log(JSON.stringify(event)),
-            confirm: async (kind, transaction) => {
-              if (!(await verifyAtomicExecutor(context.rpc, trustedExecutor)))
-                throw new Error(
-                  "Local Atomic V1 executor runtime code or limits changed. Nothing sent.",
-                );
-              console.error(
-                JSON.stringify({
-                  action: kind,
-                  chainId: transaction.chainId,
-                  from: transaction.from,
-                  to: transaction.to,
-                  valueAtomic: transaction.valueAtomic,
-                  gasLimit: transaction.gasLimit,
-                  data: transaction.data,
-                }),
-              );
-              if (values[`confirm-${kind}`] === "yes") return true;
-              if (values["confirm-approval"] || values["confirm-swap"])
-                return false;
-              if (!process.stdin.isTTY) return false;
-              const prompt = createInterface({
-                input: process.stdin,
-                output: process.stderr,
-              });
-              try {
-                return (
-                  (await prompt.question(
-                    `Type ${kind} to sign and send this transaction: `,
-                    { signal: abort.signal },
-                  )) === kind
-                );
-              } finally {
-                prompt.close();
-              }
-            },
-          }),
+        const journal = await AtomicIntentJournal.open(
+          values["atomic-journal"] as string,
         );
+        try {
+          return executionExitCode(
+            await runAtomicPlanTrade({
+              request,
+              candidateIndex: candidateIndex - 1,
+              signer: context.signer,
+              executor: trustedExecutor,
+              slippageBps: Number(slippage),
+              journal,
+              quote: () =>
+                atomicClient.getPlanQuote(
+                  atomicPlanQuoteRequest(request, searchBudgetMs),
+                  {
+                    signal: abort.signal,
+                    timeoutMs: searchBudgetMs + 5000,
+                  },
+                ),
+              prepare: (request) =>
+                atomicClient.preparePlan(request, {
+                  signal: abort.signal,
+                  timeoutMs: 25000,
+                }),
+              recheck: (request) =>
+                atomicClient.recheckPlan(request, {
+                  signal: abort.signal,
+                  timeoutMs: 25000,
+                }),
+              chainId: context.rpc.chainId,
+              send: context.wallet.send,
+              receipt: context.rpc.waitCanonicalReceipt,
+              report: (event) => console.log(JSON.stringify(event)),
+              confirm: async (kind, transaction) => {
+                if (!(await verifyAtomicExecutor(context.rpc, trustedExecutor)))
+                  throw new Error(
+                    "Local Atomic V1 executor runtime code or limits changed. Nothing sent.",
+                  );
+                console.error(
+                  JSON.stringify({
+                    action: kind,
+                    chainId: transaction.chainId,
+                    from: transaction.from,
+                    to: transaction.to,
+                    valueAtomic: transaction.valueAtomic,
+                    gasLimit: transaction.gasLimit,
+                    data: transaction.data,
+                  }),
+                );
+                if (values[`confirm-${kind}`] === "yes") return true;
+                if (values["confirm-approval"] || values["confirm-swap"])
+                  return false;
+                if (!process.stdin.isTTY) return false;
+                const prompt = createInterface({
+                  input: process.stdin,
+                  output: process.stderr,
+                });
+                try {
+                  return (
+                    (await prompt.question(
+                      `Type ${kind} to sign and send this transaction: `,
+                      { signal: abort.signal },
+                    )) === kind
+                  );
+                } finally {
+                  prompt.close();
+                }
+              },
+            }),
+          );
+        } finally {
+          await journal.close();
+        }
       }
       return executionExitCode(
         await runTrade(

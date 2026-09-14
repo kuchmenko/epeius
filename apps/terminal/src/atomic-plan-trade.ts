@@ -1,4 +1,4 @@
-import { toJson } from "@bufbuild/protobuf";
+import { toBinary, toJson } from "@bufbuild/protobuf";
 import { hexToBigInt, isHash, isHex } from "viem";
 import {
   PlanCandidateSchema,
@@ -6,6 +6,10 @@ import {
   PreparePlanResponseSchema,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import type { UnsignedTransaction } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import type {
+  AtomicIntentAttempt,
+  AtomicIntentJournalWriter,
+} from "./atomic-intent-journal";
 import {
   type AtomicExecutorIdentity,
   acceptAtomicCandidate,
@@ -48,6 +52,7 @@ export type AtomicPlanTradeIO = {
   send: (transaction: UnsignedTransaction) => Promise<string>;
   receipt: (hash: string) => Promise<Receipt>;
   report: (event: unknown) => void;
+  journal: AtomicIntentJournalWriter;
 };
 
 export async function runAtomicPlanTrade(
@@ -119,37 +124,66 @@ export async function runAtomicPlanTrade(
         throw new Error(
           "Approval is still required after a fresh quote. Nothing sent.",
         );
+      const attempt = await io.journal.prepare({
+        action: "approval",
+        payloadType: "approval_response",
+        payloadBinary: toBinary(PreparePlanResponseSchema, response),
+        planId: accepted.planId,
+        transaction: prepared.transaction,
+      });
       if (!(await io.confirm("approval", prepared.transaction))) {
+        await io.journal.transition(attempt, "canceled");
         io.report({ sent: false, outcome: ExecutionOutcome.Canceled });
         return { kind: ExecutionOutcome.Canceled };
       }
-      const hash = await send(io, prepared.transaction, "approval");
-      if (!hash)
-        return { kind: ExecutionOutcome.Unknown, transactionHash: null };
+      const submission = await send(io, attempt);
+      if (submission.status === "unknown")
+        return {
+          kind: ExecutionOutcome.Unknown,
+          transactionHash: submission.hash,
+        };
+      const hash = submission.hash;
+      let receipt: Receipt;
       try {
-        const receipt = await io.receipt(hash);
-        if (
-          receipt.transactionHash.toLowerCase() !== hash.toLowerCase() ||
-          receipt.status !== "0x1"
-        ) {
-          io.report({
-            transactionHash: hash,
-            verification: { outcome: VerificationOutcome.Failed },
-          });
-          return { kind: ExecutionOutcome.Failed, transactionHash: hash };
-        }
-        io.report({
-          transactionHash: hash,
-          verification: { outcome: VerificationOutcome.ReceiptSuccess },
-          nextAction: "Fresh Atomic V1 quote required after approval.",
-        });
-        previousQuote = quoteId;
-        continue;
+        receipt = await io.receipt(hash);
       } catch {
+        if (!(await recordReceipt(io, attempt, hash, "receipt_unavailable")))
+          return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
         return unknownReceipt(io, hash);
       }
+      if (
+        receipt.transactionHash.toLowerCase() !== hash.toLowerCase() ||
+        receipt.status !== "0x1"
+      ) {
+        if (!(await recordReceipt(io, attempt, hash, "receipt_failed")))
+          return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
+        io.report({
+          transactionHash: hash,
+          verification: { outcome: VerificationOutcome.Failed },
+        });
+        return { kind: ExecutionOutcome.Failed, transactionHash: hash };
+      }
+      if (!(await recordReceipt(io, attempt, hash, "receipt_passed")))
+        return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
+      io.report({
+        transactionHash: hash,
+        verification: { outcome: VerificationOutcome.ReceiptSuccess },
+        nextAction: "Fresh Atomic V1 quote required after approval.",
+      });
+      previousQuote = quoteId;
+      continue;
     }
+    const attempt = await io.journal.prepare({
+      action: "swap",
+      payloadType: "unsigned_preparation",
+      payloadBinary: prepared.frozen,
+      planId: prepared.planId,
+      executorPlanHash: prepared.executorPlanHash,
+      transactionFingerprint: prepared.transactionFingerprint,
+      transaction: prepared.transaction,
+    });
     if (!(await io.confirm("swap", prepared.transaction))) {
+      await io.journal.transition(attempt, "canceled");
       io.report({ sent: false, outcome: ExecutionOutcome.Canceled });
       return { kind: ExecutionOutcome.Canceled };
     }
@@ -173,43 +207,66 @@ export async function runAtomicPlanTrade(
       hexToBigInt(chainId) !== io.request.chainId
     )
       throw new Error("RPC network changed. Nothing sent.");
-    const hash = await send(io, checked.transaction, "swap");
-    if (!hash) return { kind: ExecutionOutcome.Unknown, transactionHash: null };
+    const submission = await send(io, attempt);
+    if (submission.status === "unknown")
+      return {
+        kind: ExecutionOutcome.Unknown,
+        transactionHash: submission.hash,
+      };
+    const hash = submission.hash;
+    let evidence: ReturnType<typeof verifyReceipt>;
     try {
-      const evidence = verifyReceipt(
-        await io.receipt(hash),
-        hash,
-        checked.receipt,
-      );
-      io.report({ transactionHash: hash, verification: evidence });
-      return evidence.outcome === VerificationOutcome.Passed
-        ? { kind: ExecutionOutcome.SwapVerified, transactionHash: hash }
-        : evidence.outcome === VerificationOutcome.Failed
-          ? { kind: ExecutionOutcome.Failed, transactionHash: hash }
-          : { kind: ExecutionOutcome.Unknown, transactionHash: hash };
+      evidence = verifyReceipt(await io.receipt(hash), hash, checked.receipt);
     } catch {
+      if (!(await recordReceipt(io, attempt, hash, "receipt_unavailable")))
+        return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
       return unknownReceipt(io, hash);
     }
+    const state =
+      evidence.outcome === VerificationOutcome.Passed
+        ? "receipt_passed"
+        : evidence.outcome === VerificationOutcome.Failed
+          ? "receipt_failed"
+          : "receipt_unavailable";
+    if (!(await recordReceipt(io, attempt, hash, state)))
+      return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
+    io.report({ transactionHash: hash, verification: evidence });
+    return evidence.outcome === VerificationOutcome.Passed
+      ? { kind: ExecutionOutcome.SwapVerified, transactionHash: hash }
+      : evidence.outcome === VerificationOutcome.Failed
+        ? { kind: ExecutionOutcome.Failed, transactionHash: hash }
+        : { kind: ExecutionOutcome.Unknown, transactionHash: hash };
   }
   throw new Error("Atomic V1 trade did not produce a swap result.");
 }
 
-async function send(
-  io: AtomicPlanTradeIO,
-  transaction: UnsignedTransaction,
-  kind: "approval" | "swap",
-) {
+async function send(io: AtomicPlanTradeIO, attempt: AtomicIntentAttempt) {
+  await io.journal.transition(attempt, "handoff_started");
   try {
-    const hash = (await io.send(transaction)).trim();
+    const hash = (await io.send(attempt.transaction)).trim();
     if (!isHash(hash)) throw new Error("invalid transaction hash");
+    try {
+      await io.journal.transition(attempt, "submitted", {
+        transactionHash: hash,
+      });
+    } catch {
+      journalIncomplete(io, hash);
+      return { status: "unknown" as const, hash };
+    }
     io.report({
       transactionHash: hash,
       submission: "submitted",
-      kind,
+      kind: attempt.action,
       verification: { outcome: VerificationOutcome.Pending },
     });
-    return hash;
+    return { status: "submitted" as const, hash };
   } catch {
+    try {
+      await io.journal.transition(attempt, "submission_unknown");
+    } catch {
+      journalIncomplete(io, null);
+      return { status: "unknown" as const, hash: null };
+    }
     io.report({
       transactionHash: null,
       submission: "unknown",
@@ -217,8 +274,43 @@ async function send(
       message:
         "Send attempt may have reached the network. Inspect wallet transactions; do not automatically resend.",
     });
-    return "";
+    return { status: "unknown" as const, hash: null };
   }
+}
+
+async function recordReceipt(
+  io: AtomicPlanTradeIO,
+  attempt: AtomicIntentAttempt,
+  hash: string,
+  state: "receipt_passed" | "receipt_failed" | "receipt_unavailable",
+) {
+  try {
+    await io.journal.transition(attempt, state, {
+      transactionHash: hash,
+      verification:
+        state === "receipt_passed"
+          ? attempt.action === "approval"
+            ? "receipt_success"
+            : "economic_pass"
+          : state === "receipt_failed"
+            ? "failed"
+            : "unavailable",
+    });
+    return true;
+  } catch {
+    journalIncomplete(io, hash);
+    return false;
+  }
+}
+
+function journalIncomplete(io: AtomicPlanTradeIO, hash: string | null) {
+  io.report({
+    transactionHash: hash,
+    submission: hash ? "pending_or_unknown" : "unknown",
+    verification: { outcome: VerificationOutcome.Unavailable },
+    message:
+      "Atomic intent journal is incomplete after wallet handoff. Do not resend; inspect the wallet and journal manually.",
+  });
 }
 
 function unknownReceipt(io: AtomicPlanTradeIO, hash: string): ExecutionResult {

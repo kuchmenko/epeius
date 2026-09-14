@@ -455,6 +455,49 @@ test("CLI resolves symbols and addresses, sends exact amounts, and handles compl
     expect(misplacedCandidate.err).toContain(
       "--candidate-index requires --execution-mode atomic-v1.",
     );
+    const requestsBeforeJournalAdmission = requests.length;
+    const missingJournal = await run([
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--execution-mode",
+      "atomic-v1",
+      "--candidate-index",
+      "1",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(missingJournal.code).toBe(1);
+    expect(missingJournal.err).toContain("explicit --atomic-journal path");
+    expect(requests).toHaveLength(requestsBeforeJournalAdmission);
+    const misplacedJournal = await run([
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--route-id",
+      "r1",
+      "--atomic-journal",
+      "intent.jsonl",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(misplacedJournal.code).toBe(1);
+    expect(misplacedJournal.err).toContain(
+      "only valid with trade --execution-mode atomic-v1",
+    );
+    expect(requests).toHaveLength(requestsBeforeJournalAdmission);
     const unavailableUrl = server.url.toString();
     await server.stop(true);
     const failure = await run([
