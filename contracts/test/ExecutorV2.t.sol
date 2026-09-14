@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {ExecutorV2, IUniswapRouter02V2} from "../src/ExecutorV2.sol";
+import {ExecutorV2, IPancakeRouterV2, IUniswapRouter02V2} from "../src/ExecutorV2.sol";
 import {TestToken} from "../src/TestToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -78,21 +78,55 @@ contract ExecutorV2Router {
         payable
         returns (uint256)
     {
-        require(params.recipient == msg.sender && params.sqrtPriceLimitX96 == 0, "params");
-        require(IERC20(params.tokenIn).allowance(msg.sender, address(this)) == params.amountIn, "allowance");
+        return swap(
+            params.tokenIn,
+            params.tokenOut,
+            params.recipient,
+            params.amountIn,
+            params.amountOutMinimum,
+            params.sqrtPriceLimitX96
+        );
+    }
+
+    function exactInputSingle(IPancakeRouterV2.ExactInputSingleParams calldata params)
+        external
+        payable
+        returns (uint256)
+    {
+        require(params.deadline == 1_000, "deadline");
+        return swap(
+            params.tokenIn,
+            params.tokenOut,
+            params.recipient,
+            params.amountIn,
+            params.amountOutMinimum,
+            params.sqrtPriceLimitX96
+        );
+    }
+
+    function swap(
+        address tokenIn,
+        address tokenOut,
+        address recipient,
+        uint256 amountIn,
+        uint256 amountOutMinimum,
+        uint160 sqrtPriceLimitX96
+    ) private returns (uint256) {
+        require(recipient == msg.sender && sqrtPriceLimitX96 == 0, "params");
+        require(IERC20(tokenIn).allowance(msg.sender, address(this)) == amountIn, "allowance");
         uint256 index = sequential ? calls % 2 : 0;
-        amountIns[index] = params.amountIn;
-        minimums[index] = params.amountOutMinimum;
-        lastMinimum = params.amountOutMinimum;
+        amountIns[index] = amountIn;
+        minimums[index] = amountOutMinimum;
+        lastMinimum = amountOutMinimum;
         if (reentry.length != 0) {
             (bool ok, bytes memory reason) = msg.sender.call(reentry);
             require(!ok && bytes4(reason) == ExecutorV2.ReentrantCall.selector, "reentry");
             reentryRejected = true;
         }
         calls = index + 1;
-        uint256 spend = params.amountIn - spendReductions[index];
-        require(IERC20(params.tokenIn).transferFrom(msg.sender, address(0xBEEF), spend), "input");
-        require(IERC20(params.tokenOut).transfer(params.recipient, outputAmounts[index]), "output");
+        uint256 spend = amountIn - spendReductions[index];
+        require(IERC20(tokenIn).transferFrom(msg.sender, address(0xBEEF), spend), "input");
+        require(IERC20(tokenOut).transfer(recipient, outputAmounts[index]), "output");
         return reportedAmounts[index]; // The executor must use the measured output instead.
     }
 }
@@ -104,6 +138,7 @@ contract ExecutorV2Test {
     TestToken private intermediate;
     TestToken private tokenOut;
     ExecutorV2Router private router;
+    ExecutorV2Router private pancakeRouter;
     ExecutorV2 private executor;
 
     function setUp() public {
@@ -111,11 +146,14 @@ contract ExecutorV2Test {
         intermediate = new TestToken("Intermediate", 18);
         tokenOut = new TestToken("Output", 6);
         router = new ExecutorV2Router();
-        executor = new ExecutorV2(address(router));
+        pancakeRouter = new ExecutorV2Router();
+        executor = new ExecutorV2(address(router), address(pancakeRouter));
         tokenIn.mint(address(this), 10_000);
         tokenIn.approve(address(executor), type(uint256).max);
         intermediate.mint(address(router), 10_000);
         tokenOut.mint(address(router), 10_000);
+        intermediate.mint(address(pancakeRouter), 10_000);
+        tokenOut.mint(address(pancakeRouter), 10_000);
         vm.warp(1_000);
     }
 
@@ -145,6 +183,15 @@ contract ExecutorV2Test {
         result.branches[0].operations = new ExecutorV2.Operation[](2);
         result.branches[0].operations[0] = ExecutorV2.Operation(1, address(intermediate), 321, 0, bytes32(0));
         result.branches[0].operations[1] = ExecutorV2.Operation(1, address(tokenOut), 322, 0, bytes32(0));
+    }
+
+    function pancakePlan(uint256 amount, uint256 branchMinimum, uint256 planMinimum)
+        private
+        view
+        returns (ExecutorV2.Plan memory result)
+    {
+        result = plan(amount, branchMinimum, planMinimum, 500);
+        result.branches[0].operations[0].kind = 2;
     }
 
     function splitPlan(uint256 firstMinimum, uint256 secondMinimum, uint256 planMinimum)
@@ -250,6 +297,43 @@ contract ExecutorV2Test {
         );
     }
 
+    function testPublishedPancakeTwoHopPlanAndRouterVectors() public pure {
+        ExecutorV2.Plan memory value;
+        value.tokenIn = address(0x11);
+        value.tokenOut = address(0x33);
+        value.amountIn = 37;
+        value.minAmountOut = 60;
+        value.deadline = 2_000_000_200;
+        value.branches = new ExecutorV2.Branch[](1);
+        value.branches[0].amountIn = 37;
+        value.branches[0].minAmountOut = 60;
+        value.branches[0].operations = new ExecutorV2.Operation[](2);
+        value.branches[0].operations[0] = ExecutorV2.Operation(2, address(0x22), 500, 0, bytes32(0));
+        value.branches[0].operations[1] = ExecutorV2.Operation(2, address(0x33), 3000, 0, bytes32(0));
+        bytes memory data = abi.encodeWithSelector(ExecutorV2.execute.selector, value);
+        require(keccak256(data) == 0xa171d4763f5c611530d60a692d0869c9c0c62490b667e3cecf2184db36970e4a, "calldata");
+        require(
+            keccak256(abi.encode(uint256(2), uint256(8453), address(0x44), address(0x55), value))
+                == 0xa46d2894dc68232f0f0b462184d60b4f5d5b6be8572274793f475c2c05d62288,
+            "plan hash"
+        );
+
+        bytes memory firstHop = abi.encodeWithSelector(
+            IPancakeRouterV2.exactInputSingle.selector,
+            IPancakeRouterV2.ExactInputSingleParams(
+                address(0x11), address(0x22), 500, address(0x44), 2_000_000_200, 37, 1, 0
+            )
+        );
+        require(bytes4(firstHop) == 0x414bf389, "Pancake selector");
+        require(
+            keccak256(firstHop)
+                == keccak256(
+                    hex"414bf3890000000000000000000000000000000000000000000000000000000000000011000000000000000000000000000000000000000000000000000000000000002200000000000000000000000000000000000000000000000000000000000001f4000000000000000000000000000000000000000000000000000000000000004400000000000000000000000000000000000000000000000000000000773594c8000000000000000000000000000000000000000000000000000000000000002500000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000"
+                ),
+            "Pancake tuple"
+        );
+    }
+
     function testPublishedSplitPlanVector() public pure {
         ExecutorV2.Plan memory value;
         value.tokenIn = address(0x11);
@@ -327,6 +411,54 @@ contract ExecutorV2Test {
             ++operationCount;
         }
         require(operationCount == 2, "operation count");
+    }
+
+    function testPancakeUsesDeadlineMeasuredOutputAndClearsAllowance() public {
+        ExecutorV2.Plan memory value = pancakePlan(41, 136, 135);
+        pancakeRouter.configure(137, 0);
+        tokenIn.mint(address(executor), 17);
+        tokenOut.mint(address(executor), 23);
+
+        vm.recordLogs();
+        require(execute(value) == 137, "output");
+        require(pancakeRouter.amountIns(0) == 41 && pancakeRouter.minimums(0) == 136, "Pancake call");
+        require(tokenIn.allowance(address(executor), address(pancakeRouter)) == 0, "allowance");
+        require(tokenIn.balanceOf(address(executor)) == 17 && tokenOut.balanceOf(address(executor)) == 23, "dust");
+
+        ExecutorV2Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 operationTopic =
+            keccak256("OperationExecuted(bytes32,uint256,uint256,uint8,address,address,uint256,uint256)");
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(executor) || logs[i].topics[0] != operationTopic) continue;
+            (uint8 kind,,,,) = abi.decode(logs[i].data, (uint8, address, address, uint256, uint256));
+            require(kind == 2, "kind");
+            return;
+        }
+        revert("missing operation event");
+    }
+
+    function testMixedKindsUseDistinctPhysicalPoolNamespaces() public {
+        ExecutorV2.Plan memory value = twoHopPlan(41, 60, 59);
+        value.branches[0].operations[0].kind = 2;
+        value.branches[0].operations[1].fee = 321;
+        pancakeRouter.configure(83, 0);
+        router.configure(61, 0);
+        require(execute(value) == 61, "mixed output");
+        require(pancakeRouter.amountIns(0) == 41 && router.amountIns(0) == 83, "mixed measured chain");
+    }
+
+    function testSignedInputBoundAndDisabledKindFailClosed() public {
+        uint256 tooLarge = uint256(type(int256).max) + 1;
+        tokenIn.mint(address(this), tooLarge);
+        vm.expectPartialRevert(ExecutorV2.AmountOutOfRange.selector);
+        execute(pancakePlan(tooLarge, 1, 1));
+
+        ExecutorV2 pancakeOnly = new ExecutorV2(address(0), address(pancakeRouter));
+        tokenIn.approve(address(pancakeOnly), 41);
+        uint256 before = tokenIn.balanceOf(address(this));
+        vm.expectPartialRevert(ExecutorV2.UnsupportedKind.selector);
+        pancakeOnly.execute(plan(41, 1, 1, 321));
+        require(tokenIn.balanceOf(address(this)) == before, "funding changed");
     }
 
     function testTwoHopRejectsBrokenShapeAndReversePool() public {
@@ -511,7 +643,7 @@ contract ExecutorV2Test {
 
     function testRejectsUnsupportedAndNonzeroInactiveFields() public {
         ExecutorV2.Plan memory value = plan(41, 1, 1, 321);
-        value.branches[0].operations[0].kind = 2;
+        value.branches[0].operations[0].kind = 3;
         vm.expectPartialRevert(ExecutorV2.UnsupportedKind.selector);
         execute(value);
 
@@ -576,7 +708,16 @@ contract ExecutorV2Test {
 
     function testConstructorRejectsAddressWithoutCode() public {
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0xBEEF));
+        new ExecutorV2(address(0xBEEF), address(0));
+
+        vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
+        new ExecutorV2(address(router), address(0xBEEF));
+
+        vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
+        new ExecutorV2(address(0), address(0));
+
+        vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
+        new ExecutorV2(address(router), address(router));
     }
 
     function testReentrancyRejected() public {

@@ -12,6 +12,7 @@ import {
   erc20Abi,
   type Hex,
   hexToBytes,
+  keccak256,
   padHex,
   toHex,
   zeroHash,
@@ -38,13 +39,18 @@ import {
 } from "./atomic-plan-execution";
 import {
   type AtomicExecutorPlan,
+  atomicV1AcceptedBranchHashes,
   atomicV1ExecutorCalldata,
   atomicV1ExecutorPlanHash,
+  atomicV1PlanId,
   atomicV1TransactionFingerprint,
 } from "./protocols/atomic-v1";
 
 const fixture = await Bun.file(
   "contracts/fixtures/atomic-v1-candidate.json",
+).json();
+const pancakeFixture = await Bun.file(
+  "contracts/fixtures/atomic-v1-pancake.json",
 ).json();
 const word = (value: string | bigint | number) =>
   hexToBytes(padHex(toHex(BigInt(value)), { size: 32 }));
@@ -56,9 +62,11 @@ const executor = {
     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   factory: fixture.factory,
   router: fixture.router,
+  pancakeFactory: "0x0000000000000000000000000000000000000066",
+  pancakeRouter: "0x0000000000000000000000000000000000000077",
 } as const;
 
-function candidate() {
+function candidate(kind: 1 | 2 = 1) {
   const tokens = [fixture.tokenIn, fixture.intermediateToken, fixture.tokenOut];
   return create(PlanCandidateSchema, {
     candidateId: hexToBytes(fixture.candidateId),
@@ -75,15 +83,26 @@ function candidate() {
             create(PoolOperationSchema, {
               tokenIn: address(tokens[index]),
               tokenOut: address(tokens[index + 1]),
-              pool: {
-                case: "uniswapV3",
-                value: create(V3PoolSchema, {
-                  factory: address(fixture.factory),
-                  router: address(fixture.router),
-                  pool: address(fixture.pools[index]),
-                  feePips: fee,
-                }),
-              },
+              pool:
+                kind === 1
+                  ? {
+                      case: "uniswapV3" as const,
+                      value: create(V3PoolSchema, {
+                        factory: address(fixture.factory),
+                        router: address(fixture.router),
+                        pool: address(fixture.pools[index]),
+                        feePips: fee,
+                      }),
+                    }
+                  : {
+                      case: "pancakeV3" as const,
+                      value: create(V3PoolSchema, {
+                        factory: address(executor.pancakeFactory),
+                        router: address(executor.pancakeRouter),
+                        pool: address(fixture.pools[index]),
+                        feePips: fee,
+                      }),
+                    },
             }),
           ),
         }),
@@ -101,9 +120,9 @@ function candidate() {
   });
 }
 
-function ready() {
+function ready(kind: 1 | 2 = 1) {
   const accepted = acceptAtomicCandidate(
-    candidate(),
+    candidate(kind),
     signer,
     executor,
     50,
@@ -122,10 +141,13 @@ function ready() {
         amountIn: BigInt(fixture.amountIn),
         minAmountOut: accepted.minimum,
         operations: program.branches[0].operations.map((operation) => {
-          if (operation.pool.case !== "uniswapV3")
+          if (
+            operation.pool.case !== "uniswapV3" &&
+            operation.pool.case !== "pancakeV3"
+          )
             throw new Error("test operation missing");
           return {
-            kind: 1,
+            kind,
             tokenOut:
               `0x${Buffer.from(operation.tokenOut ?? []).toString("hex")}` as Hex,
             fee: operation.pool.value.feePips ?? 0,
@@ -203,6 +225,115 @@ test("Atomic plan preparation validates calldata and measured evidence independe
   expect(checked.executorPlanHash).toBe(value.planHash);
   expect(checked.transactionFingerprint).toBe(value.fingerprint);
   expect(checked.outputs).toEqual([23n, 43n]);
+});
+
+test("Pancake Atomic plan keeps kind 2 through accepted identity, calldata, and receipt", () => {
+  const value = ready(2);
+  const checked = validateAtomicPlanPreparation(
+    value.response,
+    value.accepted,
+    executor,
+  );
+  expect(checked.kind).toBe("swap");
+  if (checked.kind !== "swap") throw new Error("swap missing");
+  expect(checked.receipt.atomicPlan?.branches[0].operations).toEqual([
+    expect.objectContaining({ kind: 2 }),
+    expect.objectContaining({ kind: 2 }),
+  ]);
+  expect(checked.executorPlanHash).toBe(value.planHash);
+});
+
+test("Pancake plan, calldata, and fingerprint match independent Cast vectors", () => {
+  const tokens = [
+    pancakeFixture.tokenIn,
+    pancakeFixture.intermediateToken,
+    pancakeFixture.tokenOut,
+  ];
+  const program = create(PlanProgramSchema, {
+    formatVersion: 1,
+    chainId: word(pancakeFixture.chainId),
+    tokenIn: address(pancakeFixture.tokenIn),
+    tokenOut: address(pancakeFixture.tokenOut),
+    amountIn: word(pancakeFixture.amountIn),
+    branches: [
+      create(PlanBranchSchema, {
+        amountIn: word(pancakeFixture.amountIn),
+        operations: pancakeFixture.fees.map((fee: number, index: number) =>
+          create(PoolOperationSchema, {
+            tokenIn: address(tokens[index]),
+            tokenOut: address(tokens[index + 1]),
+            pool: {
+              case: "pancakeV3",
+              value: create(V3PoolSchema, {
+                factory: address(pancakeFixture.factory),
+                router: address(pancakeFixture.router),
+                pool: address(pancakeFixture.pools[index]),
+                feePips: fee,
+              }),
+            },
+          }),
+        ),
+      }),
+    ],
+  });
+  const minimum = BigInt(pancakeFixture.minimum);
+  const planId = atomicV1PlanId({
+    chainId: BigInt(pancakeFixture.chainId),
+    executor: pancakeFixture.executor,
+    runtimeCodeHash: pancakeFixture.runtimeCodeHash,
+    signer: pancakeFixture.signer,
+    recipient: pancakeFixture.signer,
+    tokenIn: pancakeFixture.tokenIn,
+    tokenOut: pancakeFixture.tokenOut,
+    amountIn: BigInt(pancakeFixture.amountIn),
+    minimum,
+    quoteBlockNumber: BigInt(pancakeFixture.quoteBlockNumber),
+    quoteBlockHash: pancakeFixture.quoteBlockHash,
+    expiresAt: BigInt(pancakeFixture.expiresAtUnix),
+    deadline: BigInt(pancakeFixture.deadlineUnix),
+    branchHashes: atomicV1AcceptedBranchHashes(program, [minimum]),
+  });
+  const plan: AtomicExecutorPlan = {
+    tokenIn: pancakeFixture.tokenIn,
+    tokenOut: pancakeFixture.tokenOut,
+    amountIn: BigInt(pancakeFixture.amountIn),
+    minAmountOut: minimum,
+    deadline: BigInt(pancakeFixture.deadlineUnix),
+    branches: [
+      {
+        amountIn: BigInt(pancakeFixture.amountIn),
+        minAmountOut: minimum,
+        operations: pancakeFixture.fees.map((fee: number, index: number) => ({
+          kind: 2,
+          tokenOut: tokens[index + 1],
+          fee,
+          tickSpacing: 0,
+          poolId: zeroHash,
+        })),
+      },
+    ],
+  };
+  const data = atomicV1ExecutorCalldata(plan);
+  const executorHash = atomicV1ExecutorPlanHash({
+    chainId: BigInt(pancakeFixture.chainId),
+    executor: pancakeFixture.executor,
+    sender: pancakeFixture.signer,
+    plan,
+  });
+  expect(planId).toBe(pancakeFixture.planId);
+  expect(executorHash).toBe(pancakeFixture.executorPlanHash);
+  expect(keccak256(data)).toBe(pancakeFixture.executorCalldataHash);
+  expect(
+    atomicV1TransactionFingerprint({
+      planId,
+      chainId: BigInt(pancakeFixture.chainId),
+      from: pancakeFixture.signer,
+      to: pancakeFixture.executor,
+      value: 0n,
+      data,
+      gasLimit: BigInt(pancakeFixture.gasLimit),
+    }),
+  ).toBe(pancakeFixture.transactionFingerprint);
 });
 
 test("Atomic plan preparation rejects identity, transaction, and evidence mutations", () => {

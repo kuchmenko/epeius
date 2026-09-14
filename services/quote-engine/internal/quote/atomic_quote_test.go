@@ -11,9 +11,12 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	atomicv1 "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1"
+	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -33,6 +36,30 @@ type atomicCandidateFixture struct {
 	QuoteBlockNumber  string   `json:"quoteBlockNumber"`
 	QuoteBlockHash    string   `json:"quoteBlockHash"`
 	CandidateID       string   `json:"candidateId"`
+	Executor          string   `json:"executor"`
+	Signer            string   `json:"signer"`
+	Minimum           string   `json:"minimum"`
+	RuntimeCodeHash   string   `json:"runtimeCodeHash"`
+	ExpiresAtUnix     string   `json:"expiresAtUnix"`
+	DeadlineUnix      string   `json:"deadlineUnix"`
+	GasLimit          string   `json:"gasLimit"`
+	PlanID            string   `json:"planId"`
+	ExecutorPlanHash  string   `json:"executorPlanHash"`
+	Fingerprint       string   `json:"transactionFingerprint"`
+	CalldataHash      string   `json:"executorCalldataHash"`
+}
+
+func loadPancakeAtomicFixture(t *testing.T) atomicCandidateFixture {
+	t.Helper()
+	data, err := os.ReadFile("../../../../contracts/fixtures/atomic-v1-pancake.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result atomicCandidateFixture
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func loadAtomicCandidateFixture(t *testing.T) atomicCandidateFixture {
@@ -69,6 +96,45 @@ func TestAtomicCandidateHashMatchesIndependentCastVector(t *testing.T) {
 	}
 	if common.BytesToHash(value.CandidateId).Hex() != f.CandidateID || len(value.BranchQuotes) != 1 || len(value.BranchQuotes[0].OperationOutputs) != 2 || new(big.Int).SetBytes(value.BranchQuotes[0].OperationOutputs[0]).String() != f.OperationOutputs[0] {
 		t.Fatalf("candidate does not match Cast vector: %+v", value)
+	}
+}
+
+func TestPancakeAtomicIdentitiesMatchIndependentCastVector(t *testing.T) {
+	f := loadPancakeAtomicFixture(t)
+	chainID, _ := new(big.Int).SetString(f.ChainID, 10)
+	amount, _ := new(big.Int).SetString(f.AmountIn, 10)
+	minimum, _ := new(big.Int).SetString(f.Minimum, 10)
+	blockNumber, _ := new(big.Int).SetString(f.QuoteBlockNumber, 10)
+	expires, _ := new(big.Int).SetString(f.ExpiresAtUnix, 10)
+	deadline, _ := new(big.Int).SetString(f.DeadlineUnix, 10)
+	outputs := make([]*big.Int, len(f.OperationOutputs))
+	for i, value := range f.OperationOutputs {
+		outputs[i], _ = new(big.Int).SetString(value, 10)
+	}
+	item := candidate{tokens: []common.Address{common.HexToAddress(f.TokenIn), common.HexToAddress(f.IntermediateToken), common.HexToAddress(f.TokenOut)}, fees: f.Fees}
+	block := &atomicv1.PinnedBlock{Number: uint256Bytes(blockNumber), Hash: common.HexToHash(f.QuoteBlockHash).Bytes()}
+	candidate, err := atomicPlanCandidate(chainID, amount, common.HexToAddress(f.TokenIn), common.HexToAddress(f.TokenOut), config.Deployment{Kind: "pancake-v3", Factory: f.Factory, Router: f.Router}, item, block, outputs, []common.Address{common.HexToAddress(f.Pools[0]), common.HexToAddress(f.Pools[1])})
+	if err != nil || common.BytesToHash(candidate.CandidateId).Hex() != f.CandidateID || candidate.Program.Branches[0].Operations[0].GetPancakeV3() == nil {
+		t.Fatalf("Pancake candidate mismatch: %+v %v", candidate, err)
+	}
+	wire, err := proto.Marshal(candidate)
+	decoded := new(atomicv1.PlanCandidate)
+	if err != nil || proto.Unmarshal(wire, decoded) != nil || decoded.Program.Branches[0].Operations[0].GetPancakeV3() == nil || decoded.Program.Branches[0].Operations[0].GetUniswapV3() != nil {
+		t.Fatal("Pancake operation oneof did not survive binary transport")
+	}
+	terms := &atomicv1.AcceptedPlanTerms{
+		Program: candidate.Program, Executor: &atomicv1.ExecutorIdentity{Address: common.HexToAddress(f.Executor).Bytes(), Version: proto.Uint32(2), RuntimeCodeHash: common.HexToHash(f.RuntimeCodeHash).Bytes()}, Signer: common.HexToAddress(f.Signer).Bytes(), Recipient: common.HexToAddress(f.Signer).Bytes(), BranchMinima: [][]byte{uint256Bytes(minimum)}, AmountOutMinimum: uint256Bytes(minimum), QuoteBlock: block, ExpiresAtUnix: uint256Bytes(expires), DeadlineUnix: uint256Bytes(deadline),
+	}
+	planID, err := atomicV1PlanID(terms)
+	operations := []atomicV1Operation{{Kind: 2, TokenOut: common.HexToAddress(f.IntermediateToken), Fee: new(big.Int).SetUint64(uint64(f.Fees[0])), TickSpacing: new(big.Int)}, {Kind: 2, TokenOut: common.HexToAddress(f.TokenOut), Fee: new(big.Int).SetUint64(uint64(f.Fees[1])), TickSpacing: new(big.Int)}}
+	plan := atomicV1ExecutorPlan{TokenIn: common.HexToAddress(f.TokenIn), TokenOut: common.HexToAddress(f.TokenOut), AmountIn: amount, MinAmountOut: minimum, Deadline: deadline, Branches: []atomicV1Branch{{AmountIn: amount, MinAmountOut: minimum, Operations: operations}}}
+	executorHash, hashErr := atomicV1ExecutorPlanHash(f.ChainID, common.HexToAddress(f.Executor), common.HexToAddress(f.Signer), plan)
+	data, packErr := contractabi.ExecutorV2.Pack("execute", plan)
+	gas, _ := new(big.Int).SetString(f.GasLimit, 10)
+	tx := &quotev1.UnsignedTransaction{ChainId: f.ChainID, From: f.Signer, To: f.Executor, ValueAtomic: "0", Data: hexutil.Encode(data), GasLimit: gas.String()}
+	fingerprint, fingerprintErr := atomicV1TransactionFingerprint(planID, tx)
+	if err != nil || hashErr != nil || packErr != nil || fingerprintErr != nil || planID.Hex() != f.PlanID || executorHash.Hex() != f.ExecutorPlanHash || crypto.Keccak256Hash(data).Hex() != f.CalldataHash || fingerprint.Hex() != f.Fingerprint {
+		t.Fatalf("Pancake identities differ: plan=%s executor=%s calldata=%s fingerprint=%s", planID.Hex(), executorHash.Hex(), crypto.Keccak256Hash(data).Hex(), fingerprint.Hex())
 	}
 }
 
@@ -133,6 +199,44 @@ func TestAtomicPlanQuoteCanonicalPathsUseSequentialOutputs(t *testing.T) {
 	}
 	if got.Candidates[0].Program.Branches[0].Operations[0].GetUniswapV3().GetFeePips() != 500 || got.Candidates[1].Program.Branches[0].Operations[0].GetUniswapV3().GetFeePips() != 3000 {
 		t.Fatal("direct candidates are not in canonical fee order")
+	}
+}
+
+func TestAtomicPlanQuoteKeepsCanonicalCrossProviderOrder(t *testing.T) {
+	middle := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	cfg := atomicQuoteConfig(middle)
+	cakeFactory := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	cakeQuoter := common.HexToAddress("0x8888888888888888888888888888888888888888")
+	cfg.Deployments["cake"] = config.Deployment{Kind: "pancake-v3", Factory: cakeFactory.Hex(), Quoter: cakeQuoter.Hex(), Router: common.HexToAddress("0x9999").Hex(), Fees: []uint32{2500}}
+	uniswap := cfg.Deployments["uni"]
+	uniswap.Fees = []uint32{500}
+	cfg.Deployments["uni"] = uniswap
+	cfg.AtomicExecutor.PancakeDeployment = "cake"
+	reader := readerFake{
+		snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
+		call: func(_ context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
+			if to == testFactory || to == cakeFactory {
+				return poolResponse(common.BytesToAddress(crypto.Keccak256(data)[12:])), nil
+			}
+			if to == cakeQuoter {
+				time.Sleep(3 * time.Millisecond)
+			}
+			input := new(big.Int).SetBytes(data[68:100]).Uint64()
+			return quoteResponse(input + uint64(calldataFee(data))), nil
+		},
+	}
+	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: cfg}}, QuoteConcurrency: 4}).GetPlanQuote(context.Background(), connect.NewRequest(atomicQuoteRequest("8453", testWETH, testUSDC, "37")))
+	if err != nil || len(response.Msg.Candidates) != 4 {
+		t.Fatalf("unexpected candidates: %+v %v", response, err)
+	}
+	for i, candidate := range response.Msg.Candidates {
+		operation := candidate.Program.Branches[0].Operations[0]
+		if i < 2 && operation.GetPancakeV3() == nil || i >= 2 && operation.GetUniswapV3() == nil {
+			t.Fatalf("candidate %d escaped configured deployment order", i)
+		}
+		if i%2 == 0 && len(candidate.Program.Branches[0].Operations) != 1 || i%2 == 1 && len(candidate.Program.Branches[0].Operations) != 2 {
+			t.Fatalf("candidate %d escaped canonical path order", i)
+		}
 	}
 }
 

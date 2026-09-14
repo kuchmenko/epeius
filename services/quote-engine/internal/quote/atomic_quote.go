@@ -27,6 +27,19 @@ var (
 	atomicCandidateDomain            = crypto.Keccak256Hash([]byte("Epeius.AtomicCandidate.v1"))
 )
 
+func atomicV3Pool(operation *atomicv1.PoolOperation) (*atomicv1.V3Pool, uint8) {
+	if operation == nil {
+		return nil, 0
+	}
+	if pool := operation.GetUniswapV3(); pool != nil {
+		return pool, 1
+	}
+	if pool := operation.GetPancakeV3(); pool != nil {
+		return pool, 2
+	}
+	return nil, 0
+}
+
 func uint256Bytes(value *big.Int) []byte {
 	return common.LeftPadBytes(value.Bytes(), 32)
 }
@@ -48,20 +61,20 @@ func atomicCandidateHash(program *atomicv1.PlanProgram, block *atomicv1.PinnedBl
 			return common.Hash{}, errors.New("operation output count does not match program")
 		}
 		for j, operation := range branch.Operations {
-			pool := operation.GetUniswapV3()
+			pool, kind := atomicV3Pool(operation)
 			if pool == nil {
 				return common.Hash{}, errors.New("unsupported operation")
 			}
 			providerHash, err := atomicHash(
 				abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: addressType}, {Type: uint24Type}},
-				atomicCandidateProviderDomain, uint8(1), common.BytesToAddress(pool.Factory), common.BytesToAddress(pool.Router), common.BytesToAddress(pool.Pool), new(big.Int).SetUint64(uint64(pool.GetFeePips())),
+				atomicCandidateProviderDomain, kind, common.BytesToAddress(pool.Factory), common.BytesToAddress(pool.Router), common.BytesToAddress(pool.Pool), new(big.Int).SetUint64(uint64(pool.GetFeePips())),
 			)
 			if err != nil {
 				return common.Hash{}, err
 			}
 			operationHashes[j], err = atomicHash(
 				abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: bytes32Type}},
-				atomicCandidateOperationDomain, uint8(1), common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
+				atomicCandidateOperationDomain, kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
 			)
 			if err != nil {
 				return common.Hash{}, err
@@ -109,12 +122,16 @@ func atomicPlanCandidate(chainID, amount *big.Int, tokenIn, tokenOut common.Addr
 			return nil, nil
 		}
 		seenPools[pool], seenKeys[key] = true, true
-		operations[i] = &atomicv1.PoolOperation{
+		operation := &atomicv1.PoolOperation{
 			TokenIn: item.tokens[i].Bytes(), TokenOut: item.tokens[i+1].Bytes(),
-			Pool: &atomicv1.PoolOperation_UniswapV3{UniswapV3: &atomicv1.V3Pool{
-				Factory: common.HexToAddress(deployment.Factory).Bytes(), Router: common.HexToAddress(deployment.Router).Bytes(), Pool: pool.Bytes(), FeePips: proto.Uint32(fee),
-			}},
 		}
+		poolValue := &atomicv1.V3Pool{Factory: common.HexToAddress(deployment.Factory).Bytes(), Router: common.HexToAddress(deployment.Router).Bytes(), Pool: pool.Bytes(), FeePips: proto.Uint32(fee)}
+		if deployment.Kind == "pancake-v3" {
+			operation.Pool = &atomicv1.PoolOperation_PancakeV3{PancakeV3: poolValue}
+		} else {
+			operation.Pool = &atomicv1.PoolOperation_UniswapV3{UniswapV3: poolValue}
+		}
+		operations[i] = operation
 	}
 	operationOutputs := make([][]byte, len(outputs))
 	for i, output := range outputs {
@@ -183,12 +200,15 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 	if executor == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 executor is not configured"))
 	}
-	deployment, ok := chain.Config.Deployments[executor.UniswapDeployment]
-	if !ok || deployment.Kind != "uniswap-v3" {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 Uniswap V3 deployment is not configured"))
+	deployments := map[string]config.Deployment{}
+	for id, kind := range map[string]string{executor.UniswapDeployment: "uniswap-v3", executor.PancakeDeployment: "pancake-v3"} {
+		deployment, ok := chain.Config.Deployments[id]
+		if id != "" && ok && deployment.Kind == kind && chain.DeploymentErrors[id] == "" {
+			deployments[id] = deployment
+		}
 	}
-	if chain.DeploymentErrors[executor.UniswapDeployment] != "" {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 Uniswap V3 deployment is unavailable"))
+	if len(deployments) == 0 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 V3 deployments are unavailable"))
 	}
 
 	searchCtx, cancel := context.WithTimeout(ctx, time.Duration(r.GetSearchBudgetMs())*time.Millisecond)
@@ -208,7 +228,7 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("invalid quote block"))
 	}
 	block := &atomicv1.PinnedBlock{Number: uint256Bytes(blockNumber), Hash: common.HexToHash(snapshot.BlockHash).Bytes()}
-	iterator := newCandidates(config.Chain{Tokens: chain.Config.Tokens, Deployments: map[string]config.Deployment{executor.UniswapDeployment: deployment}}, tokenIn, tokenOut)
+	iterator := newCandidates(config.Chain{Tokens: chain.Config.Tokens, Deployments: deployments}, tokenIn, tokenOut)
 	type result struct {
 		index int
 		value *atomicv1.PlanCandidate
@@ -224,6 +244,7 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		go func() {
 			defer workers.Done()
 			for {
+				deployment := deployments[item.deployment]
 				legs, outputs, quoteErr := quotePathOutputs(searchCtx, chain.Client, deployment, item.tokens, item.fees, amount, common.HexToHash(snapshot.BlockHash))
 				var value *atomicv1.PlanCandidate
 				if quoteErr == nil && len(legs) == len(item.fees) {

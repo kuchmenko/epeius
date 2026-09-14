@@ -13,7 +13,10 @@ import {
   zeroHash,
 } from "viem";
 import { executorV2Abi } from "../../../../generated/abi";
-import type { PlanProgram } from "../../../../generated/ts/epeius/atomic/v1/atomic_pb";
+import type {
+  PlanProgram,
+  PoolOperation,
+} from "../../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import type { PrepareExecutionResponse } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type SwapTerms, uint256Decimal } from "../execution-policy";
 import { admitV3Route, type V3Deployment, v3Review } from "./v3";
@@ -79,6 +82,14 @@ const requiredBytes = (
 };
 const requiredUint = (value: Uint8Array | undefined, label: string) =>
   BigInt(requiredBytes(value, 32, label));
+
+const atomicV3Pool = (operation: PoolOperation) => {
+  if (operation.pool.case === "uniswapV3")
+    return { pool: operation.pool.value, kind: 1 };
+  if (operation.pool.case === "pancakeV3")
+    return { pool: operation.pool.value, kind: 2 };
+  throw new Error("Atomic V1 accepted operation is unsupported.");
+};
 
 function rejectUnknownFields(value: unknown) {
   if (!value || typeof value !== "object" || value instanceof Uint8Array)
@@ -220,9 +231,7 @@ export function atomicV1AcceptedBranchHashes(
     throw new Error("Atomic V1 accepted branch cardinality is invalid.");
   return program.branches.map((branch, branchIndex) => {
     const operationHashes = branch.operations.map((operation) => {
-      if (operation.pool.case !== "uniswapV3")
-        throw new Error("Atomic V1 accepted operation is unsupported.");
-      const pool = operation.pool.value;
+      const { pool, kind } = atomicV3Pool(operation);
       const fee = pool.feePips;
       if (fee === undefined)
         throw new Error("Atomic V1 accepted operation is unsupported.");
@@ -238,7 +247,7 @@ export function atomicV1AcceptedBranchHashes(
           ],
           [
             domain("Epeius.AtomicProvider.v1"),
-            1,
+            kind,
             getAddress(requiredBytes(pool.factory, 20, "factory")),
             getAddress(requiredBytes(pool.router, 20, "router")),
             getAddress(requiredBytes(pool.pool, 20, "pool")),
@@ -257,7 +266,7 @@ export function atomicV1AcceptedBranchHashes(
           ],
           [
             domain("Epeius.AtomicOperation.v1"),
-            1,
+            kind,
             getAddress(requiredBytes(operation.tokenIn, 20, "operation input")),
             getAddress(
               requiredBytes(operation.tokenOut, 20, "operation output"),
@@ -291,6 +300,7 @@ export function atomicExecutorV1(
     address?: string;
     runtimeCodeHash?: string;
     uniswapDeployment?: string;
+    pancakeDeployment?: string;
   },
   deployments: Record<string, { kind: string }>,
 ) {
@@ -303,13 +313,24 @@ export function atomicExecutorV1(
     throw new Error("Local Atomic V1 executor identity is invalid.");
   const address = getAddress(configuredAddress).toLowerCase() as Address;
   const runtimeCodeHash = `0x${raw.runtimeCodeHash?.replace(/^0x/i, "").toLowerCase()}`;
-  const deployment = raw.uniswapDeployment
+  const uniswap = raw.uniswapDeployment
     ? (deployments[raw.uniswapDeployment] as V3Deployment | undefined)
     : undefined;
-  if (deployment?.kind !== "uniswap-v3" || !deployment.factory)
+  const pancake = raw.pancakeDeployment
+    ? (deployments[raw.pancakeDeployment] as V3Deployment | undefined)
+    : undefined;
+  if (
+    (raw.uniswapDeployment && uniswap?.kind !== "uniswap-v3") ||
+    (raw.pancakeDeployment && pancake?.kind !== "pancake-v3") ||
+    (!uniswap && !pancake) ||
+    !(uniswap ?? pancake)?.factory ||
+    (uniswap && pancake && same(uniswap.router, pancake.router))
+  )
     throw new Error(
-      "Local Atomic V1 executor needs a configured Uniswap V3 deployment.",
+      "Local Atomic V1 executor needs at least one valid distinct Uniswap or Pancake V3 deployment.",
     );
+  const deployment = uniswap ?? pancake;
+  if (!deployment?.factory) throw new Error("Invalid Atomic V1 deployment.");
   const factory = deployment.factory;
 
   return {
@@ -317,6 +338,8 @@ export function atomicExecutorV1(
     runtimeCodeHash,
     factory,
     router: deployment.router,
+    pancakeFactory: pancake?.factory,
+    pancakeRouter: pancake?.router,
     plan(
       p: PrepareExecutionResponse,
       tokens: string[],

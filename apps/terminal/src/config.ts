@@ -132,6 +132,7 @@ export async function readSettings(path: string) {
           address?: string;
           runtime_code_hash?: string;
           uniswap_deployment?: string;
+          pancake_deployment?: string;
           [key: string]: unknown;
         };
         tokens?: Array<{

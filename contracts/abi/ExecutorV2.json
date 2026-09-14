@@ -6,6 +6,11 @@
         "name": "uniswapRouter_",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "pancakeRouter_",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
@@ -104,6 +109,19 @@
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "pancakeRouter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -279,6 +297,32 @@
         "name": "account",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AmountOutOfRange",
+    "inputs": [
+      {
+        "name": "branchIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "operationIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maximum",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

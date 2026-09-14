@@ -95,11 +95,11 @@ Uniswap V4 routes display the complete configured pool key. The terminal separat
 
 For a verified, TOML-configured executor, replace `--route-id` with `--allocations '[{"routeId":"UNI_ROUTE","amountInAtomic":"37"},{"routeId":"PANCAKE_ROUTE","amountInAtomic":"64"}]'`. This example requires an original quote of 101 atomic units. One or two explicit allocations are supported; two must use different venues. Slipstream is direct-router only and cannot be an executor allocation. See [executor preparation and evidence](execution.md#configured-executor) for admission, exact re-quotes, aggregate slippage, approval spender, and remaining live checks. `trade` remains a single direct-router route; it does not choose allocations or use the executor.
 
-Atomic V1 uses either one explicit returned one- or two-pool Uniswap V3 route, or two explicit returned direct Uniswap V3 routes, with a separately configured ExecutorV2:
+Atomic V1 uses either one explicit returned homogeneous one- or two-pool Uniswap V3 or Pancake V3 route, or two explicit returned direct Uniswap V3 routes through the legacy preparation path, with a separately configured ExecutorV2:
 
 ```bash
 bun run terminal -- prepare --chain CHAIN --config PATH \
-  --quote-id QUOTE_ID --route-id UNISWAP_ROUTE_ID \
+  --quote-id QUOTE_ID --route-id ROUTE_ID \
   --execution-mode atomic-v1 --slippage-bps 50 \
   --keystore "$TERMINAL_KEYSTORE" --password-file "$TERMINAL_PASSWORD_FILE"
 ```

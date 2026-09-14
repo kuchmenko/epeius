@@ -22,6 +22,9 @@ import {
 const fixture = await Bun.file(
   "contracts/fixtures/atomic-v1-candidate.json",
 ).json();
+const pancakeFixture = await Bun.file(
+  "contracts/fixtures/atomic-v1-pancake.json",
+).json();
 const word = (value: string) =>
   hexToBytes(`0x${BigInt(value).toString(16).padStart(64, "0")}`);
 const address = (value: string) => hexToBytes(value as Hex);
@@ -32,45 +35,48 @@ const request = {
   amountIn: BigInt(fixture.amountIn),
 } as const;
 
-function response() {
-  const tokens = [fixture.tokenIn, fixture.intermediateToken, fixture.tokenOut];
-  const operations = fixture.fees.map((fee: number, index: number) =>
+function response(
+  source = fixture,
+  provider: "uniswapV3" | "pancakeV3" = "uniswapV3",
+) {
+  const tokens = [source.tokenIn, source.intermediateToken, source.tokenOut];
+  const operations = source.fees.map((fee: number, index: number) =>
     create(PoolOperationSchema, {
       tokenIn: address(tokens[index]),
       tokenOut: address(tokens[index + 1]),
       pool: {
-        case: "uniswapV3",
+        case: provider,
         value: create(V3PoolSchema, {
-          factory: address(fixture.factory),
-          router: address(fixture.router),
-          pool: address(fixture.pools[index]),
+          factory: address(source.factory),
+          router: address(source.router),
+          pool: address(source.pools[index]),
           feePips: fee,
         }),
       },
     }),
   );
   const candidate = create(PlanCandidateSchema, {
-    candidateId: hexToBytes(fixture.candidateId),
+    candidateId: hexToBytes(source.candidateId),
     program: create(PlanProgramSchema, {
-      formatVersion: fixture.formatVersion,
-      chainId: word(fixture.chainId),
-      tokenIn: address(fixture.tokenIn),
-      tokenOut: address(fixture.tokenOut),
-      amountIn: word(fixture.amountIn),
+      formatVersion: source.formatVersion,
+      chainId: word(source.chainId),
+      tokenIn: address(source.tokenIn),
+      tokenOut: address(source.tokenOut),
+      amountIn: word(source.amountIn),
       branches: [
         create(PlanBranchSchema, {
-          amountIn: word(fixture.amountIn),
+          amountIn: word(source.amountIn),
           operations,
         }),
       ],
     }),
     quoteBlock: create(PinnedBlockSchema, {
-      number: word(fixture.quoteBlockNumber),
-      hash: hexToBytes(fixture.quoteBlockHash),
+      number: word(source.quoteBlockNumber),
+      hash: hexToBytes(source.quoteBlockHash),
     }),
     branchQuotes: [
       create(BranchQuoteSchema, {
-        operationOutputs: fixture.operationOutputs.map(word),
+        operationOutputs: source.operationOutputs.map(word),
       }),
     ],
   });
@@ -112,6 +118,21 @@ test("Atomic candidate identity matches the independent Cast two-hop vector", ()
     amountIn: word(fixture.amountIn),
     searchBudgetMs: 17,
   });
+});
+
+test("Atomic Pancake candidate identity matches the independent Cast two-hop vector", () => {
+  const value = response(pancakeFixture, "pancakeV3");
+  expect(atomicCandidateId(value.candidates[0])).toBe(
+    pancakeFixture.candidateId,
+  );
+  expect(
+    validateAtomicPlanQuote(value, {
+      chainId: BigInt(pancakeFixture.chainId),
+      tokenIn: pancakeFixture.tokenIn,
+      tokenOut: pancakeFixture.tokenOut,
+      amountIn: BigInt(pancakeFixture.amountIn),
+    }),
+  ).toBe(value);
 });
 
 test("Atomic quote rejects every identity and recursive structure mutation", () => {
@@ -240,9 +261,9 @@ test("Atomic quote rendering names identity, every hop, block, outputs and limit
     fixture.candidateId,
     fixture.quoteBlockHash,
     "Quote block: 123",
-    "Hop 1:",
+    "Hop 1 (Uniswap V3):",
     "output 19 MID",
-    "Hop 2:",
+    "Hop 2 (Uniswap V3):",
     "output 41 OUT",
     "Aggregate/final output: 41 OUT",
     "Search complete: false",

@@ -45,7 +45,7 @@ message Branch {
 }
 
 message Operation {
-  // ExecutorV2's closed operation tag. Atomic V1 currently admits only kind 1.
+  // ExecutorV2's closed operation tag. Atomic V1 currently admits kinds 1 and 2.
   uint32 kind = 1;
   string token_out = 2;
   // Static pool fee in millionths, not basis points.
@@ -55,8 +55,7 @@ message Operation {
 }
 
 // The accepted economic program uses the final Wave 5 typed provider identity.
-// This slice implements only the Uniswap V3 oneof case; unknown future cases
-// must be rejected rather than treated as the current operation.
+// Unknown future cases must be rejected rather than treated as a current operation.
 message PlanProgram {
   optional uint32 format_version = 1;
   optional bytes chain_id = 2;
@@ -96,6 +95,7 @@ message PoolOperation {
   reserved "calldata", "target", "amount_in", "input_index", "dependencies";
   oneof pool {
     V3Pool uniswap_v3 = 10;
+    V3Pool pancake_v3 = 11;
   }
 }
 

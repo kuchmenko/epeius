@@ -18,7 +18,22 @@ interface IUniswapRouter02V2 {
     function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
 }
 
-/// @notice Executes one Uniswap V3 branch of up to two operations or two direct Uniswap V3 branches.
+interface IPancakeRouterV2 {
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24 fee;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
+}
+
+/// @notice Executes one V3 branch of up to two operations or two direct V3 branches.
 contract ExecutorV2 {
     using SafeERC20 for IERC20;
 
@@ -52,11 +67,14 @@ contract ExecutorV2 {
         uint256 entryInput;
         uint256 entryOutput;
         uint256 operationIndex;
+        uint256 deadline;
     }
 
     uint8 private constant UNISWAP_V3 = 1;
+    uint8 private constant PANCAKE_V3 = 2;
 
     address public immutable uniswapRouter;
+    address public immutable pancakeRouter;
     bool private entered;
 
     error ReentrantCall();
@@ -65,6 +83,7 @@ contract ExecutorV2 {
     error InvalidPlan();
     error UnsupportedKind(uint8 kind);
     error InvalidOperation(uint256 branchIndex, uint256 operationIndex);
+    error AmountOutOfRange(uint256 branchIndex, uint256 operationIndex, uint256 amount, uint256 maximum);
     error ProtocolCallFailed(uint256 branchIndex, uint256 operationIndex, bytes reason);
     error BalanceMismatch(address token, address owner, uint256 expected, uint256 actual);
     error OutputNotIncreased(uint256 branchIndex, uint256 operationIndex);
@@ -92,9 +111,15 @@ contract ExecutorV2 {
         uint256 amountOut
     );
 
-    constructor(address uniswapRouter_) {
-        if (uniswapRouter_.code.length == 0) revert InvalidDeployment();
+    constructor(address uniswapRouter_, address pancakeRouter_) {
+        if (
+            (uniswapRouter_ == address(0) && pancakeRouter_ == address(0))
+                || (uniswapRouter_ != address(0) && uniswapRouter_.code.length == 0)
+                || (pancakeRouter_ != address(0) && pancakeRouter_.code.length == 0)
+                || (uniswapRouter_ != address(0) && uniswapRouter_ == pancakeRouter_)
+        ) revert InvalidDeployment();
         uniswapRouter = uniswapRouter_;
+        pancakeRouter = pancakeRouter_;
     }
 
     modifier nonReentrant() {
@@ -149,14 +174,7 @@ contract ExecutorV2 {
             Branch calldata branch = plan.branches[i];
             remainingInput -= branch.amountIn;
             uint256 branchOutput = _executeBranch(
-                planHash,
-                branch,
-                i,
-                plan.tokenIn,
-                branch.amountIn,
-                entryInput + remainingInput,
-                entryIntermediate,
-                entryOutput + amountOut
+                planHash, branch, i, plan, entryInput + remainingInput, entryIntermediate, entryOutput + amountOut
             );
             if (branchOutput < branch.minAmountOut) {
                 revert BranchMinimumNotMet(i, branch.minAmountOut, branchOutput);
@@ -170,14 +188,13 @@ contract ExecutorV2 {
         bytes32 planHash,
         Branch calldata branch,
         uint256 branchIndex,
-        address tokenIn,
-        uint256 amountIn,
+        Plan calldata plan,
         uint256 entryInput,
         uint256 entryIntermediate,
         uint256 entryOutput
     ) private returns (uint256 amountOut) {
-        address currentToken = tokenIn;
-        uint256 currentAmount = amountIn;
+        address currentToken = plan.tokenIn;
+        uint256 currentAmount = branch.amountIn;
         for (uint256 i; i < branch.operations.length; ++i) {
             Operation calldata operation = branch.operations[i];
             bool finalOperation = i + 1 == branch.operations.length;
@@ -187,7 +204,8 @@ contract ExecutorV2 {
                 finalOperation ? branch.minAmountOut : 1,
                 i == 0 ? entryInput : entryIntermediate,
                 finalOperation ? entryOutput : entryIntermediate,
-                i
+                i,
+                plan.deadline
             );
             amountOut = _swap(operation, request, branchIndex);
             _emitOperation(planHash, branchIndex, i, operation, currentToken, currentAmount, amountOut);
@@ -231,12 +249,18 @@ contract ExecutorV2 {
             address currentToken = plan.tokenIn;
             for (uint256 operationIndex; operationIndex < branch.operations.length; ++operationIndex) {
                 Operation calldata operation = branch.operations[operationIndex];
-                if (operation.kind != UNISWAP_V3) revert UnsupportedKind(operation.kind);
+                if (operation.kind == UNISWAP_V3) {
+                    if (uniswapRouter == address(0)) revert UnsupportedKind(operation.kind);
+                } else if (operation.kind == PANCAKE_V3) {
+                    if (pancakeRouter == address(0)) revert UnsupportedKind(operation.kind);
+                } else {
+                    revert UnsupportedKind(operation.kind);
+                }
                 if (
                     operation.tokenOut == currentToken || operation.tokenOut.code.length == 0
                         || operation.fee >= 1_000_000 || operation.tickSpacing != 0 || operation.poolId != bytes32(0)
                 ) revert InvalidOperation(branchIndex, operationIndex);
-                bytes32 pool = _poolKey(currentToken, operation.tokenOut, operation.fee);
+                bytes32 pool = _poolKey(operation.kind, currentToken, operation.tokenOut, operation.fee);
                 if (branchIndex == 0 && operationIndex == 0) firstPool = pool;
                 else if (pool == firstPool) revert InvalidOperation(branchIndex, operationIndex);
                 currentToken = operation.tokenOut;
@@ -259,24 +283,47 @@ contract ExecutorV2 {
         private
         returns (uint256 amountOut)
     {
-        IERC20 input = IERC20(request.tokenIn);
-        input.forceApprove(uniswapRouter, request.amountIn);
-        try IUniswapRouter02V2(uniswapRouter)
-            .exactInputSingle(
-                IUniswapRouter02V2.ExactInputSingleParams(
-                    request.tokenIn,
-                    operation.tokenOut,
-                    operation.fee,
-                    address(this),
-                    request.amountIn,
-                    request.minimum,
-                    0
-                )
-            ) {}
-        catch (bytes memory reason) {
-            revert ProtocolCallFailed(branchIndex, request.operationIndex, reason);
+        if (request.amountIn > uint256(type(int256).max)) {
+            revert AmountOutOfRange(branchIndex, request.operationIndex, request.amountIn, uint256(type(int256).max));
         }
-        input.forceApprove(uniswapRouter, 0);
+        IERC20 input = IERC20(request.tokenIn);
+        address router = operation.kind == UNISWAP_V3 ? uniswapRouter : pancakeRouter;
+        input.forceApprove(router, request.amountIn);
+        if (operation.kind == UNISWAP_V3) {
+            try IUniswapRouter02V2(router)
+                .exactInputSingle(
+                    IUniswapRouter02V2.ExactInputSingleParams(
+                        request.tokenIn,
+                        operation.tokenOut,
+                        operation.fee,
+                        address(this),
+                        request.amountIn,
+                        request.minimum,
+                        0
+                    )
+                ) {}
+            catch (bytes memory reason) {
+                revert ProtocolCallFailed(branchIndex, request.operationIndex, reason);
+            }
+        } else {
+            try IPancakeRouterV2(router)
+                .exactInputSingle(
+                    IPancakeRouterV2.ExactInputSingleParams(
+                        request.tokenIn,
+                        operation.tokenOut,
+                        operation.fee,
+                        address(this),
+                        request.deadline,
+                        request.amountIn,
+                        request.minimum,
+                        0
+                    )
+                ) {}
+            catch (bytes memory reason) {
+                revert ProtocolCallFailed(branchIndex, request.operationIndex, reason);
+            }
+        }
+        input.forceApprove(router, 0);
         _requireBalance(input, address(this), request.entryInput);
 
         uint256 finalOutput = IERC20(operation.tokenOut).balanceOf(address(this));
@@ -284,9 +331,9 @@ contract ExecutorV2 {
         return finalOutput - request.entryOutput;
     }
 
-    function _poolKey(address tokenA, address tokenB, uint24 fee) private pure returns (bytes32) {
+    function _poolKey(uint8 kind, address tokenA, address tokenB, uint24 fee) private pure returns (bytes32) {
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
-        return keccak256(abi.encode(token0, token1, fee));
+        return keccak256(abi.encode(kind, token0, token1, fee));
     }
 
     function _payOutput(IERC20 output, uint256 amountOut) private {

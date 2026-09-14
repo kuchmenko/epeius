@@ -16,6 +16,7 @@ import {
   AcceptedPlanTermsSchema,
   type PlanCandidate,
   PlanPreparationStatus,
+  type PoolOperation,
   type PreparePlanResponse,
   SimulationStatus,
   UnsignedPreparationSchema,
@@ -60,6 +61,16 @@ export type AtomicExecutorIdentity = {
   runtimeCodeHash: string;
   factory: string;
   router: string;
+  pancakeFactory?: string;
+  pancakeRouter?: string;
+};
+
+const operationV3 = (operation: PoolOperation) => {
+  if (operation.pool.case === "uniswapV3")
+    return { pool: operation.pool.value, kind: 1 };
+  if (operation.pool.case === "pancakeV3")
+    return { pool: operation.pool.value, kind: 2 };
+  throw new Error("Atomic V1 operation is unsupported.");
 };
 
 export function acceptAtomicCandidate(
@@ -91,19 +102,23 @@ export function acceptAtomicCandidate(
   if (minimum <= 0n)
     throw new Error("Atomic V1 minimum output must be positive.");
   const localExecutor = getAddress(executor.address);
-  const localFactory = getAddress(executor.factory);
-  const localRouter = getAddress(executor.router);
+  const first = operationV3(branch.operations[0]);
+  const localFactory = getAddress(
+    first.kind === 1 ? executor.factory : (executor.pancakeFactory ?? ""),
+  );
+  const localRouter = getAddress(
+    first.kind === 1 ? executor.router : (executor.pancakeRouter ?? ""),
+  );
   const runtimeCodeHash = executor.runtimeCodeHash as `0x${string}`;
   if (!isHash(runtimeCodeHash))
     throw new Error("Local Atomic V1 runtime hash is invalid.");
   for (const operation of branch.operations) {
+    const { pool, kind } = operationV3(operation);
     if (
-      operation.pool.case !== "uniswapV3" ||
-      operation.pool.value.feePips === undefined ||
-      getAddress(exact(operation.pool.value.factory, 20, "factory")) !==
-        localFactory ||
-      getAddress(exact(operation.pool.value.router, 20, "router")) !==
-        localRouter
+      kind !== first.kind ||
+      pool.feePips === undefined ||
+      getAddress(exact(pool.factory, 20, "factory")) !== localFactory ||
+      getAddress(exact(pool.router, 20, "router")) !== localRouter
     )
       throw new Error("Atomic V1 candidate differs from local deployment.");
   }
@@ -323,17 +338,15 @@ function executorPlanFromTerms(
         amountIn: uint(branch.amountIn, "branch input"),
         minAmountOut: uint(terms.branchMinima[0], "branch minimum"),
         operations: branch.operations.map((operation) => {
-          if (
-            operation.pool.case !== "uniswapV3" ||
-            operation.pool.value.feePips === undefined
-          )
+          const { pool, kind } = operationV3(operation);
+          if (pool.feePips === undefined)
             throw new Error("Atomic V1 operation is unsupported.");
           return {
-            kind: 1,
+            kind,
             tokenOut: getAddress(
               exact(operation.tokenOut, 20, "operation output"),
             ),
-            fee: operation.pool.value.feePips,
+            fee: pool.feePips,
             tickSpacing: 0,
             poolId: zeroHash,
           };
@@ -366,11 +379,8 @@ function receiptObligations(
   const program = expected.terms.program;
   if (!program) throw new Error("Atomic V1 accepted program is absent.");
   const operations = program.branches[0].operations;
-  if (operations[0]?.pool.case !== "uniswapV3")
-    throw new Error("Atomic V1 operation is unsupported.");
-  const router = getAddress(
-    exact(operations[0].pool.value.router, 20, "router"),
-  );
+  const first = operationV3(operations[0]);
+  const router = getAddress(exact(first.pool.router, 20, "router"));
   const tokenIn = exact(program.tokenIn, 20, "input token");
   const tokenOut = exact(program.tokenOut, 20, "output token");
   return {
@@ -404,11 +414,14 @@ function receiptObligations(
             "branch input",
           ).toString(),
           minimumAtomic: expected.minimum.toString(),
-          operations: operations.map((operation) => ({
-            kind: 1,
-            tokenIn: exact(operation.tokenIn, 20, "operation input"),
-            tokenOut: exact(operation.tokenOut, 20, "operation output"),
-          })),
+          operations: operations.map((operation) => {
+            const { kind } = operationV3(operation);
+            return {
+              kind,
+              tokenIn: exact(operation.tokenIn, 20, "operation input"),
+              tokenOut: exact(operation.tokenOut, 20, "operation output"),
+            };
+          }),
         },
       ],
     },

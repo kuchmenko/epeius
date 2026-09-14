@@ -84,7 +84,7 @@ pancake_deployment = "pan"
 	}
 }
 
-func TestAtomicExecutorNamesOneUniswapDeployment(t *testing.T) {
+func TestAtomicExecutorNamesOneOrBothV3Deployments(t *testing.T) {
 	text := validConfig + `
 [chains.test-net.deployments.uni]
 kind = "uniswap-v3"
@@ -92,14 +92,29 @@ factory = "0x1111111111111111111111111111111111111111"
 quoter = "0x2222222222222222222222222222222222222222"
 router = "0x3333333333333333333333333333333333333333"
 fees = [500]
+[chains.test-net.deployments.pan]
+kind = "pancake-v3"
+factory = "0x5555555555555555555555555555555555555555"
+quoter = "0x6666666666666666666666666666666666666666"
+router = "0x7777777777777777777777777777777777777777"
+fees = [2500]
 [chains.test-net.atomic_executor]
 address = "0x4444444444444444444444444444444444444444"
 runtime_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 uniswap_deployment = "uni"
+pancake_deployment = "pan"
 `
 	got, err := loadText(t, text)
-	if err != nil || got.Chains["test-net"].AtomicExecutor.UniswapDeployment != "uni" {
+	if err != nil || got.Chains["test-net"].AtomicExecutor.UniswapDeployment != "uni" || got.Chains["test-net"].AtomicExecutor.PancakeDeployment != "pan" {
 		t.Fatalf("Atomic V1 config rejected: %v", err)
+	}
+	for _, only := range []string{
+		strings.Replace(text, "uniswap_deployment = \"uni\"\n", "", 1),
+		strings.Replace(text, "pancake_deployment = \"pan\"\n", "", 1),
+	} {
+		if _, err := loadText(t, only); err != nil {
+			t.Fatalf("single Atomic V1 deployment rejected: %v", err)
+		}
 	}
 	for _, replacement := range []string{"missing", "0x0000000000000000000000000000000000000000", "0xaaaa"} {
 		old := "uni"
@@ -111,6 +126,15 @@ uniswap_deployment = "uni"
 		}
 		if _, err := loadText(t, strings.Replace(text, old, replacement, 1)); err == nil {
 			t.Fatalf("invalid Atomic V1 config accepted: %s", replacement)
+		}
+	}
+	for _, changed := range []string{
+		strings.Replace(text, "pancake_deployment = \"pan\"", "pancake_deployment = \"uni\"", 1),
+		strings.Replace(text, "router = \"0x7777777777777777777777777777777777777777\"", "router = \"0x3333333333333333333333333333333333333333\"", 1),
+		strings.Replace(strings.Replace(text, "uniswap_deployment = \"uni\"\n", "", 1), "pancake_deployment = \"pan\"\n", "", 1),
+	} {
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatal("invalid Atomic V1 provider selection accepted")
 		}
 	}
 	if _, err := loadText(t, strings.Replace(text, "uniswap_deployment = \"uni\"", "uniswap_deployment = \"uni\"\nunknown = true", 1)); err == nil {

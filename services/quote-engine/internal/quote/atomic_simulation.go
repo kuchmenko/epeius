@@ -46,7 +46,8 @@ func validateAtomicSimulationLogs(logs []SimulationLog, executor, caller common.
 		tokenOut, outOK := values[2].(common.Address)
 		measuredIn, amountOK := values[3].(*big.Int)
 		measuredOut, outputOK := values[4].(*big.Int)
-		if !kindOK || !inOK || !outOK || !amountOK || !outputOK || kind != 1 || operation.GetUniswapV3() == nil || tokenIn != common.BytesToAddress(operation.TokenIn) || tokenOut != common.BytesToAddress(operation.TokenOut) || measuredIn.Cmp(previous) != 0 || measuredOut.Sign() <= 0 {
+		_, expectedKind := atomicV3Pool(operation)
+		if !kindOK || !inOK || !outOK || !amountOK || !outputOK || kind != expectedKind || expectedKind == 0 || tokenIn != common.BytesToAddress(operation.TokenIn) || tokenOut != common.BytesToAddress(operation.TokenOut) || measuredIn.Cmp(previous) != 0 || measuredOut.Sign() <= 0 {
 			return AtomicSimulationResult{}, errSimulationEvidence
 		}
 		outputs[i] = new(big.Int).Set(measuredOut)

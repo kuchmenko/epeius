@@ -163,13 +163,13 @@ proof. Other deployments and production token admission require separate review.
 ## ExecutorV2 Atomic V1 slice
 
 `ExecutorV2` is a separate immutable contract. It does not change `Executor` or
-its ABI. This local slice accepts one branch containing one or two Uniswap V3
-operations, or exactly two branches containing one direct Uniswap V3 operation
-each. Operations use globally distinct physical pools. Its public plan uses the
-final generic tagged operation tuple; current policy admits only kind 1 and
-requires the other provider fields to be zero. The constructor fixes the exact
-SwapRouter02. Pool identity is derived from that router's factory, unordered
-token pair, and fee; it is not caller-supplied calldata.
+its ABI. This local slice accepts one branch containing one or two V3 operations,
+or exactly two branches containing one direct V3 operation each. The generic
+dispatcher recognizes Uniswap V3 kind 1 and Pancake V3 kind 2. The constructor
+fixes independently optional exact router endpoints, and at least one must be
+enabled. Disabled kinds fail before funding. Pool identity is the provider kind,
+unordered token pair, and fee, so reverse reuse within one provider is rejected
+without treating equal pair/fee pools across providers as the same pool.
 
 `execute(Plan)` uses selector `0x661983c5`. It rejects noncanonical ABI bodies
 and emits the V2 on-chain commitment
@@ -185,9 +185,9 @@ spent, and each branch output is its positive delta above the running output
 balance. Quoted amounts and pre-existing balances are never consumed as output.
 
 Every deployment configuration must pin the exact deployed runtime code hash in
-addition to the executor address and immutable router deployment. Both
+addition to the executor address and each enabled immutable router deployment. Both
 the engine and terminal compare the configured hash with on-chain runtime code;
-the engine also verifies the router and version getters at the execution block,
+the engine also verifies both router and version getters at the execution block,
 then independently verifies the selected route's pool through the configured
 factory.
 
@@ -195,7 +195,8 @@ Machine-readable ABI: [`abi/ExecutorV2.json`](abi/ExecutorV2.json). Independent
 one-operation, two-operation, and two-branch commitment and calldata values:
 [`fixtures/atomic-v1-plan.json`](fixtures/atomic-v1-plan.json) and
 [`fixtures/atomic-v1-two-hop-plan.json`](fixtures/atomic-v1-two-hop-plan.json),
-and [`fixtures/atomic-v1-split-plan.json`](fixtures/atomic-v1-split-plan.json).
+[`fixtures/atomic-v1-split-plan.json`](fixtures/atomic-v1-split-plan.json), and
+[`fixtures/atomic-v1-pancake.json`](fixtures/atomic-v1-pancake.json).
 No deployed address is supplied or enabled by this repository.
 
 Focused local verification:

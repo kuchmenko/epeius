@@ -53,8 +53,19 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
   if (
     atomic &&
     (!atomicExecutor ||
-      Object.keys(atomicExecutor).length !== 3 ||
-      !["address", "runtime_code_hash", "uniswap_deployment"].every((field) =>
+      Object.keys(atomicExecutor).some(
+        (field) =>
+          ![
+            "address",
+            "runtime_code_hash",
+            "uniswap_deployment",
+            "pancake_deployment",
+          ].includes(field),
+      ) ||
+      !["address", "runtime_code_hash"].every((field) =>
+        Object.hasOwn(atomicExecutor, field),
+      ) ||
+      !["uniswap_deployment", "pancake_deployment"].some((field) =>
         Object.hasOwn(atomicExecutor, field),
       ))
   )
@@ -78,6 +89,7 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
             address: atomicExecutor?.address,
             runtimeCodeHash: atomicExecutor?.runtime_code_hash,
             uniswapDeployment: atomicExecutor?.uniswap_deployment,
+            pancakeDeployment: atomicExecutor?.pancake_deployment,
           },
         }
       : {}),
@@ -97,6 +109,7 @@ export function configureExecution(config: {
     address?: string;
     runtimeCodeHash?: string;
     uniswapDeployment?: string;
+    pancakeDeployment?: string;
   };
 }): TrustedExecution {
   const deployments = Object.fromEntries(

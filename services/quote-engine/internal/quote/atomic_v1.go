@@ -346,20 +346,20 @@ func atomicV1PlanID(terms *atomicv1.AcceptedPlanTerms) (common.Hash, error) {
 	for i, branch := range terms.Program.Branches {
 		operationHashes := make([]common.Hash, len(branch.Operations))
 		for j, operation := range branch.Operations {
-			pool := operation.GetUniswapV3()
+			pool, kind := atomicV3Pool(operation)
 			if pool == nil {
 				return common.Hash{}, errors.New("unsupported operation")
 			}
 			providerHash, err := atomicHash(
 				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint24")}},
-				crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), uint8(1), common.BytesToAddress(pool.Factory), common.BytesToAddress(pool.Router), common.BytesToAddress(pool.Pool), new(big.Int).SetUint64(uint64(pool.GetFeePips())),
+				crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), kind, common.BytesToAddress(pool.Factory), common.BytesToAddress(pool.Router), common.BytesToAddress(pool.Pool), new(big.Int).SetUint64(uint64(pool.GetFeePips())),
 			)
 			if err != nil {
 				return common.Hash{}, err
 			}
 			operationHashes[j], err = atomicHash(
 				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}},
-				crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), uint8(1), common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
+				crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
 			)
 			if err != nil {
 				return common.Hash{}, err
@@ -434,8 +434,12 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 	if err != nil || crypto.Keccak256Hash(runtime) != common.HexToHash(e.RuntimeCodeHash) {
 		return errors.New("Atomic V1 executor code unavailable")
 	}
-	deployment := chain.Deployments[e.UniswapDeployment]
-	for name, expected := range map[string]string{"uniswapRouter": deployment.Router} {
+	deployments := map[string]config.Deployment{
+		"uniswapRouter": chain.Deployments[e.UniswapDeployment],
+		"pancakeRouter": chain.Deployments[e.PancakeDeployment],
+	}
+	for name, deployment := range deployments {
+		expected := deployment.Router
 		method := contractabi.ExecutorV2.Methods[name]
 		data, err := reader.Call(ctx, target, method.ID, hash)
 		if err != nil {
@@ -454,6 +458,14 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 	values, err := evm.Unpack(version, data)
 	if err != nil || values[0].(*big.Int).Cmp(big.NewInt(2)) != 0 {
 		return errors.New("Atomic V1 executor version failed")
+	}
+	deploymentID := e.UniswapDeployment
+	if route.Provider == "pancake-v3" {
+		deploymentID = e.PancakeDeployment
+	}
+	deployment := chain.Deployments[deploymentID]
+	if deploymentID == "" || route.Provider != deployment.Kind {
+		return errors.New("Atomic V1 provider verification failed")
 	}
 	method := contractabi.UniswapV3Factory.Methods["getPool"]
 	for _, leg := range route.Legs {

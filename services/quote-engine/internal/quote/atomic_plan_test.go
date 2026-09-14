@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	atomicv1 "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
@@ -51,17 +52,21 @@ func (r *atomicPlanReader) Code(context.Context, common.Address, common.Hash) ([
 
 func (r *atomicPlanReader) Call(_ context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
 	executor := common.HexToAddress(r.config.AtomicExecutor.Address)
-	deployment := r.config.Deployments[r.config.AtomicExecutor.UniswapDeployment]
+	uniswap := r.config.Deployments[r.config.AtomicExecutor.UniswapDeployment]
+	pancake := r.config.Deployments[r.config.AtomicExecutor.PancakeDeployment]
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["uniswapRouter"].ID) {
-		return contractabi.ExecutorV2.Methods["uniswapRouter"].Outputs.Pack(common.HexToAddress(deployment.Router))
+		return contractabi.ExecutorV2.Methods["uniswapRouter"].Outputs.Pack(common.HexToAddress(uniswap.Router))
+	}
+	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["pancakeRouter"].ID) {
+		return contractabi.ExecutorV2.Methods["pancakeRouter"].Outputs.Pack(common.HexToAddress(pancake.Router))
 	}
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["version"].ID) {
 		return contractabi.ExecutorV2.Methods["version"].Outputs.Pack(big.NewInt(2))
 	}
-	if to == common.HexToAddress(deployment.Factory) && bytes.Equal(data[:4], contractabi.UniswapV3Factory.Methods["getPool"].ID) {
+	if (to == common.HexToAddress(uniswap.Factory) || to == common.HexToAddress(pancake.Factory)) && bytes.Equal(data[:4], contractabi.UniswapV3Factory.Methods["getPool"].ID) {
 		values, _ := contractabi.UniswapV3Factory.Methods["getPool"].Inputs.Unpack(data[4:])
 		for _, operation := range r.program.Branches[0].Operations {
-			pool := operation.GetUniswapV3()
+			pool, _ := atomicV3Pool(operation)
 			if values[0].(common.Address) == common.BytesToAddress(operation.TokenIn) && values[1].(common.Address) == common.BytesToAddress(operation.TokenOut) && values[2].(*big.Int).Uint64() == uint64(pool.GetFeePips()) {
 				return contractabi.UniswapV3Factory.Methods["getPool"].Outputs.Pack(common.BytesToAddress(pool.Pool))
 			}
@@ -134,7 +139,8 @@ func atomicPlanLogs(t *testing.T, executor common.Address, caller common.Address
 	previous := new(big.Int).SetBytes(program.AmountIn)
 	for i, output := range outputs {
 		operation := program.Branches[0].Operations[i]
-		data, err := contractabi.ExecutorV2.Events["OperationExecuted"].Inputs.NonIndexed().Pack(uint8(1), common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), previous, big.NewInt(output))
+		_, kind := atomicV3Pool(operation)
+		data, err := contractabi.ExecutorV2.Events["OperationExecuted"].Inputs.NonIndexed().Pack(kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), previous, big.NewInt(output))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,6 +152,62 @@ func atomicPlanLogs(t *testing.T, executor common.Address, caller common.Address
 	planData, _ := contractabi.ExecutorV2.Events["PlanExecuted"].Inputs.NonIndexed().Pack(common.BytesToAddress(program.TokenIn), new(big.Int).SetBytes(program.AmountIn), previous)
 	logs = append(logs, SimulationLog{Address: executor, Topics: []common.Hash{atomicPlanTopic, planHash, common.BytesToHash(common.LeftPadBytes(caller.Bytes(), 32)), common.BytesToHash(common.LeftPadBytes(program.TokenOut, 32))}, Data: planData})
 	return logs
+}
+
+func pancakeAtomicPlanTestData(t *testing.T) (Chain, *atomicv1.PlanCandidate, *atomicv1.AcceptedPlanTerms, common.Hash) {
+	t.Helper()
+	chain, candidate, terms, _ := atomicPlanTestData(t)
+	factory := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	router := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	for _, operation := range candidate.Program.Branches[0].Operations {
+		pool := operation.GetUniswapV3()
+		pool.Factory, pool.Router = factory.Bytes(), router.Bytes()
+		operation.Pool = &atomicv1.PoolOperation_PancakeV3{PancakeV3: pool}
+	}
+	candidateID, err := atomicCandidateHash(candidate.Program, candidate.QuoteBlock, candidate.BranchQuotes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.CandidateId = candidateID.Bytes()
+	terms.Program = proto.CloneOf(candidate.Program)
+	chain.Config.Deployments = map[string]config.Deployment{"cake": {Kind: "pancake-v3", Factory: factory.Hex(), Router: router.Hex(), Fees: []uint32{500, 3000}}}
+	chain.Config.AtomicExecutor.UniswapDeployment = ""
+	chain.Config.AtomicExecutor.PancakeDeployment = "cake"
+	planID, err := atomicV1PlanID(terms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return chain, candidate, terms, planID
+}
+
+func TestPreparePancakeAtomicPlanUsesKindTwoAndMeasuredEvents(t *testing.T) {
+	chain, candidate, terms, planID := pancakeAtomicPlanTestData(t)
+	reader := &atomicPlanReader{config: chain.Config, program: candidate.Program, runtime: []byte{1, 2, 3, 4}, allowance: big.NewInt(37), snapshots: []rpc.Snapshot{{ChainID: "8453", BlockNumber: "12345679", BlockHash: common.HexToHash("0xbb").Hex(), Timestamp: uint64(time.Now().Unix())}}}
+	chain.Client = reader
+	validated, err := validateAcceptedAtomicTerms(chain, terms, planID.Bytes(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validated.executorPlanHash == (common.Hash{}) {
+		t.Fatal("missing executor hash")
+	}
+	expectedPlan := atomicV1ExecutorPlan{
+		TokenIn: common.BytesToAddress(candidate.Program.TokenIn), TokenOut: common.BytesToAddress(candidate.Program.TokenOut), AmountIn: big.NewInt(37), MinAmountOut: big.NewInt(60), Deadline: new(big.Int).SetBytes(terms.DeadlineUnix),
+		Branches: []atomicV1Branch{{AmountIn: big.NewInt(37), MinAmountOut: big.NewInt(60), Operations: []atomicV1Operation{{Kind: 2, TokenOut: common.BytesToAddress(candidate.Program.Branches[0].Operations[0].TokenOut), Fee: big.NewInt(500), TickSpacing: new(big.Int)}, {Kind: 2, TokenOut: common.BytesToAddress(candidate.Program.Branches[0].Operations[1].TokenOut), Fee: big.NewInt(3000), TickSpacing: new(big.Int)}}}},
+	}
+	expectedData, err := contractabi.ExecutorV2.Pack("execute", expectedPlan)
+	if err != nil || validated.transaction.Data != hexutil.Encode(expectedData) {
+		t.Fatal("Pancake operation did not encode kind 2")
+	}
+	executor, signer := common.BytesToAddress(terms.Executor.Address), common.BytesToAddress(terms.Signer)
+	store := NewStore()
+	quoteID := bytes.Repeat([]byte{0x27}, 32)
+	store.saveAtomicQuote("base", &atomicv1.PlanQuoteResponse{QuoteId: quoteID, Candidates: []*atomicv1.PlanCandidate{candidate}, SearchComplete: proto.Bool(true)}, time.Now())
+	handler := Handler{Chains: map[string]Chain{"base": chain}, Store: store, Simulator: &atomicPlanSimulator{results: []SimulationResult{{Output: "61", Logs: atomicPlanLogs(t, executor, signer, validated.executorPlanHash, candidate.Program, 83, 61)}}}}
+	response, err := handler.PreparePlan(t.Context(), connect.NewRequest(&atomicv1.PreparePlanRequest{QuoteId: quoteID, CandidateId: candidate.CandidateId, Terms: terms, PlanId: planID.Bytes()}))
+	if err != nil || response.Msg.GetStatus() != atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_READY || new(big.Int).SetBytes(response.Msg.Simulation.BranchResults[0].OperationOutputs[0]).Cmp(big.NewInt(83)) != 0 {
+		t.Fatalf("Pancake preparation failed: %+v %v", response, err)
+	}
 }
 
 func TestPrepareAndRecheckAtomicPlanUseMeasuredEventsAndFrozenTransaction(t *testing.T) {

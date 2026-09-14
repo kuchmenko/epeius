@@ -52,6 +52,8 @@ export type TrustedExecution = {
     runtimeCodeHash: string;
     factory: string;
     router: string;
+    pancakeFactory?: string;
+    pancakeRouter?: string;
   };
 };
 

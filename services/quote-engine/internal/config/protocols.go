@@ -72,9 +72,12 @@ func ValidateChain(chain Chain) error {
 		}
 	}
 	if e := chain.AtomicExecutor; e != nil {
-		deployment, ok := chain.Deployments[e.UniswapDeployment]
-		if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || !ok || deployment.Kind != "uniswap-v3" {
-			return errors.New("atomic executor needs a nonzero address, runtime code hash, and configured Uniswap V3 deployment")
+		uniswap, uniswapOK := chain.Deployments[e.UniswapDeployment]
+		pancake, pancakeOK := chain.Deployments[e.PancakeDeployment]
+		uniswapOK = e.UniswapDeployment != "" && uniswapOK && uniswap.Kind == "uniswap-v3"
+		pancakeOK = e.PancakeDeployment != "" && pancakeOK && pancake.Kind == "pancake-v3"
+		if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || (!uniswapOK && !pancakeOK) || (e.UniswapDeployment != "" && !uniswapOK) || (e.PancakeDeployment != "" && !pancakeOK) || (uniswapOK && pancakeOK && common.HexToAddress(uniswap.Router) == common.HexToAddress(pancake.Router)) {
+			return errors.New("atomic executor needs a nonzero address, runtime code hash, and at least one valid distinct Uniswap or Pancake V3 deployment")
 		}
 	}
 	for id, d := range chain.Deployments {

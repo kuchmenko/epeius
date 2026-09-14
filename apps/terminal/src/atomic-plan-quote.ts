@@ -14,6 +14,7 @@ import {
 import type {
   PlanCandidate,
   PlanQuoteResponse,
+  PoolOperation,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import type {
   ChainStatus,
@@ -53,6 +54,14 @@ function rejectUnknown(value: unknown) {
   for (const child of Object.values(value)) rejectUnknown(child);
 }
 
+const atomicV3Pool = (operation: PoolOperation) => {
+  if (operation.pool.case === "uniswapV3")
+    return { pool: operation.pool.value, kind: 1, name: "Uniswap V3" };
+  if (operation.pool.case === "pancakeV3")
+    return { pool: operation.pool.value, kind: 2, name: "Pancake V3" };
+  throw new Error("Atomic V1 quote uses an unsupported operation.");
+};
+
 export function atomicCandidateId(candidate: PlanCandidate) {
   const program = candidate.program;
   const block = candidate.quoteBlock;
@@ -67,9 +76,7 @@ export function atomicCandidateId(candidate: PlanCandidate) {
     if (!quote || quote.operationOutputs.length !== branch.operations.length)
       throw new Error("Atomic V1 operation output cardinality is invalid.");
     for (const operation of branch.operations) {
-      if (operation.pool.case !== "uniswapV3")
-        throw new Error("Atomic V1 quote uses an unsupported operation.");
-      const pool = operation.pool.value;
+      const { pool, kind } = atomicV3Pool(operation);
       if (pool.feePips === undefined || pool.feePips >= 1_000_000)
         throw new Error("Atomic V1 quote has an invalid pool fee.");
       const provider = keccak256(
@@ -84,7 +91,7 @@ export function atomicCandidateId(candidate: PlanCandidate) {
           ],
           [
             domain("Epeius.AtomicProvider.v1"),
-            1,
+            kind,
             requiredAddress(pool.factory, "factory"),
             requiredAddress(pool.router, "router"),
             requiredAddress(pool.pool, "pool"),
@@ -104,7 +111,7 @@ export function atomicCandidateId(candidate: PlanCandidate) {
             ],
             [
               domain("Epeius.AtomicOperation.v1"),
-              1,
+              kind,
               requiredAddress(operation.tokenIn, "operation input"),
               requiredAddress(operation.tokenOut, "operation output"),
               provider,
@@ -211,6 +218,8 @@ export function validateAtomicPlanQuote(
   if (response.searchComplete === undefined)
     throw new Error("Atomic V1 search completion is absent.");
   let previousKey = "";
+  let previousProvider = "";
+  const seenProviders = new Set<string>();
   for (const candidate of response.candidates) {
     if (candidate.networkCostOut !== undefined)
       throw new Error("Atomic V1 network cost is unsupported.");
@@ -235,21 +244,23 @@ export function validateAtomicPlanQuote(
     const physicalPools = new Set<string>();
     let factory = "";
     let router = "";
+    let providerKind = 0;
     for (const operation of operations) {
       if (!same(operation.tokenIn, current) || !operation.tokenOut)
         throw new Error("Atomic V1 candidate token continuity is invalid.");
-      if (operation.pool.case !== "uniswapV3")
-        throw new Error("Atomic V1 candidate operation is unsupported.");
-      const pool = operation.pool.value;
+      const { pool, kind } = atomicV3Pool(operation);
       const poolAddress = requiredAddress(pool.pool, "pool");
       const nextFactory = requiredAddress(pool.factory, "factory");
       const nextRouter = requiredAddress(pool.router, "router");
       if (
-        (!factory && !router) ||
-        (factory === nextFactory && router === nextRouter)
+        (!factory && !router && providerKind === 0) ||
+        (factory === nextFactory &&
+          router === nextRouter &&
+          providerKind === kind)
       ) {
         factory = nextFactory;
         router = nextRouter;
+        providerKind = kind;
       } else throw new Error("Atomic V1 candidate mixes deployments.");
       const input = exact(operation.tokenIn, 20, "operation input");
       const output = exact(operation.tokenOut, 20, "operation output");
@@ -266,15 +277,21 @@ export function validateAtomicPlanQuote(
     if (!same(current, addressBytes(request.tokenOut)))
       throw new Error("Atomic V1 candidate final token is invalid.");
     const fees = operations.map((operation) =>
-      String(
-        operation.pool.case === "uniswapV3" ? operation.pool.value.feePips : 0,
-      ).padStart(7, "0"),
+      String(atomicV3Pool(operation).pool.feePips).padStart(7, "0"),
     );
     const middle =
       operations.length === 2
         ? getAddress(exact(operations[0].tokenOut, 20, "intermediate token"))
         : "";
     const key = `${operations.length - 1}:${middle}:${fees.join(":")}`;
+    const provider = `${providerKind}:${factory}:${router}`;
+    if (provider !== previousProvider) {
+      if (seenProviders.has(provider))
+        throw new Error("Atomic V1 provider candidate groups are reordered.");
+      seenProviders.add(provider);
+      previousProvider = provider;
+      previousKey = "";
+    }
     if (key <= previousKey)
       throw new Error("Atomic V1 candidates are not in canonical order.");
     previousKey = key;
@@ -317,10 +334,9 @@ export function formatAtomicPlanQuote(
       const outputAddress = exact(operation.tokenOut, 20, "operation output");
       const metadata = token(outputAddress);
       const output = BigInt(exact(outputs[hopIndex], 32, "operation output"));
-      const pool =
-        operation.pool.case === "uniswapV3" ? operation.pool.value : undefined;
+      const { pool, name } = atomicV3Pool(operation);
       lines.push(
-        `Hop ${hopIndex + 1}: ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool?.pool, 20, "pool")}; fee ${pool?.feePips} pips; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
+        `Hop ${hopIndex + 1} (${name}): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool.pool, 20, "pool")}; fee ${pool.feePips} pips; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
       );
     }
     const final = BigInt(exact(outputs.at(-1), 32, "final output"));

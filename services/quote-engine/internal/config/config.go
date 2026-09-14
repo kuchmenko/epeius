@@ -52,6 +52,7 @@ type AtomicExecutor struct {
 	Address           string `toml:"address"`
 	RuntimeCodeHash   string `toml:"runtime_code_hash"`
 	UniswapDeployment string `toml:"uniswap_deployment"`
+	PancakeDeployment string `toml:"pancake_deployment"`
 }
 
 type Token struct {

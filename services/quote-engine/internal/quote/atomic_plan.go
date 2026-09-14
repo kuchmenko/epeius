@@ -142,16 +142,24 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 	if amount.Sign() <= 0 || minimum.Sign() <= 0 || branchMinimum.Sign() <= 0 || minimum.Cmp(branchMinimum) != 0 || expires.Sign() <= 0 || !expires.IsInt64() || deadline.Sign() <= 0 || !deadline.IsInt64() || expires.Cmp(deadline) > 0 || new(big.Int).SetInt64(now.Unix()).Cmp(expires) >= 0 || new(big.Int).SetInt64(now.Unix()).Cmp(deadline) >= 0 || branch == nil || len(branch.AmountIn) != 32 || new(big.Int).SetBytes(branch.AmountIn).Cmp(amount) != 0 || len(branch.Operations) < 1 || len(branch.Operations) > 2 || common.BytesToAddress(terms.Program.TokenIn) == common.BytesToAddress(terms.Program.TokenOut) {
 		return validatedAtomicTerms{}, errors.New("invalid amounts or lifetime")
 	}
-	deployment, ok := chain.Config.Deployments[executor.UniswapDeployment]
-	if !ok || deployment.Kind != "uniswap-v3" || chain.DeploymentErrors[executor.UniswapDeployment] != "" {
-		return validatedAtomicTerms{}, errors.New("deployment unavailable")
-	}
 	current := common.BytesToAddress(terms.Program.TokenIn)
 	seenPools := map[common.Address]bool{}
 	seenKeys := map[string]bool{}
 	executorOperations := make([]atomicV1Operation, len(branch.Operations))
+	var deployment config.Deployment
+	var providerKind uint8
 	for i, operation := range branch.Operations {
-		pool := operation.GetUniswapV3()
+		pool, kind := atomicV3Pool(operation)
+		deploymentID := executor.UniswapDeployment
+		expectedKind := "uniswap-v3"
+		if kind == 2 {
+			deploymentID, expectedKind = executor.PancakeDeployment, "pancake-v3"
+		}
+		configured, ok := chain.Config.Deployments[deploymentID]
+		if deploymentID == "" || !ok || configured.Kind != expectedKind || chain.DeploymentErrors[deploymentID] != "" || (providerKind != 0 && providerKind != kind) {
+			return validatedAtomicTerms{}, errors.New("deployment unavailable")
+		}
+		deployment, providerKind = configured, kind
 		if operation == nil || len(operation.TokenIn) != 20 || len(operation.TokenOut) != 20 || pool == nil || pool.FeePips == nil || pool.GetFeePips() >= 1_000_000 || len(pool.Factory) != 20 || len(pool.Router) != 20 || len(pool.Pool) != 20 || common.BytesToAddress(operation.TokenIn) != current || common.BytesToAddress(operation.TokenIn) == common.BytesToAddress(operation.TokenOut) || common.BytesToAddress(pool.Factory) != common.HexToAddress(deployment.Factory) || common.BytesToAddress(pool.Router) != common.HexToAddress(deployment.Router) || common.BytesToAddress(pool.Pool) == (common.Address{}) {
 			return validatedAtomicTerms{}, errors.New("invalid operation")
 		}
@@ -162,7 +170,7 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 		}
 		seenPools[address], seenKeys[key] = true, true
 		current = common.BytesToAddress(operation.TokenOut)
-		executorOperations[i] = atomicV1Operation{Kind: 1, TokenOut: current, Fee: new(big.Int).SetUint64(uint64(pool.GetFeePips())), TickSpacing: new(big.Int)}
+		executorOperations[i] = atomicV1Operation{Kind: kind, TokenOut: current, Fee: new(big.Int).SetUint64(uint64(pool.GetFeePips())), TickSpacing: new(big.Int)}
 	}
 	if current != common.BytesToAddress(terms.Program.TokenOut) {
 		return validatedAtomicTerms{}, errors.New("broken continuity")
@@ -328,16 +336,25 @@ func verifyAtomicV1Program(ctx context.Context, reader Reader, chain config.Chai
 	}
 	operations := program.Branches[0].Operations
 	legs := make([]*quotev1.RouteLeg, len(operations))
+	provider := ""
 	for i, operation := range operations {
-		pool := operation.GetUniswapV3()
+		pool, kind := atomicV3Pool(operation)
 		if pool == nil {
 			return errors.New("invalid Atomic V1 operation")
 		}
+		operationProvider := "uniswap-v3"
+		if kind == 2 {
+			operationProvider = "pancake-v3"
+		}
+		if provider != "" && provider != operationProvider {
+			return errors.New("mixed Atomic V1 providers")
+		}
+		provider = operationProvider
 		fee := pool.GetFeePips()
 		legs[i] = &quotev1.RouteLeg{
 			TokenIn: common.BytesToAddress(operation.TokenIn).Hex(), TokenOut: common.BytesToAddress(operation.TokenOut).Hex(),
 			Pool: common.BytesToAddress(pool.Pool).Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: fee},
 		}
 	}
-	return verifyAtomicV1Executor(ctx, reader, chain, &quotev1.RouteQuote{Legs: legs}, hash)
+	return verifyAtomicV1Executor(ctx, reader, chain, &quotev1.RouteQuote{Provider: provider, Legs: legs}, hash)
 }
