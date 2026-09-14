@@ -50,6 +50,8 @@ export type TrustedExecution = {
   atomicExecutor?: ExecutionImplementation & {
     address: string;
     runtimeCodeHash: string;
+    factory: string;
+    router: string;
   };
 };
 

@@ -436,6 +436,25 @@ test("CLI resolves symbols and addresses, sends exact amounts, and handles compl
       ).toBe(1);
       expect(requests.length).toBe(before);
     }
+    const misplacedCandidate = await run([
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--candidate-index",
+      "1",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(misplacedCandidate.code).toBe(1);
+    expect(misplacedCandidate.err).toContain(
+      "--candidate-index requires --execution-mode atomic-v1.",
+    );
     const unavailableUrl = server.url.toString();
     await server.stop(true);
     const failure = await run([

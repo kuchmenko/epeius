@@ -13,6 +13,7 @@ import {
   zeroHash,
 } from "viem";
 import { executorV2Abi } from "../../../../generated/abi";
+import type { PlanProgram } from "../../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import type { PrepareExecutionResponse } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type SwapTerms, uint256Decimal } from "../execution-policy";
 import { admitV3Route, type V3Deployment, v3Review } from "./v3";
@@ -203,6 +204,88 @@ export function atomicV1ExecutorPlanHash(terms: {
   );
 }
 
+export function atomicV1ExecutorCalldata(plan: AtomicExecutorPlan) {
+  return encodeFunctionData({
+    abi: executorV2Abi,
+    functionName: "execute",
+    args: [plan],
+  });
+}
+
+export function atomicV1AcceptedBranchHashes(
+  program: PlanProgram,
+  minima: readonly bigint[],
+) {
+  if (program.branches.length !== minima.length)
+    throw new Error("Atomic V1 accepted branch cardinality is invalid.");
+  return program.branches.map((branch, branchIndex) => {
+    const operationHashes = branch.operations.map((operation) => {
+      if (operation.pool.case !== "uniswapV3")
+        throw new Error("Atomic V1 accepted operation is unsupported.");
+      const pool = operation.pool.value;
+      const fee = pool.feePips;
+      if (fee === undefined)
+        throw new Error("Atomic V1 accepted operation is unsupported.");
+      const providerHash = keccak256(
+        encodeAbiParameters(
+          [
+            { type: "bytes32" },
+            { type: "uint8" },
+            { type: "address" },
+            { type: "address" },
+            { type: "address" },
+            { type: "uint24" },
+          ],
+          [
+            domain("Epeius.AtomicProvider.v1"),
+            1,
+            getAddress(requiredBytes(pool.factory, 20, "factory")),
+            getAddress(requiredBytes(pool.router, 20, "router")),
+            getAddress(requiredBytes(pool.pool, 20, "pool")),
+            fee,
+          ],
+        ),
+      );
+      return keccak256(
+        encodeAbiParameters(
+          [
+            { type: "bytes32" },
+            { type: "uint8" },
+            { type: "address" },
+            { type: "address" },
+            { type: "bytes32" },
+          ],
+          [
+            domain("Epeius.AtomicOperation.v1"),
+            1,
+            getAddress(requiredBytes(operation.tokenIn, 20, "operation input")),
+            getAddress(
+              requiredBytes(operation.tokenOut, 20, "operation output"),
+            ),
+            providerHash,
+          ],
+        ),
+      );
+    });
+    return keccak256(
+      encodeAbiParameters(
+        [
+          { type: "bytes32" },
+          { type: "uint256" },
+          { type: "uint256" },
+          { type: "bytes32[]" },
+        ],
+        [
+          domain("Epeius.AtomicAcceptedBranch.v1"),
+          requiredUint(branch.amountIn, "branch input"),
+          minima[branchIndex],
+          operationHashes,
+        ],
+      ),
+    );
+  });
+}
+
 export function atomicExecutorV1(
   raw: {
     address?: string;
@@ -232,6 +315,8 @@ export function atomicExecutorV1(
   return {
     address,
     runtimeCodeHash,
+    factory,
+    router: deployment.router,
     plan(
       p: PrepareExecutionResponse,
       tokens: string[],
@@ -607,11 +692,7 @@ export function atomicExecutorV1(
         throw new Error(
           "Atomic V1 executor plan hash does not match its terms.",
         );
-      const data = encodeFunctionData({
-        abi: executorV2Abi,
-        functionName: "execute",
-        args: [plan],
-      });
+      const data = atomicV1ExecutorCalldata(plan);
       const tx = p.transaction;
       if (
         !tx ||

@@ -68,16 +68,21 @@ func NewAnvilSimulator(ctx context.Context, endpoint, chainID string) (*AnvilSim
 func (s *AnvilSimulator) Close() { s.client.Close() }
 
 func (s *AnvilSimulator) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, checks SimulationChecks, snapshot rpccontext.Snapshot, amount, minimum *big.Int) (string, error) {
+	result, err := s.SimulateAtomic(ctx, tx, checks, snapshot, amount, minimum)
+	return result.Output, err
+}
+
+func (s *AnvilSimulator) SimulateAtomic(ctx context.Context, tx *quotev1.UnsignedTransaction, checks SimulationChecks, snapshot rpccontext.Snapshot, amount, minimum *big.Int) (SimulationResult, error) {
 	if tx.ChainId != s.chainID || tx.ChainId != snapshot.ChainID || tx.ValueAtomic != "0" || !validAddress(tx.From) || !validAddress(tx.To) || len(checks.ClearAllowances) != 0 {
-		return "", errSimulationEvidence
+		return SimulationResult{}, errSimulationEvidence
 	}
 	gas, err := strconv.ParseUint(tx.GasLimit, 10, 64)
 	if err != nil || gas == 0 || !common.IsHexHash(snapshot.BlockHash) {
-		return "", errSimulationEvidence
+		return SimulationResult{}, errSimulationEvidence
 	}
 	input, err := hexutil.Decode(tx.Data)
 	if err != nil {
-		return "", errSimulationEvidence
+		return SimulationResult{}, errSimulationEvidence
 	}
 	call := map[string]string{
 		"from":  tx.From,
@@ -93,10 +98,10 @@ func (s *AnvilSimulator) Simulate(ctx context.Context, tx *quotev1.UnsignedTrans
 	}
 	var trace anvilTrace
 	if err := s.client.CallContext(ctx, &trace, "debug_traceCall", call, block, options); err != nil {
-		return "", errSimulationUnavailable
+		return SimulationResult{}, errSimulationUnavailable
 	}
 	if !strings.EqualFold(trace.From.Hex(), tx.From) || !strings.EqualFold(trace.To.Hex(), tx.To) || !strings.EqualFold(hexutil.Encode(trace.Input), hexutil.Encode(input)) {
-		return "", errSimulationEvidence
+		return SimulationResult{}, errSimulationEvidence
 	}
 	var logs []struct {
 		Address common.Address `json:"address"`
@@ -117,7 +122,7 @@ func (s *AnvilSimulator) Simulate(ctx context.Context, tx *quotev1.UnsignedTrans
 		return true
 	}
 	if !collect(trace) {
-		return "", errSimulationEvidence
+		return SimulationResult{}, errSimulationEvidence
 	}
 	delta := func(probe BalanceProbe) (*big.Int, bool) {
 		if !validAddress(probe.Token) || !validAddress(probe.Owner) {
@@ -143,17 +148,21 @@ func (s *AnvilSimulator) Simulate(ctx context.Context, tx *quotev1.UnsignedTrans
 	}
 	inputDelta, ok := delta(checks.Input)
 	if !ok || new(big.Int).Neg(inputDelta).Cmp(amount) != 0 {
-		return "", errSimulationInputAmount
+		return SimulationResult{}, errSimulationInputAmount
 	}
 	output, ok := delta(checks.Output)
 	if !ok || output.Cmp(minimum) < 0 {
-		return "", errSimulationMinimumOutput
+		return SimulationResult{}, errSimulationMinimumOutput
 	}
 	for _, probe := range checks.Preserve {
 		value, ok := delta(probe)
 		if !ok || value.Sign() != 0 {
-			return "", errSimulationProtectedBalance
+			return SimulationResult{}, errSimulationProtectedBalance
 		}
 	}
-	return output.String(), nil
+	resultLogs := make([]SimulationLog, len(logs))
+	for i, log := range logs {
+		resultLogs[i] = SimulationLog{Address: log.Address, Topics: append([]common.Hash(nil), log.Topics...), Data: append([]byte(nil), log.Data...)}
+	}
+	return SimulationResult{Output: output.String(), Logs: resultLogs}, nil
 }

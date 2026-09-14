@@ -1,3 +1,4 @@
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { toJsonString } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
@@ -14,6 +15,7 @@ import {
   formatAtomicPlanQuote,
   validateAtomicPlanQuote,
 } from "./atomic-plan-quote";
+import { runAtomicPlanTrade } from "./atomic-plan-trade";
 import { atomicPlanClient, quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
@@ -54,7 +56,7 @@ Usage:
   bun run terminal -- status [--engine-url URL] [--json]
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--execution-mode atomic-v1] [--search-budget-ms N] [--engine-url URL] [--json]
-  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH [--route-id ID] [--execution-mode atomic-v1] [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH ([--route-id ID] | --execution-mode atomic-v1 --candidate-index N) [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
   bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID | --allocations JSON) [--execution-mode atomic-v1] [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
@@ -306,6 +308,7 @@ export async function main(rawArgs: string[]) {
               ...(command === "trade"
                 ? [
                     "route-id",
+                    "candidate-index",
                     "keystore",
                     "password-file",
                     "slippage-bps",
@@ -399,8 +402,20 @@ export async function main(rawArgs: string[]) {
         values["execution-mode"] !== "atomic-v1"
       )
         throw new Error("--execution-mode must be atomic-v1 when provided.");
-      if (values["execution-mode"] === "atomic-v1" && !values["route-id"])
-        throw new Error("Atomic V1 trade requires an explicit --route-id.");
+      if (
+        values["candidate-index"] !== undefined &&
+        values["execution-mode"] !== "atomic-v1"
+      )
+        throw new Error(
+          "--candidate-index requires --execution-mode atomic-v1.",
+        );
+      if (
+        values["execution-mode"] === "atomic-v1" &&
+        (!values["candidate-index"] || values["route-id"])
+      )
+        throw new Error(
+          "Atomic V1 trade requires --candidate-index and does not accept --route-id.",
+        );
       if (!chain.executionEnabled)
         throw new Error("Engine must enable execution on the connected chain.");
       // Establish executable account/network before asking for the first trade quote.
@@ -423,6 +438,96 @@ export async function main(rawArgs: string[]) {
         throw new Error(
           `RPC network must match configured chain ID ${context.expectedChainId}.`,
         );
+      if (values["execution-mode"] === "atomic-v1") {
+        const candidateIndex = Number(values["candidate-index"]);
+        const slippage = values["slippage-bps"] ?? "50";
+        if (
+          !/^[1-9][0-9]*$/.test(values["candidate-index"] ?? "") ||
+          !Number.isSafeInteger(candidateIndex)
+        )
+          throw new Error(
+            "--candidate-index must be a positive candidate number.",
+          );
+        if (!/^\d+$/.test(slippage) || Number(slippage) >= 10000)
+          throw new Error("--slippage-bps must be 0 through 9999.");
+        for (const name of ["confirm-approval", "confirm-swap"])
+          if (values[name] !== undefined && values[name] !== "yes")
+            throw new Error(`--${name} requires the literal value yes.`);
+        if (values["confirm-approval"] && values["confirm-swap"])
+          throw new Error("Confirm only one action: approval or swap.");
+        const trustedExecutor = context.trusted.atomicExecutor;
+        if (!trustedExecutor)
+          throw new Error("Local Atomic V1 executor is unavailable.");
+        const request = {
+          chainId: BigInt(chain.chainId),
+          tokenIn: getAddress(tokenIn.address),
+          tokenOut: getAddress(tokenOut.address),
+          amountIn: BigInt(amountInAtomic),
+        };
+        const atomicClient = atomicPlanClient(engineUrl);
+        return executionExitCode(
+          await runAtomicPlanTrade({
+            request,
+            candidateIndex: candidateIndex - 1,
+            signer: context.signer,
+            executor: trustedExecutor,
+            slippageBps: Number(slippage),
+            quote: () =>
+              atomicClient.getPlanQuote(
+                atomicPlanQuoteRequest(request, searchBudgetMs),
+                {
+                  signal: abort.signal,
+                  timeoutMs: searchBudgetMs + 5000,
+                },
+              ),
+            prepare: (request) =>
+              atomicClient.preparePlan(request, {
+                signal: abort.signal,
+                timeoutMs: 25000,
+              }),
+            recheck: (request) =>
+              atomicClient.recheckPlan(request, {
+                signal: abort.signal,
+                timeoutMs: 25000,
+              }),
+            chainId: context.rpc.chainId,
+            send: context.wallet.send,
+            receipt: context.rpc.waitCanonicalReceipt,
+            report: (event) => console.log(JSON.stringify(event)),
+            confirm: async (kind, transaction) => {
+              console.error(
+                JSON.stringify({
+                  action: kind,
+                  chainId: transaction.chainId,
+                  from: transaction.from,
+                  to: transaction.to,
+                  valueAtomic: transaction.valueAtomic,
+                  gasLimit: transaction.gasLimit,
+                  data: transaction.data,
+                }),
+              );
+              if (values[`confirm-${kind}`] === "yes") return true;
+              if (values["confirm-approval"] || values["confirm-swap"])
+                return false;
+              if (!process.stdin.isTTY) return false;
+              const prompt = createInterface({
+                input: process.stdin,
+                output: process.stderr,
+              });
+              try {
+                return (
+                  (await prompt.question(
+                    `Type ${kind} to sign and send this transaction: `,
+                    { signal: abort.signal },
+                  )) === kind
+                );
+              } finally {
+                prompt.close();
+              }
+            },
+          }),
+        );
+      }
       return executionExitCode(
         await runTrade(
           {

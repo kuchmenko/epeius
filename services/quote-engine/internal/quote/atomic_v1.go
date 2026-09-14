@@ -308,50 +308,19 @@ func atomicV1AcceptedTerms(chainID string, executor common.Address, runtimeHash 
 	if !ok || chain.Sign() < 0 || chain.BitLen() > 256 {
 		return nil, common.Hash{}, errors.New("invalid chain ID")
 	}
-	branchHashes := make([]common.Hash, len(branches))
 	acceptedBranches := make([]*atomicv1.PlanBranch, len(branches))
 	branchMinima := make([][]byte, len(branches))
 	for i, branch := range branches {
-		operationHashes := make([]common.Hash, len(branch.route.Legs))
 		acceptedOperations := make([]*atomicv1.PoolOperation, len(branch.route.Legs))
 		for j, leg := range branch.route.Legs {
-			providerHash, err := atomicHash(
-				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint24")}},
-				crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), uint8(1), factory, router, common.HexToAddress(leg.Pool), new(big.Int).SetUint64(uint64(leg.GetFeePips())),
-			)
-			if err != nil {
-				return nil, common.Hash{}, err
-			}
-			operationHashes[j], err = atomicHash(
-				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}},
-				crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), uint8(1), common.HexToAddress(leg.TokenIn), common.HexToAddress(leg.TokenOut), providerHash,
-			)
-			if err != nil {
-				return nil, common.Hash{}, err
-			}
 			acceptedOperations[j] = &atomicv1.PoolOperation{
 				TokenIn: common.HexToAddress(leg.TokenIn).Bytes(), TokenOut: common.HexToAddress(leg.TokenOut).Bytes(), Pool: &atomicv1.PoolOperation_UniswapV3{UniswapV3: &atomicv1.V3Pool{
 					Factory: factory.Bytes(), Router: router.Bytes(), Pool: common.HexToAddress(leg.Pool).Bytes(), FeePips: proto.Uint32(leg.GetFeePips()),
 				}},
 			}
 		}
-		var err error
-		branchHashes[i], err = atomicHash(
-			abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
-			crypto.Keccak256Hash([]byte("Epeius.AtomicAcceptedBranch.v1")), branch.amount, branch.minimum, operationHashes,
-		)
-		if err != nil {
-			return nil, common.Hash{}, err
-		}
 		acceptedBranches[i] = &atomicv1.PlanBranch{AmountIn: atomicUint256Bytes(branch.amount), Operations: acceptedOperations}
 		branchMinima[i] = atomicUint256Bytes(branch.minimum)
-	}
-	planID, err := atomicHash(
-		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint32")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
-		crypto.Keccak256Hash([]byte("Epeius.AtomicPlan.v1")), uint32(1), chain, executor, uint32(2), runtimeHash, signer, signer, tokenIn, tokenOut, amountIn, minimum, quoteBlock, quoteBlockHash, new(big.Int).SetUint64(expiresAt), new(big.Int).SetUint64(deadline), branchHashes,
-	)
-	if err != nil {
-		return nil, common.Hash{}, err
 	}
 	terms := &atomicv1.AcceptedPlanTerms{
 		Program: &atomicv1.PlanProgram{
@@ -362,7 +331,53 @@ func atomicV1AcceptedTerms(chainID string, executor common.Address, runtimeHash 
 		Signer:   signer.Bytes(), Recipient: signer.Bytes(), BranchMinima: branchMinima, AmountOutMinimum: atomicUint256Bytes(minimum),
 		QuoteBlock: &atomicv1.PinnedBlock{Number: atomicUint256Bytes(quoteBlock), Hash: quoteBlockHash.Bytes()}, ExpiresAtUnix: atomicUint256Bytes(new(big.Int).SetUint64(expiresAt)), DeadlineUnix: atomicUint256Bytes(new(big.Int).SetUint64(deadline)),
 	}
+	planID, err := atomicV1PlanID(terms)
+	if err != nil {
+		return nil, common.Hash{}, err
+	}
 	return terms, planID, nil
+}
+
+func atomicV1PlanID(terms *atomicv1.AcceptedPlanTerms) (common.Hash, error) {
+	if terms == nil || terms.Program == nil || terms.Executor == nil || terms.QuoteBlock == nil || len(terms.BranchMinima) != len(terms.Program.Branches) {
+		return common.Hash{}, errors.New("incomplete accepted terms")
+	}
+	branchHashes := make([]common.Hash, len(terms.Program.Branches))
+	for i, branch := range terms.Program.Branches {
+		operationHashes := make([]common.Hash, len(branch.Operations))
+		for j, operation := range branch.Operations {
+			pool := operation.GetUniswapV3()
+			if pool == nil {
+				return common.Hash{}, errors.New("unsupported operation")
+			}
+			providerHash, err := atomicHash(
+				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint24")}},
+				crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), uint8(1), common.BytesToAddress(pool.Factory), common.BytesToAddress(pool.Router), common.BytesToAddress(pool.Pool), new(big.Int).SetUint64(uint64(pool.GetFeePips())),
+			)
+			if err != nil {
+				return common.Hash{}, err
+			}
+			operationHashes[j], err = atomicHash(
+				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}},
+				crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), uint8(1), common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
+			)
+			if err != nil {
+				return common.Hash{}, err
+			}
+		}
+		var err error
+		branchHashes[i], err = atomicHash(
+			abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
+			crypto.Keccak256Hash([]byte("Epeius.AtomicAcceptedBranch.v1")), new(big.Int).SetBytes(branch.AmountIn), new(big.Int).SetBytes(terms.BranchMinima[i]), operationHashes,
+		)
+		if err != nil {
+			return common.Hash{}, err
+		}
+	}
+	return atomicHash(
+		abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint32")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("uint256")}, {Type: atomicABIType("bytes32[]")}},
+		crypto.Keccak256Hash([]byte("Epeius.AtomicPlan.v1")), terms.Program.GetFormatVersion(), new(big.Int).SetBytes(terms.Program.ChainId), common.BytesToAddress(terms.Executor.Address), terms.Executor.GetVersion(), common.BytesToHash(terms.Executor.RuntimeCodeHash), common.BytesToAddress(terms.Signer), common.BytesToAddress(terms.Recipient), common.BytesToAddress(terms.Program.TokenIn), common.BytesToAddress(terms.Program.TokenOut), new(big.Int).SetBytes(terms.Program.AmountIn), new(big.Int).SetBytes(terms.AmountOutMinimum), new(big.Int).SetBytes(terms.QuoteBlock.Number), common.BytesToHash(terms.QuoteBlock.Hash), new(big.Int).SetBytes(terms.ExpiresAtUnix), new(big.Int).SetBytes(terms.DeadlineUnix), branchHashes,
+	)
 }
 
 func atomicV1TransactionFingerprint(planID common.Hash, tx *quotev1.UnsignedTransaction) (common.Hash, error) {

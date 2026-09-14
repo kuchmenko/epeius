@@ -69,9 +69,25 @@ assert.ok(
   ),
 );
 await assert.rejects(
+  atomicPlanClient(url).preparePlan({}),
+  hasCode(Code.InvalidArgument),
+);
+await assert.rejects(
+  atomicPlanClient(url).recheckPlan({}),
+  hasCode(Code.InvalidArgument),
+);
+await assert.rejects(
   atomicPlanClient(`${url}/fixture`).getPlanQuote(
     atomicPlanQuoteRequest(atomicRequest, 5000),
   ),
+  hasCode(Code.Unimplemented),
+);
+await assert.rejects(
+  atomicPlanClient(`${url}/fixture`).preparePlan({}),
+  hasCode(Code.Unimplemented),
+);
+await assert.rejects(
+  atomicPlanClient(`${url}/fixture`).recheckPlan({}),
   hasCode(Code.Unimplemented),
 );
 

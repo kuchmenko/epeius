@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	atomicv1 "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -26,14 +27,34 @@ type preparation struct {
 	approval bool
 }
 
+type storedAtomicQuote struct {
+	response         *atomicv1.PlanQuoteResponse
+	chain            string
+	expires          time.Time
+	approvalRequired bool
+}
+
+type atomicPreparation struct {
+	response         *atomicv1.PreparePlanResponse
+	chain            string
+	expires          time.Time
+	executorPlanHash []byte
+	checks           SimulationChecks
+}
+
 type Store struct {
 	mu           sync.Mutex
 	quotes       map[string]storedQuote
 	preparations map[string]preparation
+	atomicQuotes map[string]storedAtomicQuote
+	atomicPlans  map[string]atomicPreparation
 }
 
 func NewStore() *Store {
-	return &Store{quotes: map[string]storedQuote{}, preparations: map[string]preparation{}}
+	return &Store{
+		quotes: map[string]storedQuote{}, preparations: map[string]preparation{},
+		atomicQuotes: map[string]storedAtomicQuote{}, atomicPlans: map[string]atomicPreparation{},
+	}
 }
 
 // prune requires the Store mutex. No Store operation performs network calls.
@@ -48,6 +69,30 @@ func (s *Store) prune(now time.Time) {
 			delete(s.preparations, id)
 		}
 	}
+	for id, q := range s.atomicQuotes {
+		if !now.Before(q.expires) {
+			delete(s.atomicQuotes, id)
+		}
+	}
+	for id, p := range s.atomicPlans {
+		if !now.Before(p.expires) {
+			delete(s.atomicPlans, id)
+		}
+	}
+}
+
+func evictOldest[T any](values map[string]T, expiry func(T) time.Time) {
+	if len(values) < storeLimit {
+		return
+	}
+	var oldest string
+	var earliest time.Time
+	for id, value := range values {
+		if oldest == "" || expiry(value).Before(earliest) {
+			oldest, earliest = id, expiry(value)
+		}
+	}
+	delete(values, oldest)
 }
 
 func (s *Store) saveQuote(r *quotev1.QuoteRequest, f *quotev1.QuoteFinal, now time.Time) {
@@ -87,6 +132,58 @@ func (s *Store) savePreparation(p preparation) {
 	p.permission = p.permission.clone()
 	p.checks = p.checks.clone()
 	s.preparations[p.response.PreparationId] = p
+}
+
+func (s *Store) saveAtomicQuote(chain string, response *atomicv1.PlanQuoteResponse, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prune(now)
+	evictOldest(s.atomicQuotes, func(value storedAtomicQuote) time.Time { return value.expires })
+	s.atomicQuotes[string(response.QuoteId)] = storedAtomicQuote{response: proto.CloneOf(response), chain: chain, expires: now.Add(retention)}
+}
+
+func (s *Store) atomicQuote(id []byte, now time.Time) (storedAtomicQuote, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prune(now)
+	value, ok := s.atomicQuotes[string(id)]
+	value.response = proto.CloneOf(value.response)
+	return value, ok
+}
+
+func (s *Store) markAtomicApproval(id []byte, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prune(now)
+	value, ok := s.atomicQuotes[string(id)]
+	if !ok || value.approvalRequired {
+		return false
+	}
+	value.approvalRequired = true
+	s.atomicQuotes[string(id)] = value
+	return true
+}
+
+func (s *Store) saveAtomicPreparation(value atomicPreparation, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prune(now)
+	evictOldest(s.atomicPlans, func(value atomicPreparation) time.Time { return value.expires })
+	value.response = proto.CloneOf(value.response)
+	value.executorPlanHash = append([]byte(nil), value.executorPlanHash...)
+	value.checks = value.checks.clone()
+	s.atomicPlans[string(value.response.Preparation.PreparationId)] = value
+}
+
+func (s *Store) atomicPreparation(id []byte, now time.Time) (atomicPreparation, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prune(now)
+	value, ok := s.atomicPlans[string(id)]
+	value.response = proto.CloneOf(value.response)
+	value.executorPlanHash = append([]byte(nil), value.executorPlanHash...)
+	value.checks = value.checks.clone()
+	return value, ok
 }
 
 // lookup returns detached terms; approval bookkeeping never leaves the Store.

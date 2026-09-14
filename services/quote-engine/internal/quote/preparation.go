@@ -57,6 +57,22 @@ type SimulationChecks struct {
 	ClearAllowances []AllowanceProbe
 }
 
+type SimulationLog struct {
+	Address common.Address
+	Topics  []common.Hash
+	Data    []byte
+}
+
+type AtomicSimulationResult struct {
+	OperationOutputs []*big.Int
+	BranchOutput     *big.Int
+}
+
+type SimulationResult struct {
+	Output string
+	Logs   []SimulationLog
+}
+
 func (s SimulationChecks) clone() SimulationChecks {
 	s.Preserve = append([]BalanceProbe(nil), s.Preserve...)
 	s.ClearAllowances = append([]AllowanceProbe(nil), s.ClearAllowances...)

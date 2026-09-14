@@ -159,10 +159,11 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		return invalid("invalid Atomic V1 quote request")
 	}
 	var chain Chain
+	var chainKey string
 	matches := 0
-	for _, configured := range h.Chains {
+	for key, configured := range h.Chains {
 		if configured.ChainID == chainID.String() {
-			chain, matches = configured, matches+1
+			chain, chainKey, matches = configured, key, matches+1
 		}
 	}
 	if matches != 1 {
@@ -261,6 +262,9 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		if item.value != nil {
 			response.Candidates = append(response.Candidates, item.value)
 		}
+	}
+	if h.Store != nil {
+		h.Store.saveAtomicQuote(chainKey, response, time.Now())
 	}
 	return connect.NewResponse(response), nil
 }

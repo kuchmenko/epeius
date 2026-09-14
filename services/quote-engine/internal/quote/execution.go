@@ -22,6 +22,10 @@ type Simulator interface {
 	Simulate(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (string, error)
 }
 
+type atomicSimulator interface {
+	SimulateAtomic(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (SimulationResult, error)
+}
+
 type executionReader interface {
 	Reader
 	Canonical(context.Context, rpc.Snapshot) error

@@ -64,6 +64,15 @@ type simulationIdentity struct {
 	Value       string `json:"value"`
 	Status      bool   `json:"status"`
 }
+
+type tenderlyLog struct {
+	Raw struct {
+		Address common.Address `json:"address"`
+		Topics  []common.Hash  `json:"topics"`
+		Data    hexutil.Bytes  `json:"data"`
+	} `json:"raw"`
+}
+
 type simulationResult struct {
 	Simulation struct {
 		simulationIdentity
@@ -84,37 +93,43 @@ type simulationResult struct {
 				Output string `json:"output"`
 				Error  string `json:"error"`
 			} `json:"call_trace"`
+			Logs []tenderlyLog `json:"logs"`
 		} `json:"transaction_info"`
 	} `json:"transaction"`
 }
 
 func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction, checks SimulationChecks, snapshot rpc.Snapshot, amount, minimum *big.Int) (string, error) {
+	result, err := t.SimulateAtomic(ctx, tx, checks, snapshot, amount, minimum)
+	return result.Output, err
+}
+
+func (t *Tenderly) SimulateAtomic(ctx context.Context, tx *quotev1.UnsignedTransaction, checks SimulationChecks, snapshot rpc.Snapshot, amount, minimum *big.Int) (SimulationResult, error) {
 	fail := errors.New("simulation verification failed")
 	slug := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 	if t.key == "" || !slug.MatchString(t.account) || !slug.MatchString(t.project) {
-		return "", errSimulationNotConfigured
+		return SimulationResult{}, errSimulationNotConfigured
 	}
 	balances := append([]BalanceProbe{checks.Input, checks.Output}, checks.Preserve...)
 	for _, probe := range balances {
 		if !validAddress(probe.Token) || !validAddress(probe.Owner) {
-			return "", fail
+			return SimulationResult{}, fail
 		}
 	}
 	for _, probe := range checks.ClearAllowances {
 		if !validAddress(probe.Token) || !validAddress(probe.Owner) || !validAddress(probe.Spender) {
-			return "", fail
+			return SimulationResult{}, fail
 		}
 	}
 	if !positiveInteger.MatchString(tx.ChainId) || tx.ChainId != snapshot.ChainID || tx.ValueAtomic != "0" {
-		return "", fail
+		return SimulationResult{}, fail
 	}
 	number, err := strconv.ParseUint(snapshot.BlockNumber, 10, 64)
 	if err != nil {
-		return "", fail
+		return SimulationResult{}, fail
 	}
 	gas, err := strconv.ParseUint(tx.GasLimit, 10, 64)
 	if err != nil || gas == 0 {
-		return "", fail
+		return SimulationResult{}, fail
 	}
 	// RPC block-hash reads use end-of-block state. Tenderly defaults to index 0
 	// (before the block's transactions); -1 selects end-of-block state instead.
@@ -149,13 +164,13 @@ func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 		Simulations []simulationCall `json:"simulations"`
 	}{calls})
 	if err != nil {
-		return "", fail
+		return SimulationResult{}, fail
 	}
 	ctx, cancel := context.WithTimeout(ctx, 18*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.tenderly.co/api/v1/account/"+t.account+"/project/"+t.project+"/simulate-bundle", bytes.NewReader(payload))
 	if err != nil {
-		return "", fail
+		return SimulationResult{}, fail
 	}
 	req.Header.Set("X-Access-Key", t.key)
 	req.Header.Set("Content-Type", "application/json")
@@ -163,13 +178,13 @@ func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 	if err != nil {
 		var networkError net.Error
 		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
-			return "", errSimulationTimeout
+			return SimulationResult{}, errSimulationTimeout
 		}
-		return "", errSimulationUnavailable
+		return SimulationResult{}, errSimulationUnavailable
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", errSimulationUnavailable
+		return SimulationResult{}, errSimulationUnavailable
 	}
 	var body struct {
 		Results []simulationResult `json:"simulation_results"`
@@ -177,12 +192,12 @@ func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&body); err != nil {
 		var networkError net.Error
 		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
-			return "", errSimulationTimeout
+			return SimulationResult{}, errSimulationTimeout
 		}
-		return "", errSimulationEvidence
+		return SimulationResult{}, errSimulationEvidence
 	}
 	if len(body.Results) != len(calls) {
-		return "", errSimulationEvidence
+		return SimulationResult{}, errSimulationEvidence
 	}
 	values := make([]*big.Int, len(calls))
 	for i, item := range body.Results {
@@ -195,12 +210,12 @@ func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 		timestamp, e2 := hexutil.DecodeUint64(header.Timestamp)
 		trace := item.Transaction.TransactionInfo.CallTrace
 		if item.Simulation.TransactionIndex != -1 || !identityOK(item.Simulation.simulationIdentity) || !identityOK(item.Transaction.simulationIdentity) || e1 != nil || n != number || e2 != nil || timestamp != snapshot.Timestamp || !strings.EqualFold(header.Hash, snapshot.BlockHash) || trace.Error != "" || !strings.EqualFold(trace.From, expected.From) || !strings.EqualFold(trace.To, expected.To) || !strings.EqualFold(trace.Input, expected.Input) {
-			return "", errSimulationEvidence
+			return SimulationResult{}, errSimulationEvidence
 		}
 		if i != len(probes) {
 			raw, err := hexutil.Decode(trace.Output)
 			if err != nil {
-				return "", errSimulationEvidence
+				return SimulationResult{}, errSimulationEvidence
 			}
 			method := erc20ABI.Methods["balanceOf"]
 			if i > 2*len(probes) {
@@ -208,7 +223,7 @@ func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 			}
 			decoded, err := evm.Unpack(method, raw)
 			if err != nil {
-				return "", errSimulationEvidence
+				return SimulationResult{}, errSimulationEvidence
 			}
 			values[i] = decoded[0].(*big.Int)
 		}
@@ -217,20 +232,24 @@ func (t *Tenderly) Simulate(ctx context.Context, tx *quotev1.UnsignedTransaction
 	consumed := new(big.Int).Sub(values[0], values[after])
 	output := new(big.Int).Sub(values[after+1], values[1])
 	if consumed.Cmp(amount) != 0 {
-		return "", errSimulationInputAmount
+		return SimulationResult{}, errSimulationInputAmount
 	}
 	if output.Cmp(minimum) < 0 {
-		return "", errSimulationMinimumOutput
+		return SimulationResult{}, errSimulationMinimumOutput
 	}
 	for i := 2; i < len(probes); i++ {
 		if values[after+i].Cmp(values[i]) != 0 {
-			return "", errSimulationProtectedBalance
+			return SimulationResult{}, errSimulationProtectedBalance
 		}
 	}
 	for i := after + len(probes); i < len(values); i++ {
 		if values[i].Sign() != 0 {
-			return "", errSimulationAllowance
+			return SimulationResult{}, errSimulationAllowance
 		}
 	}
-	return output.String(), nil
+	logs := make([]SimulationLog, len(body.Results[len(probes)].Transaction.TransactionInfo.Logs))
+	for i, log := range body.Results[len(probes)].Transaction.TransactionInfo.Logs {
+		logs[i] = SimulationLog{Address: log.Raw.Address, Topics: append([]common.Hash(nil), log.Raw.Topics...), Data: append([]byte(nil), log.Raw.Data...)}
+	}
+	return SimulationResult{Output: output.String(), Logs: logs}, nil
 }
