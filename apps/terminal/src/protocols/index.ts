@@ -58,20 +58,29 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
           ![
             "address",
             "runtime_code_hash",
+            "max_branches",
+            "max_operations_per_branch",
+            "max_total_operations",
             "uniswap_deployment",
             "pancake_deployment",
             "slipstream_deployment",
             "balancer_deployment",
+            "uniswap_v4_deployment",
           ].includes(field),
       ) ||
-      !["address", "runtime_code_hash"].every((field) =>
-        Object.hasOwn(atomicExecutor, field),
-      ) ||
+      ![
+        "address",
+        "runtime_code_hash",
+        "max_branches",
+        "max_operations_per_branch",
+        "max_total_operations",
+      ].every((field) => Object.hasOwn(atomicExecutor, field)) ||
       ![
         "uniswap_deployment",
         "pancake_deployment",
         "slipstream_deployment",
         "balancer_deployment",
+        "uniswap_v4_deployment",
       ].some((field) => Object.hasOwn(atomicExecutor, field)))
   )
     throw new Error("Local Atomic V1 executor configuration is invalid.");
@@ -93,10 +102,14 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
           atomicExecutor: {
             address: atomicExecutor?.address,
             runtimeCodeHash: atomicExecutor?.runtime_code_hash,
+            maxBranches: atomicExecutor?.max_branches,
+            maxOperationsPerBranch: atomicExecutor?.max_operations_per_branch,
+            maxTotalOperations: atomicExecutor?.max_total_operations,
             uniswapDeployment: atomicExecutor?.uniswap_deployment,
             pancakeDeployment: atomicExecutor?.pancake_deployment,
             slipstreamDeployment: atomicExecutor?.slipstream_deployment,
             balancerDeployment: atomicExecutor?.balancer_deployment,
+            uniswapV4Deployment: atomicExecutor?.uniswap_v4_deployment,
           },
         }
       : {}),
@@ -115,10 +128,14 @@ export function configureExecution(config: {
   atomicExecutor?: {
     address?: string;
     runtimeCodeHash?: string;
+    maxBranches?: number;
+    maxOperationsPerBranch?: number;
+    maxTotalOperations?: number;
     uniswapDeployment?: string;
     pancakeDeployment?: string;
     slipstreamDeployment?: string;
     balancerDeployment?: string;
+    uniswapV4Deployment?: string;
   };
 }): TrustedExecution {
   const deployments = Object.fromEntries(

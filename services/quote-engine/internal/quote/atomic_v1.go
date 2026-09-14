@@ -451,6 +451,18 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 	if err != nil || crypto.Keccak256Hash(runtime) != common.HexToHash(e.RuntimeCodeHash) {
 		return errors.New("Atomic V1 executor code unavailable")
 	}
+	for name, expected := range map[string]uint32{
+		"maxBranches":            e.MaxBranches,
+		"maxOperationsPerBranch": e.MaxOperationsPerBranch,
+		"maxTotalOperations":     e.MaxTotalOperations,
+	} {
+		method := contractabi.ExecutorV2.Methods[name]
+		data, callErr := reader.Call(ctx, target, method.ID, hash)
+		values, unpackErr := evm.Unpack(method, data)
+		if callErr != nil || unpackErr != nil || values[0].(uint32) != expected {
+			return errors.New("Atomic V1 executor limits failed")
+		}
+	}
 	deployments := map[string]config.Deployment{
 		"uniswapRouter":    chain.Deployments[e.UniswapDeployment],
 		"pancakeRouter":    chain.Deployments[e.PancakeDeployment],

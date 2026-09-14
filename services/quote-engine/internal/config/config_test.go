@@ -108,6 +108,9 @@ tick_spacings = [100, 200]
 [chains.test-net.atomic_executor]
 address = "0x4444444444444444444444444444444444444444"
 runtime_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+max_branches = 4
+max_operations_per_branch = 12
+max_total_operations = 12
 uniswap_deployment = "uni"
 pancake_deployment = "pan"
 slipstream_deployment = "slip"
@@ -148,6 +151,16 @@ slipstream_deployment = "slip"
 	}
 	if _, err := loadText(t, strings.Replace(text, "uniswap_deployment = \"uni\"", "uniswap_deployment = \"uni\"\nunknown = true", 1)); err == nil {
 		t.Fatal("unknown Atomic V1 config field accepted")
+	}
+	for _, changed := range []string{
+		strings.Replace(text, "max_branches = 4", "max_branches = 0", 1),
+		strings.Replace(text, "max_operations_per_branch = 12", "max_operations_per_branch = 13", 1),
+		strings.Replace(text, "max_total_operations = 12", "max_total_operations = 3", 1),
+		strings.Replace(text, "max_total_operations = 12", "max_total_operations = 49", 1),
+	} {
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatal("invalid Atomic V1 limits accepted")
+		}
 	}
 }
 
@@ -320,6 +333,9 @@ pools = ["` + first + `", "` + second + `"]
 [chains.test-net.atomic_executor]
 address = "0x4444444444444444444444444444444444444444"
 runtime_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+max_branches = 4
+max_operations_per_branch = 12
+max_total_operations = 12
 balancer_deployment = "balancer"
 `
 	if got, err := loadText(t, text); err != nil || got.Chains["test-net"].AtomicExecutor.BalancerDeployment != "balancer" {

@@ -50,6 +50,9 @@ export type TrustedExecution = {
   atomicExecutor?: ExecutionImplementation & {
     address: string;
     runtimeCodeHash: string;
+    maxBranches: number;
+    maxOperationsPerBranch: number;
+    maxTotalOperations: number;
     factory?: string;
     router?: string;
     pancakeFactory?: string;

@@ -99,6 +99,9 @@ const trusted = configureExecution({
   atomicExecutor: {
     address: fixture.executor,
     runtimeCodeHash: `0x${"a".repeat(64)}`,
+    maxBranches: 4,
+    maxOperationsPerBranch: 12,
+    maxTotalOperations: 12,
     uniswapDeployment: "uni",
   },
   deployments: {
@@ -120,6 +123,9 @@ const twoHopTrusted = configureExecution({
   atomicExecutor: {
     address: twoHopFixture.executor,
     runtimeCodeHash: twoHopFixture.runtimeCodeHash,
+    maxBranches: 4,
+    maxOperationsPerBranch: 12,
+    maxTotalOperations: 12,
     uniswapDeployment: "uni",
   },
   deployments: {
@@ -139,6 +145,9 @@ const splitTrusted = configureExecution({
   atomicExecutor: {
     address: splitFixture.executor,
     runtimeCodeHash: splitFixture.runtimeCodeHash,
+    maxBranches: 4,
+    maxOperationsPerBranch: 12,
+    maxTotalOperations: 12,
     uniswapDeployment: "uni",
   },
   deployments: {

@@ -199,7 +199,17 @@ contract ExecutorV2V4Test {
 
     function deploy(address universal, address permitAddress, address managerAddress) private returns (ExecutorV2) {
         return new ExecutorV2(
-            address(0), address(0), address(0), address(0), universal, permitAddress, managerAddress, new bytes32[](0)
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            universal,
+            permitAddress,
+            managerAddress,
+            4,
+            12,
+            12,
+            new bytes32[](0)
         );
     }
 
@@ -320,6 +330,9 @@ contract ExecutorV2V4Test {
             address(0),
             address(0),
             address(0),
+            4,
+            12,
+            12,
             new bytes32[](0)
         );
         tokenIn.approve(address(disabled), 41);

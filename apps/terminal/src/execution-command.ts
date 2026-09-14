@@ -18,6 +18,21 @@ import { castWallet } from "./wallet-cast";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
+export async function verifyAtomicExecutor(
+  rpc: ReturnType<typeof readChain>,
+  executor: NonNullable<ReturnType<typeof configureChain>["atomicExecutor"]>,
+) {
+  return (
+    same(await rpc.codeHash(executor.address), executor.runtimeCodeHash) &&
+    (await rpc.uint32Getter(executor.address, "maxBranches")) ===
+      executor.maxBranches &&
+    (await rpc.uint32Getter(executor.address, "maxOperationsPerBranch")) ===
+      executor.maxOperationsPerBranch &&
+    (await rpc.uint32Getter(executor.address, "maxTotalOperations")) ===
+      executor.maxTotalOperations
+  );
+}
+
 export async function connectExecution(
   values: Record<string, string | undefined>,
   configPath: string,
@@ -47,10 +62,7 @@ export async function connectExecution(
   if (
     atomic &&
     (!trusted.atomicExecutor ||
-      !same(
-        await rpc.codeHash(trusted.atomicExecutor.address),
-        trusted.atomicExecutor.runtimeCodeHash,
-      ))
+      !(await verifyAtomicExecutor(rpc, trusted.atomicExecutor)))
   )
     throw new Error("Local Atomic V1 executor runtime code does not match.");
   const wallet = castWallet(

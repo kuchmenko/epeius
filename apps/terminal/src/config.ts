@@ -131,10 +131,14 @@ export async function readSettings(path: string) {
         atomic_executor?: {
           address?: string;
           runtime_code_hash?: string;
+          max_branches?: number;
+          max_operations_per_branch?: number;
+          max_total_operations?: number;
           uniswap_deployment?: string;
           pancake_deployment?: string;
           slipstream_deployment?: string;
           balancer_deployment?: string;
+          uniswap_v4_deployment?: string;
           [key: string]: unknown;
         };
         tokens?: Array<{

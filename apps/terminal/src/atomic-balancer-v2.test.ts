@@ -169,6 +169,9 @@ test("Balancer Atomic acceptance requires exact local full pool ID", () => {
   const identity = {
     address: executor,
     runtimeCodeHash,
+    maxBranches: 4,
+    maxOperationsPerBranch: 12,
+    maxTotalOperations: 12,
     balancerVault: vault,
     balancerPools: [poolId],
   };

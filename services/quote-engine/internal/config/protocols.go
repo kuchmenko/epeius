@@ -72,6 +72,7 @@ func ValidateChain(chain Chain) error {
 		}
 	}
 	if e := chain.AtomicExecutor; e != nil {
+		limitsOK := e.MaxBranches > 0 && e.MaxOperationsPerBranch > 0 && e.MaxTotalOperations >= e.MaxBranches && e.MaxTotalOperations >= e.MaxOperationsPerBranch && uint64(e.MaxTotalOperations) <= uint64(e.MaxBranches)*uint64(e.MaxOperationsPerBranch)
 		uniswap, uniswapOK := chain.Deployments[e.UniswapDeployment]
 		pancake, pancakeOK := chain.Deployments[e.PancakeDeployment]
 		slipstream, slipstreamOK := chain.Deployments[e.SlipstreamDeployment]
@@ -128,7 +129,7 @@ func ValidateChain(chain Chain) error {
 				routers[address] = true
 			}
 		}
-		if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || (!uniswapOK && !pancakeOK && !slipstreamOK && !balancerOK && !uniswapV4OK) || (e.UniswapDeployment != "" && !uniswapOK) || (e.PancakeDeployment != "" && !pancakeOK) || (e.SlipstreamDeployment != "" && !slipstreamOK) || (e.BalancerDeployment != "" && !balancerOK) || (e.UniswapV4Deployment != "" && !uniswapV4OK) {
+		if !limitsOK || !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || (!uniswapOK && !pancakeOK && !slipstreamOK && !balancerOK && !uniswapV4OK) || (e.UniswapDeployment != "" && !uniswapOK) || (e.PancakeDeployment != "" && !pancakeOK) || (e.SlipstreamDeployment != "" && !slipstreamOK) || (e.BalancerDeployment != "" && !balancerOK) || (e.UniswapV4Deployment != "" && !uniswapV4OK) {
 			return errors.New("atomic executor needs a nonzero address, runtime code hash, and at least one valid provider deployment")
 		}
 	}

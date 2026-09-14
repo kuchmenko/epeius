@@ -38,6 +38,21 @@
         "internalType": "address"
       },
       {
+        "name": "maxBranches_",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "maxOperationsPerBranch_",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "maxTotalOperations_",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
         "name": "balancerPoolIds_",
         "type": "bytes32[]",
         "internalType": "bytes32[]"
@@ -185,6 +200,45 @@
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maxBranches",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maxOperationsPerBranch",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maxTotalOperations",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
       }
     ],
     "stateMutability": "view"
@@ -557,6 +611,22 @@
   },
   {
     "type": "error",
+    "name": "DuplicatePool",
+    "inputs": [
+      {
+        "name": "branchIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "operationIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "Expired",
     "inputs": [
       {
@@ -600,6 +670,11 @@
   {
     "type": "error",
     "name": "InvalidPlan",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LimitExceeded",
     "inputs": []
   },
   {

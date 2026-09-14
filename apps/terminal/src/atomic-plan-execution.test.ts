@@ -64,6 +64,9 @@ const executor = {
   address: "0x0000000000000000000000000000000000000044",
   runtimeCodeHash:
     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  maxBranches: 4,
+  maxOperationsPerBranch: 12,
+  maxTotalOperations: 12,
   factory: fixture.factory,
   router: fixture.router,
   pancakeFactory: "0x0000000000000000000000000000000000000066",

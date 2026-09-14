@@ -150,6 +150,9 @@ test("Uniswap V4 Atomic acceptance requires the full static zero-hook key", () =
   const identity = {
     address: fixture.executor,
     runtimeCodeHash: fixture.runtimeCodeHash,
+    maxBranches: 4,
+    maxOperationsPerBranch: 12,
+    maxTotalOperations: 12,
     universalRouter: "0x7777777777777777777777777777777777777777",
     permit2: "0x8888888888888888888888888888888888888888",
     poolManager: fixture.poolManager,

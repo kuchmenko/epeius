@@ -33,6 +33,42 @@ test("RPC derives configured contract runtime code hash without batching", async
   }
 });
 
+test("RPC reads exact ExecutorV2 uint32 limit getters", async () => {
+  const requests: Array<{
+    method: string;
+    params: [{ data: string }, string];
+  }> = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const body = await request.json();
+      requests.push(body);
+      return Response.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: `0x${"0".repeat(63)}c`,
+      });
+    },
+  });
+  try {
+    const chain = readChain(server.url.href, new AbortController().signal);
+    const target = `0x${"1".repeat(40)}`;
+    expect(await chain.uint32Getter(target, "maxBranches")).toBe(12);
+    expect(await chain.uint32Getter(target, "maxOperationsPerBranch")).toBe(12);
+    expect(await chain.uint32Getter(target, "maxTotalOperations")).toBe(12);
+    expect(requests.map((request) => request.method)).toEqual([
+      "eth_call",
+      "eth_call",
+      "eth_call",
+    ]);
+    expect(
+      new Set(requests.map((request) => request.params[0]?.data)).size,
+    ).toBe(3);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("RPC preserves raw receipt, null polling and canonical block identity without batching", async () => {
   const requests: Array<{ method: string; params: unknown[] }> = [];
   const receipt = {

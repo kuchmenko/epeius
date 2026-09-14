@@ -21,6 +21,61 @@ import (
 
 type atomicSplitRequoter struct{ calls *[]string }
 
+func TestGenericExecutorCompositionCastVectors(t *testing.T) {
+	var fixture struct {
+		Selector string `json:"selector"`
+		Profiles []struct {
+			Branches         []int  `json:"branches"`
+			Calldata         string `json:"calldata"`
+			CalldataKeccak   string `json:"calldataKeccak"`
+			ExecutorPlanHash string `json:"executorPlanHash"`
+		} `json:"profiles"`
+	}
+	raw, err := os.ReadFile("../../../../contracts/fixtures/executor-v2-composition.json")
+	if err != nil || json.Unmarshal(raw, &fixture) != nil || fixture.Selector != "0x661983c5" {
+		t.Fatal("invalid composition fixture")
+	}
+	address := func(value int64) common.Address { return common.BigToAddress(big.NewInt(value)) }
+	for _, profile := range fixture.Profiles {
+		plan := atomicV1ExecutorPlan{TokenIn: address(0x11), TokenOut: address(0xff), AmountIn: big.NewInt(100), MinAmountOut: big.NewInt(1), Deadline: big.NewInt(2_000_000_000)}
+		remaining, operationIndex := int64(100), 0
+		for branchIndex, count := range profile.Branches {
+			amount := int64(branchIndex + 1)
+			if branchIndex == len(profile.Branches)-1 {
+				amount = remaining
+			}
+			remaining -= amount
+			branch := atomicV1Branch{AmountIn: big.NewInt(amount), MinAmountOut: big.NewInt(1)}
+			for local := 0; local < count; local++ {
+				kind := uint8(operationIndex%5 + 1)
+				output := address(int64(0x20 + operationIndex))
+				if local == count-1 {
+					output = address(0xff)
+				}
+				fee, spacing := int64(0), int64(0)
+				if operationIndex%5 < 2 {
+					fee = int64(101 + operationIndex)
+				}
+				if operationIndex%5 == 2 || operationIndex%5 == 4 {
+					spacing = int64(10 + operationIndex)
+				}
+				var poolID common.Hash
+				if operationIndex%5 == 3 {
+					poolID = common.BigToHash(big.NewInt(int64(operationIndex + 1)))
+				}
+				branch.Operations = append(branch.Operations, atomicV1Operation{Kind: kind, TokenOut: output, Fee: big.NewInt(fee), TickSpacing: big.NewInt(spacing), PoolId: poolID})
+				operationIndex++
+			}
+			plan.Branches = append(plan.Branches, branch)
+		}
+		data, packErr := contractabi.ExecutorV2.Pack("execute", plan)
+		hash, hashErr := atomicV1ExecutorPlanHash("8453", address(0x44), address(0x55), plan)
+		if packErr != nil || hashErr != nil || hexutil.Encode(data) != profile.Calldata || crypto.Keccak256Hash(data).Hex() != profile.CalldataKeccak || hash.Hex() != profile.ExecutorPlanHash {
+			t.Fatal("Go composition encoding differs from Cast")
+		}
+	}
+}
+
 func (q atomicSplitRequoter) Requote(_ context.Context, route *quotev1.RouteQuote, amount *big.Int, block *quotev1.BlockContext) (*quotev1.RouteQuote, error) {
 	*q.calls = append(*q.calls, amount.String())
 	result := proto.CloneOf(route)
@@ -250,7 +305,7 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 	chainConfig := config.Chain{
 		ExecutionEnabled: true,
 		Tokens:           []config.Token{{Address: testWETH.Hex()}, {Address: intermediate.Hex()}, {Address: testUSDC.Hex()}},
-		AtomicExecutor:   &config.AtomicExecutor{Address: executor, RuntimeCodeHash: crypto.Keccak256Hash([]byte{1}).Hex(), UniswapDeployment: "uni"},
+		AtomicExecutor:   &config.AtomicExecutor{Address: executor, RuntimeCodeHash: crypto.Keccak256Hash([]byte{1}).Hex(), MaxBranches: 4, MaxOperationsPerBranch: 12, MaxTotalOperations: 12, UniswapDeployment: "uni"},
 		Deployments:      map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Factory: factory, Router: router, Fees: []uint32{500}}},
 	}
 	poolCalls := 0
@@ -277,6 +332,11 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 				return make([]byte, 32), nil
 			case hexutil.Encode(contractabi.ExecutorV2.Methods["version"].ID):
 				return uintWord(2), nil
+			case hexutil.Encode(contractabi.ExecutorV2.Methods["maxBranches"].ID):
+				return uintWord(4), nil
+			case hexutil.Encode(contractabi.ExecutorV2.Methods["maxOperationsPerBranch"].ID),
+				hexutil.Encode(contractabi.ExecutorV2.Methods["maxTotalOperations"].ID):
+				return uintWord(12), nil
 			case "0x1698ee82":
 				poolCalls++
 				selected := pool
@@ -319,7 +379,7 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 	}
 	wrongRuntime := chainConfig
 	wrongRuntime.AtomicExecutor = &config.AtomicExecutor{
-		Address: executor, RuntimeCodeHash: common.HexToHash("0xbb").Hex(), UniswapDeployment: "uni",
+		Address: executor, RuntimeCodeHash: common.HexToHash("0xbb").Hex(), MaxBranches: 4, MaxOperationsPerBranch: 12, MaxTotalOperations: 12, UniswapDeployment: "uni",
 	}
 	if err := verifyAtomicV1Executor(t.Context(), reader, wrongRuntime, route, common.HexToHash(blockHash)); err == nil {
 		t.Fatal("executor runtime hash mismatch accepted")

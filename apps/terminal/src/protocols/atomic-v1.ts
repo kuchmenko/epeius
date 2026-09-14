@@ -386,6 +386,9 @@ export function atomicExecutorV1(
   raw: {
     address?: string;
     runtimeCodeHash?: string;
+    maxBranches?: number;
+    maxOperationsPerBranch?: number;
+    maxTotalOperations?: number;
     uniswapDeployment?: string;
     pancakeDeployment?: string;
     slipstreamDeployment?: string;
@@ -403,6 +406,23 @@ export function atomicExecutorV1(
     throw new Error("Local Atomic V1 executor identity is invalid.");
   const address = getAddress(configuredAddress).toLowerCase() as Address;
   const runtimeCodeHash = `0x${raw.runtimeCodeHash?.replace(/^0x/i, "").toLowerCase()}`;
+  const maxBranches = raw.maxBranches ?? 0;
+  const maxOperationsPerBranch = raw.maxOperationsPerBranch ?? 0;
+  const maxTotalOperations = raw.maxTotalOperations ?? 0;
+  if (
+    !Number.isInteger(maxBranches) ||
+    !Number.isInteger(maxOperationsPerBranch) ||
+    !Number.isInteger(maxTotalOperations) ||
+    maxBranches <= 0 ||
+    maxOperationsPerBranch <= 0 ||
+    maxTotalOperations < maxBranches ||
+    maxTotalOperations < maxOperationsPerBranch ||
+    maxTotalOperations > maxBranches * maxOperationsPerBranch ||
+    maxBranches > 0xffffffff ||
+    maxOperationsPerBranch > 0xffffffff ||
+    maxTotalOperations > 0xffffffff
+  )
+    throw new Error("Local Atomic V1 executor limits are invalid.");
   const uniswap = raw.uniswapDeployment
     ? (deployments[raw.uniswapDeployment] as V3Deployment | undefined)
     : undefined;
@@ -468,6 +488,9 @@ export function atomicExecutorV1(
   return {
     address,
     runtimeCodeHash,
+    maxBranches,
+    maxOperationsPerBranch,
+    maxTotalOperations,
     factory,
     router: deployment?.router,
     pancakeFactory: pancake?.factory,

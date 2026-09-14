@@ -59,6 +59,9 @@ function rejectUnknown(value: unknown) {
 export type AtomicExecutorIdentity = {
   address: string;
   runtimeCodeHash: string;
+  maxBranches: number;
+  maxOperationsPerBranch: number;
+  maxTotalOperations: number;
   factory?: string;
   router?: string;
   pancakeFactory?: string;

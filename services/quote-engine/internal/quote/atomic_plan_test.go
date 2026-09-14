@@ -77,6 +77,15 @@ func (r *atomicPlanReader) Call(_ context.Context, to common.Address, data []byt
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["version"].ID) {
 		return contractabi.ExecutorV2.Methods["version"].Outputs.Pack(big.NewInt(2))
 	}
+	for name, expected := range map[string]uint32{
+		"maxBranches":            r.config.AtomicExecutor.MaxBranches,
+		"maxOperationsPerBranch": r.config.AtomicExecutor.MaxOperationsPerBranch,
+		"maxTotalOperations":     r.config.AtomicExecutor.MaxTotalOperations,
+	} {
+		if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods[name].ID) {
+			return contractabi.ExecutorV2.Methods[name].Outputs.Pack(expected)
+		}
+	}
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["balancerVault"].ID) {
 		return contractabi.ExecutorV2.Methods["balancerVault"].Outputs.Pack(common.HexToAddress(balancerOptions.Vault))
 	}

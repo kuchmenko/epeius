@@ -1,5 +1,7 @@
 import {
   createPublicClient,
+  decodeFunctionResult,
+  encodeFunctionData,
   type Hex,
   hexToBigInt,
   http,
@@ -50,6 +52,34 @@ export function readChain(rpcUrl: string, signal: AbortSignal) {
       if (!isHex(code, { strict: true }) || code === "0x")
         throw new Error("Configured contract code is unavailable.");
       return keccak256(code as Hex);
+    },
+    uint32Getter: async (
+      address: string,
+      name: "maxBranches" | "maxOperationsPerBranch" | "maxTotalOperations",
+    ) => {
+      const abi = [
+        {
+          type: "function",
+          name,
+          stateMutability: "view",
+          inputs: [],
+          outputs: [{ type: "uint32" }],
+        },
+      ] as const;
+      const data = String(
+        await rpc("eth_call", [
+          {
+            to: address,
+            data: encodeFunctionData({ abi, functionName: name }),
+          },
+          "latest",
+        ]),
+      );
+      if (!isHex(data, { strict: true }))
+        throw new Error("Configured contract getter is unavailable.");
+      return Number(
+        decodeFunctionResult({ abi, functionName: name, data: data as Hex }),
+      );
     },
     waitCanonicalReceipt: async (hash: string): Promise<Receipt> => {
       for (let attempt = 0; attempt < 60; attempt++) {

@@ -19,7 +19,11 @@ import { runAtomicPlanTrade } from "./atomic-plan-trade";
 import { atomicPlanClient, quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
-import { connectExecution, executionCommand } from "./execution-command";
+import {
+  connectExecution,
+  executionCommand,
+  verifyAtomicExecutor,
+} from "./execution-command";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import {
   chainFromStatus,
@@ -495,6 +499,10 @@ export async function main(rawArgs: string[]) {
             receipt: context.rpc.waitCanonicalReceipt,
             report: (event) => console.log(JSON.stringify(event)),
             confirm: async (kind, transaction) => {
+              if (!(await verifyAtomicExecutor(context.rpc, trustedExecutor)))
+                throw new Error(
+                  "Local Atomic V1 executor runtime code or limits changed. Nothing sent.",
+                );
               console.error(
                 JSON.stringify({
                   action: kind,

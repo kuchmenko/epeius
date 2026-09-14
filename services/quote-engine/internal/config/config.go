@@ -49,13 +49,16 @@ type Executor struct {
 }
 
 type AtomicExecutor struct {
-	Address              string `toml:"address"`
-	RuntimeCodeHash      string `toml:"runtime_code_hash"`
-	UniswapDeployment    string `toml:"uniswap_deployment"`
-	PancakeDeployment    string `toml:"pancake_deployment"`
-	SlipstreamDeployment string `toml:"slipstream_deployment"`
-	BalancerDeployment   string `toml:"balancer_deployment"`
-	UniswapV4Deployment  string `toml:"uniswap_v4_deployment"`
+	Address                string `toml:"address"`
+	RuntimeCodeHash        string `toml:"runtime_code_hash"`
+	MaxBranches            uint32 `toml:"max_branches"`
+	MaxOperationsPerBranch uint32 `toml:"max_operations_per_branch"`
+	MaxTotalOperations     uint32 `toml:"max_total_operations"`
+	UniswapDeployment      string `toml:"uniswap_deployment"`
+	PancakeDeployment      string `toml:"pancake_deployment"`
+	SlipstreamDeployment   string `toml:"slipstream_deployment"`
+	BalancerDeployment     string `toml:"balancer_deployment"`
+	UniswapV4Deployment    string `toml:"uniswap_v4_deployment"`
 }
 
 type Token struct {

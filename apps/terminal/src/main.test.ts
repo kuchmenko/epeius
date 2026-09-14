@@ -135,7 +135,7 @@ test("execution config rereads independently and validates executor only for all
     await expect(
       readExecutionConfig(path, "test", true, configureChain),
     ).rejects.toThrow("Local executor address is invalid.");
-    const atomic = `${header}execution_enabled=true\n[chains.test.deployments.uni]\nkind='uniswap-v3'\nfactory='0x${"b".repeat(40)}'\nrouter='0x${"a".repeat(40)}'\nfees=[500]\n[chains.test.atomic_executor]\naddress='0x${"c".repeat(40)}'\nruntime_code_hash='0x${"d".repeat(64)}'\nuniswap_deployment='uni'\n`;
+    const atomic = `${header}execution_enabled=true\n[chains.test.deployments.uni]\nkind='uniswap-v3'\nfactory='0x${"b".repeat(40)}'\nrouter='0x${"a".repeat(40)}'\nfees=[500]\n[chains.test.atomic_executor]\naddress='0x${"c".repeat(40)}'\nruntime_code_hash='0x${"d".repeat(64)}'\nmax_branches=4\nmax_operations_per_branch=12\nmax_total_operations=12\nuniswap_deployment='uni'\n`;
     await Bun.write(path, atomic);
     expect(
       await readExecutionConfig(path, "test", false, configureChain, true),
