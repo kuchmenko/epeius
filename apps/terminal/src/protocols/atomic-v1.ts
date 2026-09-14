@@ -20,6 +20,7 @@ import type {
 import type { PrepareExecutionResponse } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type SwapTerms, uint256Decimal } from "../execution-policy";
 import { type BalancerV2Deployment, isBalancerPoolId } from "./balancer-v2";
+import type { UniswapV4Deployment } from "./uniswap-v4";
 import { admitV3Route, type V3Deployment, v3Review } from "./v3";
 
 type AtomicOperation = {
@@ -115,6 +116,14 @@ const atomicPool = (operation: PoolOperation) => {
         32,
         "Balancer pool ID",
       ),
+    };
+  if (operation.pool.case === "uniswapV4")
+    return {
+      pool: operation.pool.value,
+      kind: 5 as const,
+      selector: operation.pool.value.key?.feePips,
+      spacing: operation.pool.value.key?.tickSpacing,
+      selectorType: "uint24" as const,
     };
   throw new Error("Atomic V1 accepted operation is unsupported.");
 };
@@ -282,26 +291,57 @@ export function atomicV1AcceptedBranchHashes(
                 ],
               ),
             )
-          : keccak256(
-              encodeAbiParameters(
-                [
-                  { type: "bytes32" },
-                  { type: "uint8" },
-                  { type: "address" },
-                  { type: "address" },
-                  { type: "address" },
-                  { type: identity.selectorType },
-                ],
-                [
-                  domain("Epeius.AtomicProvider.v1"),
-                  kind,
-                  getAddress(requiredBytes(pool.factory, 20, "factory")),
-                  getAddress(requiredBytes(pool.router, 20, "router")),
-                  getAddress(requiredBytes(pool.pool, 20, "pool")),
-                  selector ?? 0,
-                ],
-              ),
-            );
+          : kind === 5
+            ? keccak256(
+                encodeAbiParameters(
+                  [
+                    { type: "bytes32" },
+                    { type: "uint8" },
+                    { type: "address" },
+                    { type: "address" },
+                    { type: "address" },
+                    { type: "uint24" },
+                    { type: "int24" },
+                    { type: "address" },
+                  ],
+                  [
+                    domain("Epeius.AtomicProvider.v1"),
+                    5,
+                    getAddress(
+                      requiredBytes(pool.poolManager, 20, "V4 PoolManager"),
+                    ),
+                    getAddress(
+                      requiredBytes(pool.key?.currency0, 20, "V4 currency0"),
+                    ),
+                    getAddress(
+                      requiredBytes(pool.key?.currency1, 20, "V4 currency1"),
+                    ),
+                    selector ?? 0,
+                    identity.spacing ?? 0,
+                    getAddress(requiredBytes(pool.key?.hooks, 20, "V4 hooks")),
+                  ],
+                ),
+              )
+            : keccak256(
+                encodeAbiParameters(
+                  [
+                    { type: "bytes32" },
+                    { type: "uint8" },
+                    { type: "address" },
+                    { type: "address" },
+                    { type: "address" },
+                    { type: identity.selectorType },
+                  ],
+                  [
+                    domain("Epeius.AtomicProvider.v1"),
+                    kind,
+                    getAddress(requiredBytes(pool.factory, 20, "factory")),
+                    getAddress(requiredBytes(pool.router, 20, "router")),
+                    getAddress(requiredBytes(pool.pool, 20, "pool")),
+                    selector ?? 0,
+                  ],
+                ),
+              );
       return keccak256(
         encodeAbiParameters(
           [
@@ -350,6 +390,7 @@ export function atomicExecutorV1(
     pancakeDeployment?: string;
     slipstreamDeployment?: string;
     balancerDeployment?: string;
+    uniswapV4Deployment?: string;
   },
   deployments: Record<string, { kind: string }>,
 ) {
@@ -381,6 +422,9 @@ export function atomicExecutorV1(
   const balancer = raw.balancerDeployment
     ? (deployments[raw.balancerDeployment] as BalancerV2Deployment | undefined)
     : undefined;
+  const uniswapV4 = raw.uniswapV4Deployment
+    ? (deployments[raw.uniswapV4Deployment] as UniswapV4Deployment | undefined)
+    : undefined;
   const endpoints = [uniswap, pancake, slipstream, balancer].flatMap((value) =>
     value
       ? [
@@ -390,12 +434,19 @@ export function atomicExecutorV1(
         ]
       : [],
   );
+  if (uniswapV4)
+    endpoints.push(
+      uniswapV4.router.toLowerCase(),
+      uniswapV4.permit2.toLowerCase(),
+      uniswapV4.poolManager.toLowerCase(),
+    );
   if (
     (raw.uniswapDeployment && uniswap?.kind !== "uniswap-v3") ||
     (raw.pancakeDeployment && pancake?.kind !== "pancake-v3") ||
     (raw.slipstreamDeployment && slipstream?.kind !== "aerodrome-slipstream") ||
     (raw.balancerDeployment && balancer?.kind !== "balancer-v2") ||
-    (!uniswap && !pancake && !slipstream && !balancer) ||
+    (raw.uniswapV4Deployment && uniswapV4?.kind !== "uniswap-v4") ||
+    (!uniswap && !pancake && !slipstream && !balancer && !uniswapV4) ||
     [uniswap, pancake, slipstream].some((value) => value && !value.factory) ||
     new Set(endpoints).size !== endpoints.length ||
     (balancer &&
@@ -433,6 +484,10 @@ export function atomicExecutorV1(
           ),
         )
       : undefined,
+    universalRouter: uniswapV4?.router,
+    permit2: uniswapV4?.permit2,
+    poolManager: uniswapV4?.poolManager,
+    uniswapV4Pools: uniswapV4 ? [...uniswapV4.pools] : undefined,
     plan(
       p: PrepareExecutionResponse,
       tokens: string[],

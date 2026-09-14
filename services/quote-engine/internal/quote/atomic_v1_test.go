@@ -271,6 +271,10 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 				return make([]byte, 32), nil
 			case hexutil.Encode(contractabi.ExecutorV2.Methods["balancerVault"].ID):
 				return make([]byte, 32), nil
+			case hexutil.Encode(contractabi.ExecutorV2.Methods["universalRouter"].ID),
+				hexutil.Encode(contractabi.ExecutorV2.Methods["permit2"].ID),
+				hexutil.Encode(contractabi.ExecutorV2.Methods["poolManager"].ID):
+				return make([]byte, 32), nil
 			case hexutil.Encode(contractabi.ExecutorV2.Methods["version"].ID):
 				return uintWord(2), nil
 			case "0x1698ee82":

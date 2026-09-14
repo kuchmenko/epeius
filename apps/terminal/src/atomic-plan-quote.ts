@@ -44,6 +44,28 @@ const positive = (value: Uint8Array | undefined, label: string) => {
 };
 const same = (a: Uint8Array | undefined, b: Uint8Array) =>
   !!a && bytesToHex(a) === bytesToHex(b);
+const v4PoolId = (pool: ReturnType<typeof atomicPool>) => {
+  if (pool.kind !== 5 || !pool.pool.key)
+    throw new Error("Atomic V1 V4 pool key is incomplete.");
+  const key = pool.pool.key;
+  const currency0 = requiredAddress(key.currency0, "V4 currency0");
+  const currency1 = requiredAddress(key.currency1, "V4 currency1");
+  const hooks = getAddress(exact(key.hooks, 20, "V4 hooks"));
+  if (BigInt(currency0) >= BigInt(currency1) || hooks !== zeroAddress)
+    throw new Error("Atomic V1 V4 pool key is not canonical.");
+  return keccak256(
+    encodeAbiParameters(
+      [
+        { type: "address" },
+        { type: "address" },
+        { type: "uint24" },
+        { type: "int24" },
+        { type: "address" },
+      ],
+      [currency0, currency1, key.feePips ?? 0, key.tickSpacing ?? 0, hooks],
+    ),
+  );
+};
 
 function rejectUnknown(value: unknown) {
   if (!value || typeof value !== "object" || value instanceof Uint8Array)
@@ -86,6 +108,15 @@ const atomicPool = (operation: PoolOperation) => {
       name: "Balancer V2",
       poolId: exact(operation.pool.value.poolId, 32, "Balancer pool ID"),
     };
+  if (operation.pool.case === "uniswapV4")
+    return {
+      pool: operation.pool.value,
+      kind: 5 as const,
+      name: "Uniswap V4",
+      selector: operation.pool.value.key?.feePips,
+      spacing: operation.pool.value.key?.tickSpacing,
+      selectorType: "uint24" as const,
+    };
   throw new Error("Atomic V1 quote uses an unsupported operation.");
 };
 
@@ -111,7 +142,13 @@ export function atomicCandidateId(candidate: PlanCandidate) {
           selector === undefined ||
           (kind === 3
             ? selector <= 0 || selector > 8_388_607
-            : selector < 0 || selector >= 1_000_000)
+            : kind === 5
+              ? selector < 0 ||
+                selector > 1_000_000 ||
+                identity.spacing === undefined ||
+                identity.spacing <= 0 ||
+                identity.spacing > 32_767
+              : selector < 0 || selector >= 1_000_000)
         )
           throw new Error("Atomic V1 quote has an invalid pool selector.");
       }
@@ -133,26 +170,51 @@ export function atomicCandidateId(candidate: PlanCandidate) {
                 ],
               ),
             )
-          : keccak256(
-              encodeAbiParameters(
-                [
-                  { type: "bytes32" },
-                  { type: "uint8" },
-                  { type: "address" },
-                  { type: "address" },
-                  { type: "address" },
-                  { type: identity.selectorType },
-                ],
-                [
-                  domain("Epeius.AtomicProvider.v1"),
-                  kind,
-                  requiredAddress(pool.factory, "factory"),
-                  requiredAddress(pool.router, "router"),
-                  requiredAddress(pool.pool, "pool"),
-                  selector ?? 0,
-                ],
-              ),
-            );
+          : kind === 5
+            ? keccak256(
+                encodeAbiParameters(
+                  [
+                    { type: "bytes32" },
+                    { type: "uint8" },
+                    { type: "address" },
+                    { type: "address" },
+                    { type: "address" },
+                    { type: "uint24" },
+                    { type: "int24" },
+                    { type: "address" },
+                  ],
+                  [
+                    domain("Epeius.AtomicProvider.v1"),
+                    5,
+                    requiredAddress(pool.poolManager, "V4 PoolManager"),
+                    requiredAddress(pool.key?.currency0, "V4 currency0"),
+                    requiredAddress(pool.key?.currency1, "V4 currency1"),
+                    selector ?? 0,
+                    identity.spacing ?? 0,
+                    getAddress(exact(pool.key?.hooks, 20, "V4 hooks")),
+                  ],
+                ),
+              )
+            : keccak256(
+                encodeAbiParameters(
+                  [
+                    { type: "bytes32" },
+                    { type: "uint8" },
+                    { type: "address" },
+                    { type: "address" },
+                    { type: "address" },
+                    { type: identity.selectorType },
+                  ],
+                  [
+                    domain("Epeius.AtomicProvider.v1"),
+                    kind,
+                    requiredAddress(pool.factory, "factory"),
+                    requiredAddress(pool.router, "router"),
+                    requiredAddress(pool.pool, "pool"),
+                    selector ?? 0,
+                  ],
+                ),
+              );
       operationHashes.push(
         keccak256(
           encodeAbiParameters(
@@ -309,13 +371,23 @@ export function validateAtomicPlanQuote(
       const identity = atomicPool(operation);
       const { pool, kind } = identity;
       const poolAddress =
-        kind === 4 ? identity.poolId : requiredAddress(pool.pool, "pool");
+        kind === 4
+          ? identity.poolId
+          : kind === 5
+            ? v4PoolId(identity)
+            : requiredAddress(pool.pool, "pool");
       const nextFactory =
-        kind === 4 ? "" : requiredAddress(pool.factory, "factory");
+        kind === 4
+          ? ""
+          : kind === 5
+            ? requiredAddress(pool.poolManager, "V4 PoolManager")
+            : requiredAddress(pool.factory, "factory");
       const nextRouter =
         kind === 4
           ? requiredAddress(pool.vault, "Balancer Vault")
-          : requiredAddress(pool.router, "router");
+          : kind === 5
+            ? requiredAddress(pool.poolManager, "V4 PoolManager")
+            : requiredAddress(pool.router, "router");
       if (
         (!factory && !router && providerKind === 0) ||
         (factory === nextFactory &&
@@ -330,11 +402,23 @@ export function validateAtomicPlanQuote(
       const output = exact(operation.tokenOut, 20, "operation output");
       if (input === output)
         throw new Error("Atomic V1 operation tokens must be distinct.");
-      const pair = input < output ? `${input}:${output}` : `${output}:${input}`;
+      const inputFirst = BigInt(input) < BigInt(output);
+      const pair = inputFirst ? `${input}:${output}` : `${output}:${input}`;
+      if (
+        kind === 5 &&
+        (!pool.key ||
+          !same(pool.key.currency0, hexToBytes(inputFirst ? input : output)) ||
+          !same(pool.key.currency1, hexToBytes(inputFirst ? output : input)))
+      )
+        throw new Error(
+          "Atomic V1 V4 currencies do not match operation tokens.",
+        );
       const physical =
         kind === 4
           ? `4:${identity.poolId}`
-          : `${kind}:${pair}:${identity.selector}`;
+          : kind === 5
+            ? `5:${poolAddress}`
+            : `${kind}:${pair}:${identity.selector}`;
       if (pools.has(poolAddress) || physicalPools.has(physical))
         throw new Error("Atomic V1 candidate reuses a pool.");
       pools.add(poolAddress);
@@ -347,7 +431,9 @@ export function validateAtomicPlanQuote(
       const identity = atomicPool(operation);
       return identity.kind === 4
         ? identity.poolId
-        : String(identity.selector).padStart(9, "0");
+        : identity.kind === 5
+          ? `${String(identity.selector).padStart(9, "0")}:${String(identity.spacing).padStart(6, "0")}:${v4PoolId(identity)}`
+          : String(identity.selector).padStart(9, "0");
     });
     const middle =
       operations.length === 2
@@ -409,7 +495,9 @@ export function formatAtomicPlanQuote(
       lines.push(
         kind === 4
           ? `Hop ${hopIndex + 1} (${name}, kind 4): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ID ${identity.poolId}; Vault ${requiredAddress(pool.vault, "Balancer Vault")}; output ${metadata ? amount(metadata, output) : `${output} atomic`}`
-          : `Hop ${hopIndex + 1} (${name}): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool.pool, 20, "pool")}; ${kind === 3 ? `tick spacing ${identity.selector}` : `fee ${identity.selector} pips`}; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
+          : kind === 5
+            ? `Hop ${hopIndex + 1} (${name}, kind 5): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; PoolManager ${requiredAddress(pool.poolManager, "V4 PoolManager")}; PoolId ${v4PoolId(identity)}; fee ${identity.selector} pips; tick spacing ${identity.spacing}; hooks ${exact(pool.key?.hooks, 20, "V4 hooks")}; output ${metadata ? amount(metadata, output) : `${output} atomic`}`
+            : `Hop ${hopIndex + 1} (${name}): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool.pool, 20, "pool")}; ${kind === 3 ? `tick spacing ${identity.selector}` : `fee ${identity.selector} pips`}; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
       );
     }
     const final = BigInt(exact(outputs.at(-1), 32, "final output"));

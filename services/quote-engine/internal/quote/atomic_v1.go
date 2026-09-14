@@ -17,6 +17,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -359,6 +360,11 @@ func atomicV1PlanID(terms *atomicv1.AcceptedPlanTerms) (common.Hash, error) {
 			var err error
 			if pool.balancer {
 				providerHash, err = atomicHash(abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}}, crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), pool.kind, common.BytesToAddress(pool.vault), common.BytesToHash(pool.poolID))
+			} else if pool.v4 {
+				providerHash, err = atomicHash(
+					abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint24")}, {Type: atomicABIType("int24")}, {Type: atomicABIType("address")}},
+					crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), pool.kind, common.BytesToAddress(pool.manager), common.BytesToAddress(pool.currency0), common.BytesToAddress(pool.currency1), pool.selector, pool.spacing, common.BytesToAddress(pool.hooks),
+				)
 			} else {
 				providerHash, err = atomicHash(
 					abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: selectorType}},
@@ -462,6 +468,20 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 			return errors.New("Atomic V1 executor linkage failed")
 		}
 	}
+	v4Deployment := chain.Deployments[e.UniswapV4Deployment]
+	v4Options, _ := v4Deployment.ProviderConfig.(uniswapv4.Options)
+	for name, expected := range map[string]string{
+		"universalRouter": v4Deployment.Router,
+		"permit2":         v4Options.Permit2,
+		"poolManager":     v4Options.PoolManager,
+	} {
+		method := contractabi.ExecutorV2.Methods[name]
+		data, callErr := reader.Call(ctx, target, method.ID, hash)
+		values, unpackErr := evm.Unpack(method, data)
+		if callErr != nil || unpackErr != nil || values[0].(common.Address) != common.HexToAddress(expected) {
+			return errors.New("Atomic V1 executor linkage failed")
+		}
+	}
 	balancerDeployment := chain.Deployments[e.BalancerDeployment]
 	balancerOptions, _ := balancerDeployment.ProviderConfig.(balancer.Options)
 	balancerVaultMethod := contractabi.ExecutorV2.Methods["balancerVault"]
@@ -511,6 +531,8 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 		deploymentID = e.SlipstreamDeployment
 	} else if route.Provider == "balancer-v2" {
 		deploymentID = e.BalancerDeployment
+	} else if route.Provider == "uniswap-v4" {
+		deploymentID = e.UniswapV4Deployment
 	}
 	deployment := chain.Deployments[deploymentID]
 	if deploymentID == "" || route.Provider != deployment.Kind {
@@ -518,6 +540,21 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 	}
 	if route.Provider == "balancer-v2" {
 		if len(route.Legs) != 1 || verifyAtomicBalancerPool(ctx, code, target, balancerOptions, common.HexToHash(route.Legs[0].Pool), common.HexToAddress(route.Legs[0].TokenIn), common.HexToAddress(route.Legs[0].TokenOut), hash) != nil {
+			return errors.New("Atomic V1 pool verification failed")
+		}
+		return nil
+	}
+	if route.Provider == "uniswap-v4" {
+		if len(route.Legs) != 1 || route.Legs[0].UniswapV4PoolKey == nil {
+			return errors.New("Atomic V1 pool verification failed")
+		}
+		quoter := v4Quoter{reader: reader, id: deploymentID, deployment: deployment, options: v4Options}
+		if _, ok := quoter.admit(&quotev1.RouteQuote{Provider: route.Provider, DeploymentId: deploymentID, Legs: route.Legs}); !ok || quoter.Verify(ctx, hash) != nil {
+			return errors.New("Atomic V1 pool verification failed")
+		}
+		key := route.Legs[0].UniswapV4PoolKey
+		initialized, err := (uniswapv4.Provider{Client: reader, StateView: common.HexToAddress(v4Options.StateView)}).PoolInitialized(ctx, uniswapv4.NewPoolKey(common.HexToAddress(key.Currency0), common.HexToAddress(key.Currency1), key.FeePips, key.TickSpacing, common.HexToAddress(key.Hooks)), hash)
+		if err != nil || !initialized {
 			return errors.New("Atomic V1 pool verification failed")
 		}
 		return nil

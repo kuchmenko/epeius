@@ -18,6 +18,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -46,10 +47,14 @@ func atomicV3Pool(operation *atomicv1.PoolOperation) (*atomicv1.V3Pool, uint8) {
 type atomicPoolIdentity struct {
 	factory, router, pool []byte
 	vault, poolID         []byte
+	manager, currency0    []byte
+	currency1, hooks      []byte
 	selector              *big.Int
+	spacing               *big.Int
 	kind                  uint8
 	slipstream            bool
 	balancer              bool
+	v4                    bool
 }
 
 func atomicPool(operation *atomicv1.PoolOperation) (atomicPoolIdentity, bool) {
@@ -62,6 +67,13 @@ func atomicPool(operation *atomicv1.PoolOperation) (atomicPoolIdentity, bool) {
 		}
 		if pool := operation.GetBalancerV2(); pool != nil {
 			return atomicPoolIdentity{vault: pool.Vault, poolID: pool.PoolId, kind: 4, balancer: true}, true
+		}
+		if pool := operation.GetUniswapV4(); pool != nil && pool.Key != nil && pool.Key.FeePips != nil && pool.Key.TickSpacing != nil {
+			return atomicPoolIdentity{
+				manager: pool.PoolManager, currency0: pool.Key.Currency0, currency1: pool.Key.Currency1,
+				hooks: pool.Key.Hooks, selector: new(big.Int).SetUint64(uint64(pool.Key.GetFeePips())),
+				spacing: big.NewInt(int64(pool.Key.GetTickSpacing())), kind: 5, v4: true,
+			}, true
 		}
 	}
 	return atomicPoolIdentity{}, false
@@ -100,6 +112,11 @@ func atomicCandidateHash(program *atomicv1.PlanProgram, block *atomicv1.PinnedBl
 			var err error
 			if pool.balancer {
 				providerHash, err = atomicHash(abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: bytes32Type}}, atomicCandidateProviderDomain, pool.kind, common.BytesToAddress(pool.vault), common.BytesToHash(pool.poolID))
+			} else if pool.v4 {
+				providerHash, err = atomicHash(
+					abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: addressType}, {Type: uint24Type}, {Type: int24Type}, {Type: addressType}},
+					atomicCandidateProviderDomain, pool.kind, common.BytesToAddress(pool.manager), common.BytesToAddress(pool.currency0), common.BytesToAddress(pool.currency1), pool.selector, pool.spacing, common.BytesToAddress(pool.hooks),
+				)
 			} else {
 				providerHash, err = atomicHash(
 					abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: addressType}, {Type: selectorType}},
@@ -146,6 +163,26 @@ func atomicCandidateHash(program *atomicv1.PlanProgram, block *atomicv1.PinnedBl
 		abi.Arguments{{Type: bytes32Type}, {Type: bytes32Type}, {Type: uint256Type}, {Type: bytes32Type}, {Type: bytes32ArrayType}},
 		atomicCandidateDomain, programHash, new(big.Int).SetBytes(block.Number), common.BytesToHash(block.Hash), quoteHashes,
 	)
+}
+
+func atomicV4Candidate(chainID, amount *big.Int, tokenIn, tokenOut common.Address, options uniswapv4.Options, pool uniswapv4.Pool, block *atomicv1.PinnedBlock, output *big.Int) (*atomicv1.PlanCandidate, error) {
+	operation := &atomicv1.PoolOperation{
+		TokenIn: tokenIn.Bytes(), TokenOut: tokenOut.Bytes(),
+		Pool: &atomicv1.PoolOperation_UniswapV4{UniswapV4: &atomicv1.V4Pool{
+			PoolManager: common.HexToAddress(options.PoolManager).Bytes(),
+			Key: &atomicv1.V4PoolKey{
+				Currency0: common.HexToAddress(pool.Currency0).Bytes(), Currency1: common.HexToAddress(pool.Currency1).Bytes(),
+				FeePips: proto.Uint32(pool.FeePips), TickSpacing: proto.Int32(pool.TickSpacing), Hooks: common.HexToAddress(pool.Hooks).Bytes(),
+			},
+		}},
+	}
+	program := &atomicv1.PlanProgram{FormatVersion: proto.Uint32(1), ChainId: uint256Bytes(chainID), TokenIn: tokenIn.Bytes(), TokenOut: tokenOut.Bytes(), AmountIn: uint256Bytes(amount), Branches: []*atomicv1.PlanBranch{{AmountIn: uint256Bytes(amount), Operations: []*atomicv1.PoolOperation{operation}}}}
+	quotes := []*atomicv1.BranchQuote{{OperationOutputs: [][]byte{uint256Bytes(output)}}}
+	hash, err := atomicCandidateHash(program, block, quotes)
+	if err != nil {
+		return nil, err
+	}
+	return &atomicv1.PlanCandidate{CandidateId: hash.Bytes(), Program: program, QuoteBlock: proto.CloneOf(block), BranchQuotes: quotes}, nil
 }
 
 func atomicBalancerCandidate(chainID, amount *big.Int, tokenIn, tokenOut, vault common.Address, poolID common.Hash, block *atomicv1.PinnedBlock, output *big.Int) (*atomicv1.PlanCandidate, error) {
@@ -273,7 +310,7 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 executor is not configured"))
 	}
 	deployments := map[string]config.Deployment{}
-	for id, kind := range map[string]string{executor.UniswapDeployment: "uniswap-v3", executor.PancakeDeployment: "pancake-v3", executor.SlipstreamDeployment: "aerodrome-slipstream", executor.BalancerDeployment: "balancer-v2"} {
+	for id, kind := range map[string]string{executor.UniswapDeployment: "uniswap-v3", executor.PancakeDeployment: "pancake-v3", executor.SlipstreamDeployment: "aerodrome-slipstream", executor.BalancerDeployment: "balancer-v2", executor.UniswapV4Deployment: "uniswap-v4"} {
 		deployment, ok := chain.Config.Deployments[id]
 		if id != "" && ok && deployment.Kind == kind && chain.DeploymentErrors[id] == "" {
 			deployments[id] = deployment
@@ -304,6 +341,7 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		deployment string
 		candidate  candidate
 		poolID     common.Hash
+		v4Pool     *uniswapv4.Pool
 	}
 	var deploymentIDs []string
 	for id := range deployments {
@@ -322,6 +360,25 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 			sort.Strings(pools)
 			for _, pool := range pools {
 				work = append(work, workItem{deployment: id, poolID: common.HexToHash(pool)})
+			}
+			continue
+		}
+		if deployment.Kind == "uniswap-v4" {
+			options, ok := deployment.ProviderConfig.(uniswapv4.Options)
+			if !ok {
+				continue
+			}
+			pools := append([]uniswapv4.Pool(nil), options.Pools...)
+			sort.Slice(pools, func(i, j int) bool {
+				left, _ := uniswapv4.PoolID(v4PoolKey(pools[i]))
+				right, _ := uniswapv4.PoolID(v4PoolKey(pools[j]))
+				return left.Hex() < right.Hex()
+			})
+			for i := range pools {
+				if (common.HexToAddress(pools[i].Currency0) == tokenIn && common.HexToAddress(pools[i].Currency1) == tokenOut) || (common.HexToAddress(pools[i].Currency1) == tokenIn && common.HexToAddress(pools[i].Currency0) == tokenOut) {
+					pool := pools[i]
+					work = append(work, workItem{deployment: id, v4Pool: &pool})
+				}
 			}
 			continue
 		}
@@ -387,6 +444,18 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 					if quoteErr == nil && output != nil {
 						outputs = []*big.Int{output}
 					}
+				} else if deployment.Kind == "uniswap-v4" {
+					options, _ := deployment.ProviderConfig.(uniswapv4.Options)
+					var route *quotev1.RouteQuote
+					route, quoteErr = (v4Quoter{reader: chain.Client, id: atomicWork.deployment, deployment: deployment, options: options}).quote(searchCtx, atomicWork.deployment, *atomicWork.v4Pool, tokenIn, tokenOut, amount, &quotev1.BlockContext{Number: snapshot.BlockNumber, Hash: snapshot.BlockHash})
+					if quoteErr == nil && route != nil {
+						output, ok := new(big.Int).SetString(route.AmountOutAtomic, 10)
+						if ok && output.Sign() > 0 && output.BitLen() <= 256 {
+							outputs = []*big.Int{output}
+						} else {
+							quoteErr = errors.New("invalid Uniswap V4 output")
+						}
+					}
 				} else if deployment.Kind == "aerodrome-slipstream" {
 					check := originChecks[atomicWork.deployment]
 					check.once.Do(func() {
@@ -408,6 +477,9 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 				if deployment.Kind == "balancer-v2" && quoteErr == nil && len(outputs) == 1 {
 					options, _ := deployment.ProviderConfig.(balancer.Options)
 					value, _ = atomicBalancerCandidate(chainID, amount, tokenIn, tokenOut, common.HexToAddress(options.Vault), atomicWork.poolID, block, outputs[0])
+				} else if deployment.Kind == "uniswap-v4" && quoteErr == nil && len(outputs) == 1 {
+					options, _ := deployment.ProviderConfig.(uniswapv4.Options)
+					value, _ = atomicV4Candidate(chainID, amount, tokenIn, tokenOut, options, *atomicWork.v4Pool, block, outputs[0])
 				} else if quoteErr == nil && len(legs) == expectedLegs {
 					pools := make([]common.Address, len(legs))
 					for i, leg := range legs {

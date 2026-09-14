@@ -59,6 +59,16 @@ export type TrustedExecution = {
     balancerVault?: string;
     balancerPools?: string[];
     balancerPoolsHash?: string;
+    universalRouter?: string;
+    permit2?: string;
+    poolManager?: string;
+    uniswapV4Pools?: Array<{
+      currency0: string;
+      currency1: string;
+      feePips: number;
+      tickSpacing: number;
+      hooks: string;
+    }>;
   };
 };
 

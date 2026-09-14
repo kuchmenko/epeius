@@ -23,6 +23,21 @@
         "internalType": "address"
       },
       {
+        "name": "universalRouter_",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "permit2_",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "poolManager_",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
         "name": "balancerPoolIds_",
         "type": "bytes32[]",
         "internalType": "bytes32[]"
@@ -189,6 +204,32 @@
   },
   {
     "type": "function",
+    "name": "permit2",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "poolManager",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "slipstreamRouter",
     "inputs": [],
     "outputs": [
@@ -203,6 +244,19 @@
   {
     "type": "function",
     "name": "uniswapRouter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "universalRouter",
     "inputs": [],
     "outputs": [
       {
@@ -404,6 +458,32 @@
   },
   {
     "type": "error",
+    "name": "AllowanceMismatch",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "spender",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expected",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "actual",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "AmountOutOfRange",
     "inputs": [
       {
@@ -561,6 +641,48 @@
   },
   {
     "type": "error",
+    "name": "PermissionCallFailed",
+    "inputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Permit2Mismatch",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expectedAmount",
+        "type": "uint160",
+        "internalType": "uint160"
+      },
+      {
+        "name": "actualAmount",
+        "type": "uint160",
+        "internalType": "uint160"
+      },
+      {
+        "name": "expectedExpiration",
+        "type": "uint48",
+        "internalType": "uint48"
+      },
+      {
+        "name": "actualExpiration",
+        "type": "uint48",
+        "internalType": "uint48"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "PlanMinimumNotMet",
     "inputs": [
       {
@@ -620,6 +742,22 @@
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TokenCallFailed",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ]
   },

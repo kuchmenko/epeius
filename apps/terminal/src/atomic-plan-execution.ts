@@ -1,6 +1,5 @@
 import { create, equals, toBinary } from "@bufbuild/protobuf";
 import {
-  type Address,
   bytesToHex,
   encodeFunctionData,
   erc20Abi,
@@ -10,6 +9,7 @@ import {
   padHex,
   size,
   toHex,
+  zeroAddress,
   zeroHash,
 } from "viem";
 import {
@@ -68,6 +68,16 @@ export type AtomicExecutorIdentity = {
   balancerVault?: string;
   balancerPools?: string[];
   balancerPoolsHash?: string;
+  universalRouter?: string;
+  permit2?: string;
+  poolManager?: string;
+  uniswapV4Pools?: Array<{
+    currency0: string;
+    currency1: string;
+    feePips: number;
+    tickSpacing: number;
+    hooks: string;
+  }>;
 };
 
 const operationPool = (operation: PoolOperation) => {
@@ -100,6 +110,13 @@ const operationPool = (operation: PoolOperation) => {
       tickSpacing: 0,
       poolId: exact(operation.pool.value.poolId, 32, "Balancer pool ID"),
     };
+  if (operation.pool.case === "uniswapV4")
+    return {
+      pool: operation.pool.value,
+      kind: 5 as const,
+      fee: operation.pool.value.key?.feePips,
+      tickSpacing: operation.pool.value.key?.tickSpacing,
+    };
   throw new Error("Atomic V1 operation is unsupported.");
 };
 
@@ -119,10 +136,11 @@ export function acceptAtomicCandidate(
     throw new Error("Atomic V1 candidate is incomplete.");
   const branch = program.branches[0];
   const isBalancer = branch.operations[0]?.pool.case === "balancerV2";
+  const isV4 = branch.operations[0]?.pool.case === "uniswapV4";
   if (
     branch.operations.length < 1 ||
     branch.operations.length > 2 ||
-    (isBalancer && branch.operations.length !== 1) ||
+    ((isBalancer || isV4) && branch.operations.length !== 1) ||
     quote.operationOutputs.length !== branch.operations.length
   )
     throw new Error("Atomic V1 candidate path is unsupported.");
@@ -136,7 +154,7 @@ export function acceptAtomicCandidate(
   const localExecutor = getAddress(executor.address);
   const first = operationPool(branch.operations[0]);
   const localFactory =
-    first.kind === 4
+    first.kind === 4 || first.kind === 5
       ? undefined
       : getAddress(
           first.kind === 1
@@ -146,7 +164,7 @@ export function acceptAtomicCandidate(
               : (executor.slipstreamFactory ?? ""),
         );
   const localRouter =
-    first.kind === 4
+    first.kind === 4 || first.kind === 5
       ? undefined
       : getAddress(
           first.kind === 1
@@ -167,12 +185,44 @@ export function acceptAtomicCandidate(
             getAddress(executor.balancerVault ?? "") ||
           poolId === zeroHash ||
           !executor.balancerPools?.includes(poolId)
-        : kind === 3
-          ? tickSpacing === undefined ||
+        : kind === 5
+          ? !pool.key ||
+            fee === undefined ||
+            fee > 1_000_000 ||
+            tickSpacing === undefined ||
             tickSpacing <= 0 ||
-            tickSpacing > 8_388_607
-          : fee === undefined || fee >= 1_000_000) ||
+            tickSpacing > 32_767 ||
+            getAddress(exact(pool.poolManager, 20, "V4 PoolManager")) !==
+              getAddress(executor.poolManager ?? "") ||
+            getAddress(exact(pool.key.hooks, 20, "V4 hooks")) !== zeroAddress ||
+            BigInt(exact(pool.key.currency0, 20, "V4 currency0")) >=
+              BigInt(exact(pool.key.currency1, 20, "V4 currency1")) ||
+            ![
+              getAddress(exact(operation.tokenIn, 20, "operation input")),
+              getAddress(exact(operation.tokenOut, 20, "operation output")),
+            ].every((token) =>
+              [
+                getAddress(exact(pool.key?.currency0, 20, "V4 currency0")),
+                getAddress(exact(pool.key?.currency1, 20, "V4 currency1")),
+              ].includes(token),
+            ) ||
+            !executor.uniswapV4Pools?.some(
+              (candidate) =>
+                getAddress(candidate.currency0) ===
+                  getAddress(exact(pool.key?.currency0, 20, "V4 currency0")) &&
+                getAddress(candidate.currency1) ===
+                  getAddress(exact(pool.key?.currency1, 20, "V4 currency1")) &&
+                candidate.feePips === fee &&
+                candidate.tickSpacing === tickSpacing &&
+                getAddress(candidate.hooks) === zeroAddress,
+            )
+          : kind === 3
+            ? tickSpacing === undefined ||
+              tickSpacing <= 0 ||
+              tickSpacing > 8_388_607
+            : fee === undefined || fee >= 1_000_000) ||
       (kind !== 4 &&
+        kind !== 5 &&
         (getAddress(exact(pool.factory, 20, "factory")) !== localFactory ||
           getAddress(exact(pool.router, 20, "router")) !== localRouter))
     )
@@ -347,7 +397,7 @@ export function validateAtomicPlanPreparation(
     outputs,
     receipt: receiptObligations(
       expected,
-      executorAddress,
+      executor,
       executorPlanHash,
       fingerprint,
     ),
@@ -428,10 +478,11 @@ function wireTransaction(
 
 function receiptObligations(
   expected: ReturnType<typeof acceptAtomicCandidate>,
-  executor: Address,
+  executorIdentity: AtomicExecutorIdentity,
   planHash: `0x${string}`,
   fingerprint: `0x${string}`,
 ): ReceiptObligations {
+  const executor = getAddress(executorIdentity.address);
   const program = expected.terms.program;
   if (!program) throw new Error("Atomic V1 accepted program is absent.");
   const operations = program.branches[0].operations;
@@ -439,7 +490,9 @@ function receiptObligations(
   const endpoint = getAddress(
     first.kind === 4
       ? exact(first.pool.vault, 20, "Balancer Vault")
-      : exact(first.pool.router, 20, "router"),
+      : first.kind === 5
+        ? (executorIdentity.universalRouter ?? "")
+        : exact(first.pool.router, 20, "router"),
   );
   const tokenIn = exact(program.tokenIn, 20, "input token");
   const tokenOut = exact(program.tokenOut, 20, "output token");
@@ -460,7 +513,14 @@ function receiptObligations(
       ),
     ].flatMap((token) => [
       { token, owner: executor },
-      ...(first.kind === 4 ? [] : [{ token, owner: endpoint }]),
+      ...(first.kind === 4
+        ? []
+        : [
+            { token, owner: endpoint },
+            ...(first.kind === 5 && executorIdentity.permit2
+              ? [{ token, owner: getAddress(executorIdentity.permit2) }]
+              : []),
+          ]),
     ]),
     atomicPlan: {
       executor,

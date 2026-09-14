@@ -280,7 +280,14 @@ contract ExecutorV2Test {
         pancakeRouter = new ExecutorV2Router();
         slipstreamRouter = new ExecutorV2Router();
         executor = new ExecutorV2(
-            address(router), address(pancakeRouter), address(slipstreamRouter), address(0), new bytes32[](0)
+            address(router),
+            address(pancakeRouter),
+            address(slipstreamRouter),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            new bytes32[](0)
         );
         tokenIn.mint(address(this), 10_000);
         tokenIn.approve(address(executor), type(uint256).max);
@@ -366,7 +373,9 @@ contract ExecutorV2Test {
         vault.setPool(poolId, pool);
         bytes32[] memory poolIds = new bytes32[](1);
         poolIds[0] = poolId;
-        result = new ExecutorV2(address(0), address(0), address(0), address(vault), poolIds);
+        result = new ExecutorV2(
+            address(0), address(0), address(0), address(vault), address(0), address(0), address(0), poolIds
+        );
         tokenIn.approve(address(result), type(uint256).max);
         tokenOut.mint(address(vault), 10_000);
     }
@@ -693,8 +702,16 @@ contract ExecutorV2Test {
         vm.expectPartialRevert(ExecutorV2.AmountOutOfRange.selector);
         execute(pancakePlan(tooLarge, 1, 1));
 
-        ExecutorV2 pancakeOnly =
-            new ExecutorV2(address(0), address(pancakeRouter), address(0), address(0), new bytes32[](0));
+        ExecutorV2 pancakeOnly = new ExecutorV2(
+            address(0),
+            address(pancakeRouter),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            new bytes32[](0)
+        );
         tokenIn.approve(address(pancakeOnly), 41);
         uint256 before = tokenIn.balanceOf(address(this));
         vm.expectPartialRevert(ExecutorV2.UnsupportedKind.selector);
@@ -1039,19 +1056,50 @@ contract ExecutorV2Test {
 
     function testConstructorRejectsAddressWithoutCode() public {
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0xBEEF), address(0), address(0), address(0), new bytes32[](0));
+        new ExecutorV2(
+            address(0xBEEF), address(0), address(0), address(0), address(0), address(0), address(0), new bytes32[](0)
+        );
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(router), address(0xBEEF), address(0), address(0), new bytes32[](0));
+        new ExecutorV2(
+            address(router),
+            address(0xBEEF),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            new bytes32[](0)
+        );
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0), address(0), address(0), new bytes32[](0));
+        new ExecutorV2(
+            address(0), address(0), address(0), address(0), address(0), address(0), address(0), new bytes32[](0)
+        );
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(router), address(router), address(0), address(0), new bytes32[](0));
+        new ExecutorV2(
+            address(router),
+            address(router),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            new bytes32[](0)
+        );
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(router), address(pancakeRouter), address(router), address(0), new bytes32[](0));
+        new ExecutorV2(
+            address(router),
+            address(pancakeRouter),
+            address(router),
+            address(0),
+            address(0),
+            address(0),
+            address(0),
+            new bytes32[](0)
+        );
     }
 
     function testBalancerConstructorMembershipHashAndDeploymentValidation() public {
@@ -1065,27 +1113,37 @@ contract ExecutorV2Test {
         bytes32[] memory ids = new bytes32[](2);
         ids[0] = firstId;
         ids[1] = secondId;
-        ExecutorV2 deployed = new ExecutorV2(address(0), address(0), address(0), address(vault), ids);
+        ExecutorV2 deployed =
+            new ExecutorV2(address(0), address(0), address(0), address(vault), address(0), address(0), address(0), ids);
         require(deployed.balancerVault() == address(vault), "vault");
         require(deployed.balancerPoolsHash() == keccak256(abi.encode(ids)), "hash");
         require(deployed.isBalancerPoolAllowed(firstId) && deployed.isBalancerPoolAllowed(secondId), "membership");
         require(!deployed.isBalancerPoolAllowed(bytes32(uint256(3))), "unexpected membership");
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(router), address(0), address(0), address(vault), new bytes32[](0));
+        new ExecutorV2(
+            address(router),
+            address(0),
+            address(0),
+            address(vault),
+            address(0),
+            address(0),
+            address(0),
+            new bytes32[](0)
+        );
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(router), address(0), address(0), address(0), ids);
+        new ExecutorV2(address(router), address(0), address(0), address(0), address(0), address(0), address(0), ids);
 
         ids[0] = bytes32(0);
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0), address(0), address(vault), ids);
+        new ExecutorV2(address(0), address(0), address(0), address(vault), address(0), address(0), address(0), ids);
         ids[0] = secondId;
         ids[1] = firstId;
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0), address(0), address(vault), ids);
+        new ExecutorV2(address(0), address(0), address(0), address(vault), address(0), address(0), address(0), ids);
         ids[1] = secondId;
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0), address(0), address(vault), ids);
+        new ExecutorV2(address(0), address(0), address(0), address(vault), address(0), address(0), address(0), ids);
     }
 
     function testBalancerConstructorRejectsMalformedMissingAndMismatchedPools() public {
@@ -1094,20 +1152,20 @@ contract ExecutorV2Test {
         ids[0] = BALANCER_POOL_ID;
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0), address(0), address(vault), ids);
+        new ExecutorV2(address(0), address(0), address(0), address(vault), address(0), address(0), address(0), ids);
 
         vault.setMalformedGetPool(true);
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0), address(0), address(vault), ids);
+        new ExecutorV2(address(0), address(0), address(0), address(vault), address(0), address(0), address(0), ids);
         vault.setMalformedGetPool(false);
 
         vault.setPool(BALANCER_POOL_ID, address(new ExecutorV2MalformedBalancerPool()));
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0), address(0), address(vault), ids);
+        new ExecutorV2(address(0), address(0), address(0), address(vault), address(0), address(0), address(0), ids);
 
         vault.setPool(BALANCER_POOL_ID, address(new ExecutorV2BalancerPool(bytes32(uint256(1)))));
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0), address(0), address(vault), ids);
+        new ExecutorV2(address(0), address(0), address(0), address(vault), address(0), address(0), address(0), ids);
     }
 
     function testBalancerExactSwapUsesMeasuredOutputAndPreservesDust() public {

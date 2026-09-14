@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"os"
 	"slices"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -38,8 +40,14 @@ type atomicCandidateFixture struct {
 	Router            string   `json:"router"`
 	Vault             string   `json:"vault"`
 	PoolID            string   `json:"poolId"`
+	PoolManager       string   `json:"poolManager"`
+	Currency0         string   `json:"currency0"`
+	Currency1         string   `json:"currency1"`
+	Hooks             string   `json:"hooks"`
 	Pools             []string `json:"pools"`
 	Fees              []uint32 `json:"fees"`
+	FeePips           uint32   `json:"feePips"`
+	TickSpacing       int32    `json:"tickSpacing"`
 	TickSpacings      []int32  `json:"tickSpacings"`
 	OperationOutputs  []string `json:"operationOutputs"`
 	QuoteBlockNumber  string   `json:"quoteBlockNumber"`
@@ -58,6 +66,19 @@ type atomicCandidateFixture struct {
 	CalldataHash      string   `json:"executorCalldataHash"`
 	ProviderHashes    []string `json:"providerHashes"`
 	OperationHashes   []string `json:"operationHashes"`
+}
+
+func loadUniswapV4AtomicFixture(t *testing.T) atomicCandidateFixture {
+	t.Helper()
+	data, err := os.ReadFile("../../../../contracts/fixtures/atomic-v1-uniswap-v4.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result atomicCandidateFixture
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func loadBalancerAtomicFixture(t *testing.T) atomicCandidateFixture {
@@ -133,6 +154,45 @@ func TestAtomicCandidateHashMatchesIndependentCastVector(t *testing.T) {
 	}
 	if common.BytesToHash(value.CandidateId).Hex() != f.CandidateID || len(value.BranchQuotes) != 1 || len(value.BranchQuotes[0].OperationOutputs) != 2 || new(big.Int).SetBytes(value.BranchQuotes[0].OperationOutputs[0]).String() != f.OperationOutputs[0] {
 		t.Fatalf("candidate does not match Cast vector: %+v", value)
+	}
+}
+
+func TestUniswapV4AtomicIdentitiesMatchIndependentCastVector(t *testing.T) {
+	f := loadUniswapV4AtomicFixture(t)
+	chainID, _ := new(big.Int).SetString(f.ChainID, 10)
+	amount, _ := new(big.Int).SetString(f.AmountIn, 10)
+	minimum, _ := new(big.Int).SetString(f.Minimum, 10)
+	blockNumber, _ := new(big.Int).SetString(f.QuoteBlockNumber, 10)
+	expires, _ := new(big.Int).SetString(f.ExpiresAtUnix, 10)
+	deadline, _ := new(big.Int).SetString(f.DeadlineUnix, 10)
+	output, _ := new(big.Int).SetString(f.OperationOutputs[0], 10)
+	options := uniswapv4.Options{PoolManager: f.PoolManager, Pools: []uniswapv4.Pool{{Currency0: f.Currency0, Currency1: f.Currency1, FeePips: f.FeePips, TickSpacing: f.TickSpacing, Hooks: f.Hooks}}}
+	block := &atomicv1.PinnedBlock{Number: uint256Bytes(blockNumber), Hash: common.HexToHash(f.QuoteBlockHash).Bytes()}
+	candidate, err := atomicV4Candidate(chainID, amount, common.HexToAddress(f.TokenIn), common.HexToAddress(f.TokenOut), options, options.Pools[0], block, output)
+	if err != nil || common.BytesToHash(candidate.CandidateId).Hex() != f.CandidateID || candidate.Program.Branches[0].Operations[0].GetUniswapV4() == nil {
+		t.Fatalf("Uniswap V4 candidate mismatch: %+v %v", candidate, err)
+	}
+	terms := &atomicv1.AcceptedPlanTerms{
+		Program: candidate.Program, Executor: &atomicv1.ExecutorIdentity{Address: common.HexToAddress(f.Executor).Bytes(), Version: proto.Uint32(2), RuntimeCodeHash: common.HexToHash(f.RuntimeCodeHash).Bytes()}, Signer: common.HexToAddress(f.Signer).Bytes(), Recipient: common.HexToAddress(f.Signer).Bytes(), BranchMinima: [][]byte{uint256Bytes(minimum)}, AmountOutMinimum: uint256Bytes(minimum), QuoteBlock: block, ExpiresAtUnix: uint256Bytes(expires), DeadlineUnix: uint256Bytes(deadline),
+	}
+	planID, planErr := atomicV1PlanID(terms)
+	operation := atomicV1Operation{Kind: 5, TokenOut: common.HexToAddress(f.TokenOut), Fee: new(big.Int).SetUint64(uint64(f.FeePips)), TickSpacing: big.NewInt(int64(f.TickSpacing))}
+	plan := atomicV1ExecutorPlan{TokenIn: common.HexToAddress(f.TokenIn), TokenOut: common.HexToAddress(f.TokenOut), AmountIn: amount, MinAmountOut: minimum, Deadline: deadline, Branches: []atomicV1Branch{{AmountIn: amount, MinAmountOut: minimum, Operations: []atomicV1Operation{operation}}}}
+	executorHash, hashErr := atomicV1ExecutorPlanHash(f.ChainID, common.HexToAddress(f.Executor), common.HexToAddress(f.Signer), plan)
+	data, packErr := contractabi.ExecutorV2.Pack("execute", plan)
+	tx := &quotev1.UnsignedTransaction{ChainId: f.ChainID, From: f.Signer, To: f.Executor, ValueAtomic: "0", Data: hexutil.Encode(data), GasLimit: f.GasLimit}
+	fingerprint, fingerprintErr := atomicV1TransactionFingerprint(planID, tx)
+	if planErr != nil || hashErr != nil || packErr != nil || fingerprintErr != nil || planID.Hex() != f.PlanID || executorHash.Hex() != f.ExecutorPlanHash || crypto.Keccak256Hash(data).Hex() != f.CalldataHash || fingerprint.Hex() != f.Fingerprint {
+		t.Fatalf("Uniswap V4 identities differ: plan=%s executor=%s calldata=%s fingerprint=%s", planID.Hex(), executorHash.Hex(), crypto.Keccak256Hash(data).Hex(), fingerprint.Hex())
+	}
+	options.Permit2 = common.HexToAddress("0x7777777777777777777777777777777777777777").Hex()
+	configured := Chain{ChainID: f.ChainID, Config: config.Chain{
+		AtomicExecutor: &config.AtomicExecutor{Address: f.Executor, RuntimeCodeHash: f.RuntimeCodeHash, UniswapV4Deployment: "v4"},
+		Deployments:    map[string]config.Deployment{"v4": {Kind: "uniswap-v4", Router: common.HexToAddress("0x8888888888888888888888888888888888888888").Hex(), ProviderConfig: options}},
+	}}
+	validated, validationErr := validateAcceptedAtomicTerms(configured, terms, planID.Bytes(), time.Unix(1_999_999_000, 0))
+	if validationErr != nil || crypto.Keccak256Hash(common.FromHex(validated.transaction.Data)).Hex() != f.CalldataHash || len(validated.checks.ClearAllowances) != 1 || validated.checks.ClearAllowances[0].Spender != options.Permit2 {
+		t.Fatalf("Uniswap V4 accepted terms were not reconstructed exactly: %+v %v", validated, validationErr)
 	}
 }
 
@@ -385,6 +445,67 @@ func TestAtomicPlanQuoteBalancerUsesExecutorSenderAndCanonicalPoolOrder(t *testi
 		pool := response.Msg.Candidates[i].Program.Branches[0].Operations[0].GetBalancerV2()
 		if pool == nil || common.BytesToHash(pool.PoolId) != want || response.Msg.Candidates[i].NetworkCostOut != nil {
 			t.Fatal("Balancer candidates escaped canonical order")
+		}
+	}
+}
+
+func TestAtomicPlanQuoteReturnsCanonicalDirectUniswapV4Candidates(t *testing.T) {
+	stateView := common.HexToAddress("0x5555555555555555555555555555555555555555")
+	quoter := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	manager := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	pools := []uniswapv4.Pool{
+		{Currency0: testWETH.Hex(), Currency1: testUSDC.Hex(), FeePips: 3000, TickSpacing: 60, Hooks: common.Address{}.Hex()},
+		{Currency0: testWETH.Hex(), Currency1: testUSDC.Hex(), FeePips: 500, TickSpacing: 10, Hooks: common.Address{}.Hex()},
+	}
+	cfg := atomicQuoteConfig(common.HexToAddress("0x2222222222222222222222222222222222222222"))
+	cfg.Deployments = map[string]config.Deployment{"v4": {Kind: "uniswap-v4", Quoter: quoter.Hex(), Router: common.HexToAddress("0x8888888888888888888888888888888888888888").Hex(), ProviderConfig: uniswapv4.Options{PoolManager: manager.Hex(), StateView: stateView.Hex(), Pools: pools}}}
+	cfg.AtomicExecutor = &config.AtomicExecutor{Address: common.HexToAddress("0x9999999999999999999999999999999999999999").Hex(), RuntimeCodeHash: common.HexToHash("0x11").Hex(), UniswapV4Deployment: "v4"}
+	reader := readerFake{snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil }, call: func(_ context.Context, to common.Address, data []byte, hash common.Hash) ([]byte, error) {
+		if hash != common.HexToHash(snapshot().BlockHash) {
+			t.Fatal("V4 quote escaped pinned block")
+		}
+		if to == stateView {
+			return contractabi.UniswapV4StateView.Methods["getSlot0"].Outputs.Pack(big.NewInt(1), big.NewInt(0), big.NewInt(0), big.NewInt(0))
+		}
+		if to != quoter {
+			return nil, errors.New("unexpected V4 target")
+		}
+		values, err := contractabi.UniswapV4Quoter.Methods["quoteExactInputSingle"].Inputs.Unpack(data[4:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		params := values[0].(struct {
+			PoolKey struct {
+				Currency0   common.Address `json:"currency0"`
+				Currency1   common.Address `json:"currency1"`
+				Fee         *big.Int       `json:"fee"`
+				TickSpacing *big.Int       `json:"tickSpacing"`
+				Hooks       common.Address `json:"hooks"`
+			} `json:"poolKey"`
+			ZeroForOne  bool     `json:"zeroForOne"`
+			ExactAmount *big.Int `json:"exactAmount"`
+			HookData    []byte   `json:"hookData"`
+		})
+		if params.PoolKey.Fee.Uint64() == 500 {
+			time.Sleep(3 * time.Millisecond)
+		}
+		return contractabi.UniswapV4Quoter.Methods["quoteExactInputSingle"].Outputs.Pack(new(big.Int).Add(params.ExactAmount, params.PoolKey.Fee), big.NewInt(1))
+	}}
+	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: cfg}}, QuoteConcurrency: 2}).GetPlanQuote(t.Context(), connect.NewRequest(atomicQuoteRequest("8453", testWETH, testUSDC, "37")))
+	if err != nil || len(response.Msg.Candidates) != 2 {
+		t.Fatalf("unexpected V4 candidates: %+v %v", response, err)
+	}
+	want := append([]uniswapv4.Pool(nil), pools...)
+	sort.Slice(want, func(i, j int) bool {
+		left, _ := uniswapv4.PoolID(v4PoolKey(want[i]))
+		right, _ := uniswapv4.PoolID(v4PoolKey(want[j]))
+		return left.Hex() < right.Hex()
+	})
+	for i, candidate := range response.Msg.Candidates {
+		operation := candidate.Program.Branches[0].Operations[0]
+		pool := operation.GetUniswapV4()
+		if pool == nil || len(candidate.Program.Branches[0].Operations) != 1 || pool.GetKey().GetFeePips() != want[i].FeePips || len(candidate.BranchQuotes[0].OperationOutputs) != 1 || candidate.NetworkCostOut != nil {
+			t.Fatalf("V4 candidate %d escaped canonical direct policy", i)
 		}
 	}
 }

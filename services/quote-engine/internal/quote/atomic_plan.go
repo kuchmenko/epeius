@@ -17,6 +17,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/evm"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -160,6 +161,8 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 			deploymentID, expectedKind = executor.SlipstreamDeployment, "aerodrome-slipstream"
 		} else if kind == 4 {
 			deploymentID, expectedKind = executor.BalancerDeployment, "balancer-v2"
+		} else if kind == 5 {
+			deploymentID, expectedKind = executor.UniswapV4Deployment, "uniswap-v4"
 		}
 		configured, ok := chain.Config.Deployments[deploymentID]
 		if deploymentID == "" || !ok || configured.Kind != expectedKind || chain.DeploymentErrors[deploymentID] != "" || (providerKind != 0 && providerKind != kind) {
@@ -175,13 +178,27 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 				member = member || common.HexToHash(value) == common.BytesToHash(pool.poolID)
 			}
 			invalidPool = !optionsOK || len(branch.Operations) != 1 || len(pool.vault) != 20 || len(pool.poolID) != 32 || common.BytesToAddress(pool.vault) == (common.Address{}) || common.BytesToHash(pool.poolID) == (common.Hash{}) || common.BytesToAddress(pool.vault) != common.HexToAddress(options.Vault) || !member
+		} else if kind == 5 {
+			options, optionsOK := deployment.ProviderConfig.(uniswapv4.Options)
+			currency0, currency1 := common.BytesToAddress(pool.currency0), common.BytesToAddress(pool.currency1)
+			invalidSelector = invalidSelector || pool.selector.Sign() < 0 || pool.selector.Cmp(big.NewInt(1_000_000)) > 0 || pool.spacing == nil || pool.spacing.Sign() <= 0 || pool.spacing.Cmp(big.NewInt(32_767)) > 0
+			invalidPool = !optionsOK || len(branch.Operations) != 1 || len(pool.manager) != 20 || len(pool.currency0) != 20 || len(pool.currency1) != 20 || len(pool.hooks) != 20 || common.BytesToAddress(pool.manager) != common.HexToAddress(options.PoolManager) || common.BytesToAddress(pool.hooks) != (common.Address{}) || currency0 == (common.Address{}) || currency1 == (common.Address{}) || bytes.Compare(pool.currency0, pool.currency1) >= 0 || !((common.BytesToAddress(operation.TokenIn) == currency0 && common.BytesToAddress(operation.TokenOut) == currency1) || (common.BytesToAddress(operation.TokenIn) == currency1 && common.BytesToAddress(operation.TokenOut) == currency0))
+			configuredPool := false
+			for _, value := range options.Pools {
+				configuredPool = configuredPool || (common.HexToAddress(value.Currency0) == currency0 && common.HexToAddress(value.Currency1) == currency1 && value.FeePips == uint32(pool.selector.Uint64()) && value.TickSpacing == int32(pool.spacing.Int64()) && common.HexToAddress(value.Hooks) == (common.Address{}))
+			}
+			invalidPool = invalidPool || !configuredPool
 		}
 		if operation == nil || len(operation.TokenIn) != 20 || len(operation.TokenOut) != 20 || invalidSelector || invalidPool || common.BytesToAddress(operation.TokenIn) != current || common.BytesToAddress(operation.TokenIn) == common.BytesToAddress(operation.TokenOut) {
 			return validatedAtomicTerms{}, errors.New("invalid operation")
 		}
 		fee, spacing := uint32(0), int32(0)
-		if kind == 3 {
+		if kind == 3 || kind == 5 {
 			spacing = int32(pool.selector.Int64())
+			if kind == 5 {
+				fee = uint32(pool.selector.Uint64())
+				spacing = int32(pool.spacing.Int64())
+			}
 		} else if kind < 3 {
 			fee = uint32(pool.selector.Uint64())
 		}
@@ -189,6 +206,9 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 		address := common.BytesToAddress(pool.pool)
 		if kind == 4 {
 			key, address = string(pool.poolID), balancerPoolAddress(common.BytesToHash(pool.poolID))
+		} else if kind == 5 {
+			poolID, _ := uniswapv4.PoolID(uniswapv4.NewPoolKey(common.BytesToAddress(pool.currency0), common.BytesToAddress(pool.currency1), fee, spacing, common.Address{}))
+			key, address = string(poolID[:]), common.BytesToAddress(pool.manager)
 		}
 		if seenPools[address] || seenKeys[key] {
 			return validatedAtomicTerms{}, errors.New("repeated pool")
@@ -227,6 +247,9 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 		if providerKind == 4 {
 			options, _ := deployment.ProviderConfig.(balancer.Options)
 			spender = common.HexToAddress(options.Vault)
+		} else if providerKind == 5 {
+			options, _ := deployment.ProviderConfig.(uniswapv4.Options)
+			spender = common.HexToAddress(options.Permit2)
 		}
 		for _, token := range []common.Address{common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut)} {
 			if !seenTokens[token] {
@@ -234,6 +257,9 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 				checks.Preserve = append(checks.Preserve, BalanceProbe{Token: token.Hex(), Owner: executorAddress.Hex()})
 				if providerKind != 4 {
 					checks.Preserve = append(checks.Preserve, BalanceProbe{Token: token.Hex(), Owner: spender.Hex()})
+					if providerKind == 5 {
+						checks.Preserve = append(checks.Preserve, BalanceProbe{Token: token.Hex(), Owner: deployment.Router})
+					}
 				}
 			}
 		}
@@ -382,6 +408,8 @@ func verifyAtomicV1Program(ctx context.Context, reader Reader, chain config.Chai
 			operationProvider = "aerodrome-slipstream"
 		} else if pool.kind == 4 {
 			operationProvider = "balancer-v2"
+		} else if pool.kind == 5 {
+			operationProvider = "uniswap-v4"
 		}
 		if provider != "" && provider != operationProvider {
 			return errors.New("mixed Atomic V1 providers")
@@ -390,6 +418,14 @@ func verifyAtomicV1Program(ctx context.Context, reader Reader, chain config.Chai
 		legs[i] = &quotev1.RouteLeg{TokenIn: common.BytesToAddress(operation.TokenIn).Hex(), TokenOut: common.BytesToAddress(operation.TokenOut).Hex(), Pool: common.BytesToAddress(pool.pool).Hex()}
 		if pool.kind == 4 {
 			legs[i].Pool = common.BytesToHash(pool.poolID).Hex()
+			continue
+		} else if pool.kind == 5 {
+			poolID, err := uniswapv4.PoolID(uniswapv4.NewPoolKey(common.BytesToAddress(pool.currency0), common.BytesToAddress(pool.currency1), uint32(pool.selector.Uint64()), int32(pool.spacing.Int64()), common.BytesToAddress(pool.hooks)))
+			if err != nil {
+				return errors.New("invalid Uniswap V4 pool")
+			}
+			legs[i].Pool = poolID.Hex()
+			legs[i].UniswapV4PoolKey = &quotev1.UniswapV4PoolKey{Currency0: common.BytesToAddress(pool.currency0).Hex(), Currency1: common.BytesToAddress(pool.currency1).Hex(), FeePips: uint32(pool.selector.Uint64()), TickSpacing: int32(pool.spacing.Int64()), Hooks: common.BytesToAddress(pool.hooks).Hex()}
 			continue
 		}
 		if pool.kind == 3 {

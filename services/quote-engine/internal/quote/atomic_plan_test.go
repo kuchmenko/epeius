@@ -19,6 +19,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -61,6 +62,8 @@ func (r *atomicPlanReader) Call(_ context.Context, to common.Address, data []byt
 	slipstream := r.config.Deployments[r.config.AtomicExecutor.SlipstreamDeployment]
 	balancerDeployment := r.config.Deployments[r.config.AtomicExecutor.BalancerDeployment]
 	balancerOptions, _ := balancerDeployment.ProviderConfig.(balancer.Options)
+	v4Deployment := r.config.Deployments[r.config.AtomicExecutor.UniswapV4Deployment]
+	v4Options, _ := v4Deployment.ProviderConfig.(uniswapv4.Options)
 	feeModule := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["uniswapRouter"].ID) {
 		return contractabi.ExecutorV2.Methods["uniswapRouter"].Outputs.Pack(common.HexToAddress(uniswap.Router))
@@ -76,6 +79,15 @@ func (r *atomicPlanReader) Call(_ context.Context, to common.Address, data []byt
 	}
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["balancerVault"].ID) {
 		return contractabi.ExecutorV2.Methods["balancerVault"].Outputs.Pack(common.HexToAddress(balancerOptions.Vault))
+	}
+	for name, expected := range map[string]string{
+		"universalRouter": v4Deployment.Router,
+		"permit2":         v4Options.Permit2,
+		"poolManager":     v4Options.PoolManager,
+	} {
+		if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods[name].ID) {
+			return contractabi.ExecutorV2.Methods[name].Outputs.Pack(common.HexToAddress(expected))
+		}
 	}
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["balancerPoolsHash"].ID) {
 		ids := make([][32]byte, len(balancerOptions.Pools))

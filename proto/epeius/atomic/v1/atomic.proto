@@ -45,7 +45,7 @@ message Branch {
 }
 
 message Operation {
-  // ExecutorV2's closed operation tag. Atomic V1 currently admits kinds 1 through 4.
+  // ExecutorV2's closed operation tag. Atomic V1 currently admits kinds 1 through 5.
   uint32 kind = 1;
   string token_out = 2;
   // Static pool fee in millionths, not basis points.
@@ -98,6 +98,7 @@ message PoolOperation {
     V3Pool pancake_v3 = 11;
     SlipstreamPool slipstream_initial = 12;
     BalancerPool balancer_v2 = 13;
+    V4Pool uniswap_v4 = 14;
   }
 }
 
@@ -120,6 +121,21 @@ message BalancerPool {
   optional bytes pool_id = 2;
   reserved 3 to 6;
   reserved "user_data", "from_internal_balance", "to_internal_balance", "kind";
+}
+
+message V4Pool {
+  optional bytes pool_manager = 1;
+  V4PoolKey key = 2;
+  reserved 3 to 6;
+  reserved "hook_data", "commands", "inputs", "amount_specified";
+}
+
+message V4PoolKey {
+  optional bytes currency0 = 1;
+  optional bytes currency1 = 2;
+  optional uint32 fee_pips = 3;
+  optional sint32 tick_spacing = 4;
+  optional bytes hooks = 5;
 }
 
 message PinnedBlock {

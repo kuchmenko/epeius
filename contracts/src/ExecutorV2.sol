@@ -81,6 +81,19 @@ interface IBalancerPoolV2 {
     function getPoolId() external view returns (bytes32);
 }
 
+interface IUniversalRouterV2 {
+    function poolManager() external view returns (address);
+    function execute(bytes calldata commands, bytes[] calldata inputs, uint256 deadline) external payable;
+}
+
+interface IPermit2V2 {
+    function allowance(address owner, address token, address spender)
+        external
+        view
+        returns (uint160 amount, uint48 expiration, uint48 nonce);
+    function approve(address token, address spender, uint160 amount, uint48 expiration) external;
+}
+
 /// @notice Executes one branch of up to two operations or two direct branches.
 contract ExecutorV2 {
     using SafeERC20 for IERC20;
@@ -129,15 +142,44 @@ contract ExecutorV2 {
         uint256 callerOutput;
     }
 
+    struct PoolKey {
+        address currency0;
+        address currency1;
+        uint24 fee;
+        int24 tickSpacing;
+        address hooks;
+    }
+
+    struct V4ExactInputSingleParams {
+        PoolKey poolKey;
+        bool zeroForOne;
+        uint128 amountIn;
+        uint128 amountOutMinimum;
+        bytes hookData;
+    }
+
+    struct V4Baselines {
+        uint256 routerInput;
+        uint256 routerOutput;
+        uint256 permitInput;
+        uint256 permitOutput;
+        uint256 routerNative;
+        uint256 permitNative;
+    }
+
     uint8 private constant UNISWAP_V3 = 1;
     uint8 private constant PANCAKE_V3 = 2;
     uint8 private constant SLIPSTREAM_INITIAL = 3;
     uint8 private constant BALANCER_V2 = 4;
+    uint8 private constant UNISWAP_V4 = 5;
 
     address public immutable uniswapRouter;
     address public immutable pancakeRouter;
     address public immutable slipstreamRouter;
     address public immutable balancerVault;
+    address public immutable universalRouter;
+    address public immutable permit2;
+    address public immutable poolManager;
     bytes32 public immutable balancerPoolsHash;
     mapping(bytes32 => bool) private allowedBalancerPools;
     bool private entered;
@@ -159,6 +201,12 @@ contract ExecutorV2 {
     error NativeRefundFailed(address caller, uint256 amount);
     error InvalidDeployment();
     error PoolNotAllowed(bytes32 poolId);
+    error TokenCallFailed(address token, bytes4 selector);
+    error PermissionCallFailed(bytes4 selector);
+    error AllowanceMismatch(address token, address spender, uint256 expected, uint256 actual);
+    error Permit2Mismatch(
+        address token, uint160 expectedAmount, uint160 actualAmount, uint48 expectedExpiration, uint48 actualExpiration
+    );
 
     event OperationExecuted(
         bytes32 indexed planHash,
@@ -186,18 +234,30 @@ contract ExecutorV2 {
         address pancakeRouter_,
         address slipstreamRouter_,
         address balancerVault_,
+        address universalRouter_,
+        address permit2_,
+        address poolManager_,
         bytes32[] memory balancerPoolIds_
     ) {
         bool balancerEnabled = balancerPoolIds_.length != 0;
+        bool v4Enabled = universalRouter_ != address(0) || permit2_ != address(0) || poolManager_ != address(0);
         if (
             (uniswapRouter_ == address(0)
                     && pancakeRouter_ == address(0)
                     && slipstreamRouter_ == address(0)
-                    && !balancerEnabled) || (uniswapRouter_ != address(0) && uniswapRouter_.code.length == 0)
+                    && !balancerEnabled
+                    && !v4Enabled) || (uniswapRouter_ != address(0) && uniswapRouter_.code.length == 0)
                 || (pancakeRouter_ != address(0) && pancakeRouter_.code.length == 0)
                 || (slipstreamRouter_ != address(0) && slipstreamRouter_.code.length == 0)
                 || (balancerEnabled != (balancerVault_ != address(0)))
                 || (balancerVault_ != address(0) && balancerVault_.code.length == 0)
+                || (v4Enabled
+                    && (universalRouter_ == address(0)
+                        || permit2_ == address(0)
+                        || poolManager_ == address(0)
+                        || universalRouter_.code.length == 0
+                        || permit2_.code.length == 0
+                        || poolManager_.code.length == 0))
                 || (uniswapRouter_ != address(0) && uniswapRouter_ == pancakeRouter_)
                 || (uniswapRouter_ != address(0) && uniswapRouter_ == slipstreamRouter_)
                 || (pancakeRouter_ != address(0) && pancakeRouter_ == slipstreamRouter_)
@@ -205,11 +265,39 @@ contract ExecutorV2 {
                     && (balancerVault_ == uniswapRouter_
                         || balancerVault_ == pancakeRouter_
                         || balancerVault_ == slipstreamRouter_))
+                || _hasEndpointAlias(
+                    uniswapRouter_,
+                    pancakeRouter_,
+                    slipstreamRouter_,
+                    balancerVault_,
+                    universalRouter_,
+                    permit2_,
+                    poolManager_
+                )
         ) revert InvalidDeployment();
         uniswapRouter = uniswapRouter_;
         pancakeRouter = pancakeRouter_;
         slipstreamRouter = slipstreamRouter_;
         balancerVault = balancerVault_;
+        universalRouter = universalRouter_;
+        permit2 = permit2_;
+        poolManager = poolManager_;
+        if (v4Enabled) {
+            (bool ok, bytes memory result) =
+                universalRouter_.staticcall(abi.encodeCall(IUniversalRouterV2.poolManager, ()));
+            uint256 managerWord;
+            if (result.length == 32) {
+                assembly {
+                    managerWord := mload(add(result, 32))
+                }
+            }
+            if (
+                !ok || result.length != 32 || managerWord > type(uint160).max
+                    || address(uint160(managerWord)) != poolManager_
+            ) {
+                revert InvalidDeployment();
+            }
+        }
         balancerPoolsHash = keccak256(abi.encode(balancerPoolIds_));
         bytes32 previous;
         for (uint256 i; i < balancerPoolIds_.length; ++i) {
@@ -391,6 +479,8 @@ contract ExecutorV2 {
                     if (slipstreamRouter == address(0)) revert UnsupportedKind(operation.kind);
                 } else if (operation.kind == BALANCER_V2) {
                     if (balancerVault == address(0)) revert UnsupportedKind(operation.kind);
+                } else if (operation.kind == UNISWAP_V4) {
+                    if (universalRouter == address(0)) revert UnsupportedKind(operation.kind);
                 } else {
                     revert UnsupportedKind(operation.kind);
                 }
@@ -402,6 +492,9 @@ contract ExecutorV2 {
                     if (!invalidSelector && !allowedBalancerPools[operation.poolId]) {
                         revert PoolNotAllowed(operation.poolId);
                     }
+                } else if (operation.kind == UNISWAP_V4) {
+                    invalidSelector =
+                        operation.fee > 1_000_000 || operation.tickSpacing <= 0 || operation.tickSpacing > 32_767;
                 } else {
                     invalidSelector = operation.fee >= 1_000_000 || operation.tickSpacing != 0;
                 }
@@ -417,9 +510,28 @@ contract ExecutorV2 {
                 }
                 bytes32 pool = operation.kind == BALANCER_V2
                     ? keccak256(abi.encode(operation.kind, operation.poolId))
-                    : _poolKey(operation.kind, currentToken, operation.tokenOut, operation.fee, operation.tickSpacing);
+                    : operation.kind == UNISWAP_V4
+                        ? _v4PoolId(currentToken, operation.tokenOut, operation.fee, operation.tickSpacing)
+                        : _poolKey(
+                            operation.kind, currentToken, operation.tokenOut, operation.fee, operation.tickSpacing
+                        );
                 if (branchIndex == 0 && operationIndex == 0) firstPool = pool;
                 else if (pool == firstPool) revert InvalidOperation(branchIndex, operationIndex);
+                if (operation.kind == UNISWAP_V4) {
+                    if (block.timestamp > type(uint48).max) revert InvalidPlan();
+                    uint256 knownAmount = operationIndex == 0 ? branch.amountIn : 0;
+                    uint256 knownMinimum = operationIndex + 1 == branch.operations.length ? branch.minAmountOut : 1;
+                    if (knownAmount > type(uint128).max) {
+                        revert AmountOutOfRange(branchIndex, operationIndex, knownAmount, type(uint128).max);
+                    }
+                    if (knownMinimum > type(uint128).max) {
+                        revert AmountOutOfRange(branchIndex, operationIndex, knownMinimum, type(uint128).max);
+                    }
+                    uint256 allowance = _tokenAllowance(currentToken, address(this), permit2);
+                    if (allowance != 0) revert AllowanceMismatch(currentToken, permit2, 0, allowance);
+                    (uint160 amount, uint48 expiration,) = _permit2Allowance(currentToken);
+                    if (amount != 0) revert Permit2Mismatch(currentToken, 0, amount, expiration, expiration);
+                }
                 currentToken = operation.tokenOut;
             }
             if (currentToken != plan.tokenOut) {
@@ -440,16 +552,26 @@ contract ExecutorV2 {
         private
         returns (uint256 amountOut)
     {
-        uint256 maximum = operation.kind == BALANCER_V2 ? type(uint256).max - 1 : uint256(type(int256).max);
+        uint256 maximum = operation.kind == BALANCER_V2
+            ? type(uint256).max - 1
+            : operation.kind == UNISWAP_V4 ? type(uint128).max : uint256(type(int256).max);
         if (request.amountIn > maximum) {
             revert AmountOutOfRange(branchIndex, request.operationIndex, request.amountIn, maximum);
+        }
+        if (operation.kind == UNISWAP_V4 && request.minimum > type(uint128).max) {
+            revert AmountOutOfRange(branchIndex, request.operationIndex, request.minimum, type(uint128).max);
         }
         IERC20 input = IERC20(request.tokenIn);
         address router = operation.kind == UNISWAP_V3
             ? uniswapRouter
             : operation.kind == PANCAKE_V3
                 ? pancakeRouter
-                : operation.kind == SLIPSTREAM_INITIAL ? slipstreamRouter : balancerVault;
+                : operation.kind == SLIPSTREAM_INITIAL
+                    ? slipstreamRouter
+                    : operation.kind == BALANCER_V2 ? balancerVault : universalRouter;
+        if (operation.kind == UNISWAP_V4) {
+            return _swapV4(operation, request, branchIndex);
+        }
         input.forceApprove(router, request.amountIn);
         if (operation.kind == UNISWAP_V3) {
             try IUniswapRouter02V2(router)
@@ -533,6 +655,114 @@ contract ExecutorV2 {
         return finalOutput - request.entryOutput;
     }
 
+    function _swapV4(Operation calldata operation, SwapRequest memory request, uint256 branchIndex)
+        private
+        returns (uint256 amountOut)
+    {
+        IERC20 input = IERC20(request.tokenIn);
+        IERC20 output = IERC20(operation.tokenOut);
+        V4Baselines memory baseline = V4Baselines(
+            input.balanceOf(universalRouter),
+            output.balanceOf(universalRouter),
+            input.balanceOf(permit2),
+            output.balanceOf(permit2),
+            universalRouter.balance,
+            permit2.balance
+        );
+        uint48 expiration = uint48(block.timestamp);
+
+        input.forceApprove(permit2, request.amountIn);
+        uint256 allowance = _tokenAllowance(request.tokenIn, address(this), permit2);
+        if (allowance != request.amountIn) {
+            revert AllowanceMismatch(request.tokenIn, permit2, request.amountIn, allowance);
+        }
+        _permit2Approve(request.tokenIn, uint160(request.amountIn), expiration);
+        _requirePermit2(request.tokenIn, uint160(request.amountIn), expiration);
+
+        (bool ok, bytes memory result) = universalRouter.call(_v4CallData(operation, request));
+        if (!ok || result.length != 0) revert ProtocolCallFailed(branchIndex, request.operationIndex, result);
+
+        _requirePermit2(request.tokenIn, 0, expiration);
+        _permit2Approve(request.tokenIn, 0, expiration);
+        _requirePermit2(request.tokenIn, 0, expiration);
+        input.forceApprove(permit2, 0);
+        allowance = _tokenAllowance(request.tokenIn, address(this), permit2);
+        if (allowance != 0) revert AllowanceMismatch(request.tokenIn, permit2, 0, allowance);
+        _requireBalance(input, address(this), request.entryInput);
+
+        uint256 finalOutput = output.balanceOf(address(this));
+        if (finalOutput <= request.entryOutput) revert OutputNotIncreased(branchIndex, request.operationIndex);
+        _requireBalance(input, universalRouter, baseline.routerInput);
+        _requireBalance(output, universalRouter, baseline.routerOutput);
+        _requireBalance(input, permit2, baseline.permitInput);
+        _requireBalance(output, permit2, baseline.permitOutput);
+        if (universalRouter.balance != baseline.routerNative) {
+            revert BalanceMismatch(address(0), universalRouter, baseline.routerNative, universalRouter.balance);
+        }
+        if (permit2.balance != baseline.permitNative) {
+            revert BalanceMismatch(address(0), permit2, baseline.permitNative, permit2.balance);
+        }
+        if (address(this).balance < request.entryNative) {
+            revert BalanceMismatch(address(0), address(this), request.entryNative, address(this).balance);
+        }
+        return finalOutput - request.entryOutput;
+    }
+
+    function _v4CallData(Operation calldata operation, SwapRequest memory request) private view returns (bytes memory) {
+        (address currency0, address currency1) = request.tokenIn < operation.tokenOut
+            ? (request.tokenIn, operation.tokenOut)
+            : (operation.tokenOut, request.tokenIn);
+        PoolKey memory key = PoolKey(currency0, currency1, operation.fee, operation.tickSpacing, address(0));
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(
+            V4ExactInputSingleParams(
+                key, request.tokenIn == currency0, uint128(request.amountIn), uint128(request.minimum), hex""
+            )
+        );
+        params[1] = abi.encode(request.tokenIn, request.amountIn, true);
+        params[2] = abi.encode(operation.tokenOut, request.minimum);
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = abi.encode(hex"060b0f", params);
+        return abi.encodeCall(IUniversalRouterV2.execute, (hex"10", inputs, request.deadline));
+    }
+
+    function _permit2Approve(address token, uint160 amount, uint48 expiration) private {
+        (bool ok, bytes memory result) =
+            permit2.call(abi.encodeCall(IPermit2V2.approve, (token, universalRouter, amount, expiration)));
+        if (!ok || result.length != 0) revert PermissionCallFailed(IPermit2V2.approve.selector);
+    }
+
+    function _permit2Allowance(address token) private view returns (uint160 amount, uint48 expiration, uint48 nonce) {
+        (bool ok, bytes memory result) =
+            permit2.staticcall(abi.encodeCall(IPermit2V2.allowance, (address(this), token, universalRouter)));
+        if (!ok || result.length != 96) revert PermissionCallFailed(IPermit2V2.allowance.selector);
+        uint256 rawAmount;
+        uint256 rawExpiration;
+        uint256 rawNonce;
+        assembly {
+            rawAmount := mload(add(result, 32))
+            rawExpiration := mload(add(result, 64))
+            rawNonce := mload(add(result, 96))
+        }
+        if (rawAmount > type(uint160).max || rawExpiration > type(uint48).max || rawNonce > type(uint48).max) {
+            revert PermissionCallFailed(IPermit2V2.allowance.selector);
+        }
+        return (uint160(rawAmount), uint48(rawExpiration), uint48(rawNonce));
+    }
+
+    function _requirePermit2(address token, uint160 expectedAmount, uint48 expectedExpiration) private view {
+        (uint160 amount, uint48 expiration,) = _permit2Allowance(token);
+        if (amount != expectedAmount || expiration != expectedExpiration) {
+            revert Permit2Mismatch(token, expectedAmount, amount, expectedExpiration, expiration);
+        }
+    }
+
+    function _tokenAllowance(address token, address owner, address spender) private view returns (uint256 allowance) {
+        (bool ok, bytes memory result) = token.staticcall(abi.encodeCall(IERC20.allowance, (owner, spender)));
+        if (!ok || result.length != 32) revert TokenCallFailed(token, IERC20.allowance.selector);
+        allowance = abi.decode(result, (uint256));
+    }
+
     function _poolKey(uint8 kind, address tokenA, address tokenB, uint24 fee, int24 tickSpacing)
         private
         pure
@@ -540,6 +770,26 @@ contract ExecutorV2 {
     {
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
         return keccak256(abi.encode(kind, token0, token1, fee, tickSpacing));
+    }
+
+    function _v4PoolId(address tokenA, address tokenB, uint24 fee, int24 tickSpacing) private pure returns (bytes32) {
+        (address currency0, address currency1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        return keccak256(abi.encode(currency0, currency1, fee, tickSpacing, address(0)));
+    }
+
+    function _hasEndpointAlias(address a, address b, address c, address d, address e, address f, address g)
+        private
+        pure
+        returns (bool)
+    {
+        address[7] memory endpoints = [a, b, c, d, e, f, g];
+        for (uint256 i; i < endpoints.length; ++i) {
+            if (endpoints[i] == address(0)) continue;
+            for (uint256 j = i + 1; j < endpoints.length; ++j) {
+                if (endpoints[i] == endpoints[j]) return true;
+            }
+        }
+        return false;
     }
 
     function _getBalancerPool(address vault, bytes32 poolId) private view returns (address pool) {

@@ -76,10 +76,12 @@ func ValidateChain(chain Chain) error {
 		pancake, pancakeOK := chain.Deployments[e.PancakeDeployment]
 		slipstream, slipstreamOK := chain.Deployments[e.SlipstreamDeployment]
 		balancerDeployment, balancerOK := chain.Deployments[e.BalancerDeployment]
+		uniswapV4, uniswapV4OK := chain.Deployments[e.UniswapV4Deployment]
 		uniswapOK = e.UniswapDeployment != "" && uniswapOK && uniswap.Kind == "uniswap-v3"
 		pancakeOK = e.PancakeDeployment != "" && pancakeOK && pancake.Kind == "pancake-v3"
 		slipstreamOK = e.SlipstreamDeployment != "" && slipstreamOK && slipstream.Kind == "aerodrome-slipstream"
 		balancerOK = e.BalancerDeployment != "" && balancerOK && balancerDeployment.Kind == "balancer-v2"
+		uniswapV4OK = e.UniswapV4Deployment != "" && uniswapV4OK && uniswapV4.Kind == "uniswap-v4"
 		routers := map[common.Address]bool{}
 		for _, deployment := range []struct {
 			enabled bool
@@ -109,10 +111,24 @@ func ValidateChain(chain Chain) error {
 			if routers[vault] {
 				return errors.New("atomic executor provider endpoints must be distinct")
 			}
+			routers[vault] = true
 		} else if balancerOK {
 			return errors.New("atomic executor Balancer deployment is invalid")
 		}
-		if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || (!uniswapOK && !pancakeOK && !slipstreamOK && !balancerOK) || (e.UniswapDeployment != "" && !uniswapOK) || (e.PancakeDeployment != "" && !pancakeOK) || (e.SlipstreamDeployment != "" && !slipstreamOK) || (e.BalancerDeployment != "" && !balancerOK) {
+		if uniswapV4OK {
+			options, err := validateUniswapV4(uniswapV4, chain.Tokens)
+			if err != nil {
+				return errors.New("atomic executor Uniswap V4 deployment is invalid")
+			}
+			for _, endpoint := range []string{uniswapV4.Router, options.Permit2, options.PoolManager} {
+				address := common.HexToAddress(endpoint)
+				if routers[address] {
+					return errors.New("atomic executor provider endpoints must be distinct")
+				}
+				routers[address] = true
+			}
+		}
+		if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || (!uniswapOK && !pancakeOK && !slipstreamOK && !balancerOK && !uniswapV4OK) || (e.UniswapDeployment != "" && !uniswapOK) || (e.PancakeDeployment != "" && !pancakeOK) || (e.SlipstreamDeployment != "" && !slipstreamOK) || (e.BalancerDeployment != "" && !balancerOK) || (e.UniswapV4Deployment != "" && !uniswapV4OK) {
 			return errors.New("atomic executor needs a nonzero address, runtime code hash, and at least one valid provider deployment")
 		}
 	}
