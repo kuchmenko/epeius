@@ -39,8 +39,10 @@ type Fixture = {
   runtimeCodeHash: string;
   factory: string;
   router: string;
-  pool: string;
+  pool?: string;
+  pools?: string[];
   tokenIn: string;
+  intermediateToken?: string;
   tokenOut: string;
   amountInAtomic: string;
   amountOutMinimumAtomic: string;
@@ -71,6 +73,12 @@ type Fixture = {
 const fixture = (await Bun.file(
   new URL("../../../contracts/fixtures/atomic-v1-plan.json", import.meta.url),
 ).json()) as Fixture;
+const twoHopFixture = (await Bun.file(
+  new URL(
+    "../../../contracts/fixtures/atomic-v1-two-hop-plan.json",
+    import.meta.url,
+  ),
+).json()) as Fixture;
 const router = "0x5555555555555555555555555555555555555555";
 const factory = "0x4444444444444444444444444444444444444444";
 const pool = "0x3333333333333333333333333333333333333333";
@@ -91,100 +99,131 @@ const trusted = configureExecution({
   },
 });
 
-function preparation() {
-  const operation = fixture.branches[0].operations[0];
+const twoHopTrusted = configureExecution({
+  tokens: [
+    twoHopFixture.tokenIn,
+    twoHopFixture.intermediateToken ?? "",
+    twoHopFixture.tokenOut,
+  ],
+  atomicExecutor: {
+    address: twoHopFixture.executor,
+    runtimeCodeHash: twoHopFixture.runtimeCodeHash,
+    uniswapDeployment: "uni",
+  },
+  deployments: {
+    uni: {
+      kind: "uniswap-v3",
+      factory: twoHopFixture.factory,
+      router: twoHopFixture.router,
+      fees: twoHopFixture.branches[0].operations.map(
+        (operation) => operation.feePips,
+      ),
+    },
+  },
+});
+
+function preparation(source = fixture) {
+  const pools = source.pools ?? [source.pool ?? ""];
+  let currentToken = source.tokenIn;
   return create(PrepareExecutionResponseSchema, {
     status: PreparationStatus.READY,
     preparationId: "atomic-preparation",
-    expiresAtUnix: fixture.expiresAtUnix,
-    deadlineUnix: fixture.deadlineUnix,
-    tokenIn: fixture.tokenIn,
-    tokenOut: fixture.tokenOut,
-    amountInAtomic: fixture.amountInAtomic,
-    amountOutMinimumAtomic: fixture.amountOutMinimumAtomic,
-    recipient: fixture.sender,
+    expiresAtUnix: source.expiresAtUnix,
+    deadlineUnix: source.deadlineUnix,
+    tokenIn: source.tokenIn,
+    tokenOut: source.tokenOut,
+    amountInAtomic: source.amountInAtomic,
+    amountOutMinimumAtomic: source.amountOutMinimumAtomic,
+    recipient: source.sender,
     transaction: {
-      chainId: fixture.chainId,
-      from: fixture.sender,
-      to: fixture.executor,
-      data: fixture.calldata,
+      chainId: source.chainId,
+      from: source.sender,
+      to: source.executor,
+      data: source.calldata,
       valueAtomic: "0",
-      gasLimit: fixture.gasLimit,
+      gasLimit: source.gasLimit,
     },
     route: {
       routeId: "uni:500",
       provider: "uniswap-v3",
       deploymentId: "uni",
       amountOutAtomic: "12",
-      block: { number: fixture.quoteBlockNumber, hash: fixture.quoteBlockHash },
-      legs: [
-        {
-          pool,
-          tokenIn: fixture.tokenIn,
+      block: { number: source.quoteBlockNumber, hash: source.quoteBlockHash },
+      legs: source.branches[0].operations.map((operation, i) => {
+        const leg = {
+          pool: pools[i],
+          tokenIn: currentToken,
           tokenOut: operation.tokenOut,
-          selector: { case: "feePips", value: operation.feePips },
-        },
-      ],
+          selector: { case: "feePips" as const, value: operation.feePips },
+        };
+        currentToken = operation.tokenOut;
+        return leg;
+      }),
     },
     atomicPlan: create(PlanSchema, {
-      executorPlanHash: fixture.executorPlanHash,
-      chainId: fixture.chainId,
-      executor: fixture.executor,
-      sender: fixture.sender,
-      tokenIn: fixture.tokenIn,
-      tokenOut: fixture.tokenOut,
-      amountInAtomic: fixture.amountInAtomic,
-      amountOutMinimumAtomic: fixture.amountOutMinimumAtomic,
-      deadlineUnix: fixture.deadlineUnix,
-      planId: hexToBytes(fixture.planId as `0x${string}`),
+      executorPlanHash: source.executorPlanHash,
+      chainId: source.chainId,
+      executor: source.executor,
+      sender: source.sender,
+      tokenIn: source.tokenIn,
+      tokenOut: source.tokenOut,
+      amountInAtomic: source.amountInAtomic,
+      amountOutMinimumAtomic: source.amountOutMinimumAtomic,
+      deadlineUnix: source.deadlineUnix,
+      planId: hexToBytes(source.planId as `0x${string}`),
       transactionFingerprint: hexToBytes(
-        fixture.transactionFingerprint as `0x${string}`,
+        source.transactionFingerprint as `0x${string}`,
       ),
       acceptedTerms: create(AcceptedPlanTermsSchema, {
         program: create(PlanProgramSchema, {
           formatVersion: 1,
-          chainId: uintBytes(fixture.chainId),
-          tokenIn: hexToBytes(fixture.tokenIn as `0x${string}`),
-          tokenOut: hexToBytes(fixture.tokenOut as `0x${string}`),
-          amountIn: uintBytes(fixture.amountInAtomic),
+          chainId: uintBytes(source.chainId),
+          tokenIn: hexToBytes(source.tokenIn as `0x${string}`),
+          tokenOut: hexToBytes(source.tokenOut as `0x${string}`),
+          amountIn: uintBytes(source.amountInAtomic),
           branches: [
             create(PlanBranchSchema, {
-              amountIn: uintBytes(fixture.amountInAtomic),
-              operations: [
+              amountIn: uintBytes(source.amountInAtomic),
+              operations: source.branches[0].operations.map((operation, i) =>
                 create(PoolOperationSchema, {
-                  tokenIn: hexToBytes(fixture.tokenIn as `0x${string}`),
-                  tokenOut: hexToBytes(fixture.tokenOut as `0x${string}`),
+                  tokenIn: hexToBytes(
+                    (i === 0
+                      ? source.tokenIn
+                      : source.branches[0].operations[i - 1]
+                          .tokenOut) as `0x${string}`,
+                  ),
+                  tokenOut: hexToBytes(operation.tokenOut as `0x${string}`),
                   pool: {
                     case: "uniswapV3",
                     value: create(V3PoolSchema, {
-                      factory: hexToBytes(fixture.factory as `0x${string}`),
-                      router: hexToBytes(fixture.router as `0x${string}`),
-                      pool: hexToBytes(fixture.pool as `0x${string}`),
+                      factory: hexToBytes(source.factory as `0x${string}`),
+                      router: hexToBytes(source.router as `0x${string}`),
+                      pool: hexToBytes(pools[i] as `0x${string}`),
                       feePips: operation.feePips,
                     }),
                   },
                 }),
-              ],
+              ),
             }),
           ],
         }),
         executor: create(ExecutorIdentitySchema, {
-          address: hexToBytes(fixture.executor as `0x${string}`),
+          address: hexToBytes(source.executor as `0x${string}`),
           version: 2,
-          runtimeCodeHash: hexToBytes(fixture.runtimeCodeHash as `0x${string}`),
+          runtimeCodeHash: hexToBytes(source.runtimeCodeHash as `0x${string}`),
         }),
-        signer: hexToBytes(fixture.sender as `0x${string}`),
-        recipient: hexToBytes(fixture.sender as `0x${string}`),
-        branchMinima: [uintBytes(fixture.amountOutMinimumAtomic)],
-        amountOutMinimum: uintBytes(fixture.amountOutMinimumAtomic),
+        signer: hexToBytes(source.sender as `0x${string}`),
+        recipient: hexToBytes(source.sender as `0x${string}`),
+        branchMinima: [uintBytes(source.amountOutMinimumAtomic)],
+        amountOutMinimum: uintBytes(source.amountOutMinimumAtomic),
         quoteBlock: create(PinnedBlockSchema, {
-          number: uintBytes(fixture.quoteBlockNumber),
-          hash: hexToBytes(fixture.quoteBlockHash as `0x${string}`),
+          number: uintBytes(source.quoteBlockNumber),
+          hash: hexToBytes(source.quoteBlockHash as `0x${string}`),
         }),
-        expiresAtUnix: uintBytes(fixture.expiresAtUnix),
-        deadlineUnix: uintBytes(fixture.deadlineUnix),
+        expiresAtUnix: uintBytes(source.expiresAtUnix),
+        deadlineUnix: uintBytes(source.deadlineUnix),
       }),
-      branches: fixture.branches.map((branch) =>
+      branches: source.branches.map((branch) =>
         create(BranchSchema, {
           amountInAtomic: branch.amountInAtomic,
           amountOutMinimumAtomic: branch.amountOutMinimumAtomic,
@@ -443,6 +482,62 @@ test("terminal admits exact Atomic V1 plan and rejects changed terms", () => {
   ).toThrow("plan hash");
 });
 
+test("Atomic V1 admits independent two-hop vectors and binds operation order", () => {
+  const p = preparation(twoHopFixture);
+  const result = validatePreparation(
+    p,
+    twoHopFixture.sender,
+    twoHopFixture.chainId,
+    50,
+    twoHopTrusted,
+    1,
+  );
+  expect(result).toMatchObject({
+    action: "swap",
+    transaction: { data: twoHopFixture.calldata },
+    receipt: {
+      atomicPlan: {
+        planHash: twoHopFixture.executorPlanHash,
+        planId: twoHopFixture.planId,
+        transactionFingerprint: twoHopFixture.transactionFingerprint,
+        operations: [
+          { tokenIn: twoHopFixture.tokenIn },
+          { tokenIn: twoHopFixture.intermediateToken },
+        ],
+      },
+    },
+  });
+
+  const reordered = preparation(twoHopFixture);
+  const operations = accepted(reordered).program.branches[0]?.operations;
+  if (operations?.length !== 2) throw new Error("missing operations");
+  [operations[0], operations[1]] = [operations[1], operations[0]];
+  expect(() =>
+    validatePreparation(
+      reordered,
+      twoHopFixture.sender,
+      twoHopFixture.chainId,
+      50,
+      twoHopTrusted,
+      1,
+    ),
+  ).toThrow();
+
+  const repeatedPool = preparation(twoHopFixture);
+  if (!repeatedPool.route) throw new Error("missing route");
+  repeatedPool.route.legs[1].pool = repeatedPool.route.legs[0].pool;
+  expect(() =>
+    validatePreparation(
+      repeatedPool,
+      twoHopFixture.sender,
+      twoHopFixture.chainId,
+      50,
+      twoHopTrusted,
+      1,
+    ),
+  ).toThrow("distinct pools");
+});
+
 test("Atomic V1 receipt requires ordered exact executor events and token deltas", () => {
   const amountOut = 12n;
   const hash = `0x${"9".repeat(64)}`;
@@ -573,4 +668,169 @@ test("Atomic V1 receipt requires ordered exact executor events and token deltas"
     verifyReceipt({ ...receipt, logs: reordered }, hash, obligations.receipt)
       .outcome,
   ).toBe("failed");
+});
+
+test("Atomic V1 receipt proves measured two-hop chaining and exact event cardinality", () => {
+  const hash = `0x${"8".repeat(64)}`;
+  const intermediateAmount = 83n;
+  const outputAmount = 12n;
+  const pools = twoHopFixture.pools ?? [];
+  const transferLog = (
+    token: string,
+    from: string,
+    to: string,
+    value: bigint,
+  ) => ({
+    address: token,
+    topics: encodeEventTopics({
+      abi: erc20Abi,
+      eventName: "Transfer",
+      args: { from: from as `0x${string}`, to: to as `0x${string}` },
+    }) as string[],
+    data: encodeAbiParameters([{ type: "uint256" }], [value]),
+    transactionHash: hash,
+  });
+  const executorEvent = (
+    name: "OperationExecuted" | "BranchExecuted" | "PlanExecuted",
+    topics: Record<string, unknown>,
+    parameters: readonly { type: string }[],
+    values: readonly unknown[],
+  ) => ({
+    address: twoHopFixture.executor,
+    topics: encodeEventTopics({
+      abi: executorV2Abi,
+      eventName: name,
+      args: topics,
+    }) as string[],
+    data: encodeAbiParameters(parameters, values),
+    transactionHash: hash,
+  });
+  const operation = (
+    index: bigint,
+    tokenIn: string,
+    tokenOut: string,
+    amountIn: bigint,
+    amountOut: bigint,
+  ) =>
+    executorEvent(
+      "OperationExecuted",
+      {
+        planHash: twoHopFixture.executorPlanHash,
+        branchIndex: 0n,
+        operationIndex: index,
+      },
+      [
+        { type: "uint8" },
+        { type: "address" },
+        { type: "address" },
+        { type: "uint256" },
+        { type: "uint256" },
+      ],
+      [1, tokenIn, tokenOut, amountIn, amountOut],
+    );
+  const logs = [
+    transferLog(
+      twoHopFixture.tokenIn,
+      twoHopFixture.sender,
+      twoHopFixture.executor,
+      37n,
+    ),
+    transferLog(twoHopFixture.tokenIn, twoHopFixture.executor, pools[0], 37n),
+    transferLog(
+      twoHopFixture.intermediateToken ?? "",
+      pools[0],
+      twoHopFixture.executor,
+      intermediateAmount,
+    ),
+    operation(
+      0n,
+      twoHopFixture.tokenIn,
+      twoHopFixture.intermediateToken ?? "",
+      37n,
+      intermediateAmount,
+    ),
+    transferLog(
+      twoHopFixture.intermediateToken ?? "",
+      twoHopFixture.executor,
+      pools[1],
+      intermediateAmount,
+    ),
+    transferLog(
+      twoHopFixture.tokenOut,
+      pools[1],
+      twoHopFixture.executor,
+      outputAmount,
+    ),
+    operation(
+      1n,
+      twoHopFixture.intermediateToken ?? "",
+      twoHopFixture.tokenOut,
+      intermediateAmount,
+      outputAmount,
+    ),
+    executorEvent(
+      "BranchExecuted",
+      { planHash: twoHopFixture.executorPlanHash, branchIndex: 0n },
+      [{ type: "uint256" }, { type: "uint256" }],
+      [37n, outputAmount],
+    ),
+    transferLog(
+      twoHopFixture.tokenOut,
+      twoHopFixture.executor,
+      twoHopFixture.sender,
+      outputAmount,
+    ),
+    executorEvent(
+      "PlanExecuted",
+      {
+        planHash: twoHopFixture.executorPlanHash,
+        caller: twoHopFixture.sender,
+        tokenOut: twoHopFixture.tokenOut,
+      },
+      [{ type: "address" }, { type: "uint256" }, { type: "uint256" }],
+      [twoHopFixture.tokenIn, 37n, outputAmount],
+    ),
+  ];
+  const obligations = validatePreparation(
+    preparation(twoHopFixture),
+    twoHopFixture.sender,
+    twoHopFixture.chainId,
+    50,
+    twoHopTrusted,
+    1,
+  );
+  if (obligations.action !== "swap") throw new Error("missing receipt terms");
+  const receipt: Receipt = { transactionHash: hash, status: "0x1", logs };
+  expect(verifyReceipt(receipt, hash, obligations.receipt).outcome).toBe(
+    "passed",
+  );
+
+  const wrongInput = [...logs];
+  wrongInput[6] = operation(
+    1n,
+    twoHopFixture.intermediateToken ?? "",
+    twoHopFixture.tokenOut,
+    12n,
+    outputAmount,
+  );
+  expect(
+    verifyReceipt({ ...receipt, logs: wrongInput }, hash, obligations.receipt)
+      .outcome,
+  ).toBe("failed");
+  for (const changed of [
+    logs.filter((_, i) => i !== 6),
+    [...logs.slice(0, 7), logs[6], ...logs.slice(7)],
+    [
+      ...logs.slice(0, 3),
+      logs[6],
+      ...logs.slice(4, 6),
+      logs[3],
+      ...logs.slice(7),
+    ],
+  ]) {
+    expect(
+      verifyReceipt({ ...receipt, logs: changed }, hash, obligations.receipt)
+        .outcome,
+    ).toBe("failed");
+  }
 });

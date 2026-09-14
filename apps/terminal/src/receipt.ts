@@ -45,13 +45,14 @@ export type ReceiptObligations = {
     planHash: string;
     planId: string;
     transactionFingerprint: string;
-    operation: {
+    operations: Array<{
       kind: number;
       tokenIn: string;
       tokenOut: string;
-      amountInAtomic: string;
-      branchMinimumAtomic: string;
-    };
+      amountInAtomic?: string;
+    }>;
+    branchAmountInAtomic: string;
+    branchMinimumAtomic: string;
   };
 };
 
@@ -167,50 +168,78 @@ export function verifyReceipt(
             same(log.topics[0] ?? "", topic),
           ),
       );
+      const expectedOperations = obligations.atomicPlan.operations;
       if (
-        events.length !== 3 ||
-        !same(events[0].topics[0] ?? "", operationExecuted) ||
-        !same(events[1].topics[0] ?? "", branchExecuted) ||
-        !same(events[2].topics[0] ?? "", planExecuted)
+        events.length !== expectedOperations.length + 2 ||
+        expectedOperations.some(
+          (_, i) => !same(events[i]?.topics[0] ?? "", operationExecuted),
+        ) ||
+        !same(
+          events[expectedOperations.length]?.topics[0] ?? "",
+          branchExecuted,
+        ) ||
+        !same(
+          events[expectedOperations.length + 1]?.topics[0] ?? "",
+          planExecuted,
+        )
       )
         atomicEventValid = false;
       else {
-        const operation = decodeEventLog({
-          abi: executorV2Abi,
-          eventName: "OperationExecuted",
-          strict: true,
-          topics: events[0].topics as [Hex, ...Hex[]],
-          data: events[0].data as Hex,
-        });
+        const operations = expectedOperations.map((_, i) =>
+          decodeEventLog({
+            abi: executorV2Abi,
+            eventName: "OperationExecuted",
+            strict: true,
+            topics: events[i].topics as [Hex, ...Hex[]],
+            data: events[i].data as Hex,
+          }),
+        );
         const branch = decodeEventLog({
           abi: executorV2Abi,
           eventName: "BranchExecuted",
           strict: true,
-          topics: events[1].topics as [Hex, ...Hex[]],
-          data: events[1].data as Hex,
+          topics: events[expectedOperations.length].topics as [Hex, ...Hex[]],
+          data: events[expectedOperations.length].data as Hex,
         });
         const plan = decodeEventLog({
           abi: executorV2Abi,
           eventName: "PlanExecuted",
           strict: true,
-          topics: events[2].topics as [Hex, ...Hex[]],
-          data: events[2].data as Hex,
+          topics: events[expectedOperations.length + 1].topics as [
+            Hex,
+            ...Hex[],
+          ],
+          data: events[expectedOperations.length + 1].data as Hex,
         });
-        const expected = obligations.atomicPlan.operation;
         atomicEventValid =
-          same(operation.args.planHash, obligations.atomicPlan.planHash) &&
-          operation.args.branchIndex === 0n &&
-          operation.args.operationIndex === 0n &&
-          operation.args.kind === expected.kind &&
-          same(operation.args.tokenIn, expected.tokenIn) &&
-          same(operation.args.tokenOut, expected.tokenOut) &&
-          operation.args.amountIn === BigInt(expected.amountInAtomic) &&
-          operation.args.amountOut === output &&
+          operations.every((operation, i) => {
+            const expected = expectedOperations[i];
+            const expectedInput =
+              i === 0
+                ? BigInt(expected.amountInAtomic ?? "")
+                : operations[i - 1].args.amountOut;
+            return (
+              same(
+                operation.args.planHash,
+                obligations.atomicPlan?.planHash ?? "",
+              ) &&
+              operation.args.branchIndex === 0n &&
+              operation.args.operationIndex === BigInt(i) &&
+              operation.args.kind === expected.kind &&
+              same(operation.args.tokenIn, expected.tokenIn) &&
+              same(operation.args.tokenOut, expected.tokenOut) &&
+              operation.args.amountIn === expectedInput &&
+              operation.args.amountOut > 0n
+            );
+          }) &&
+          operations[operations.length - 1].args.amountOut === output &&
           same(branch.args.planHash, obligations.atomicPlan.planHash) &&
           branch.args.branchIndex === 0n &&
-          branch.args.amountIn === BigInt(expected.amountInAtomic) &&
+          branch.args.amountIn ===
+            BigInt(obligations.atomicPlan.branchAmountInAtomic) &&
           branch.args.amountOut === output &&
-          branch.args.amountOut >= BigInt(expected.branchMinimumAtomic) &&
+          branch.args.amountOut >=
+            BigInt(obligations.atomicPlan.branchMinimumAtomic) &&
           same(plan.args.planHash, obligations.atomicPlan.planHash) &&
           same(plan.args.caller, obligations.recipient) &&
           same(plan.args.tokenIn, obligations.tokenIn) &&

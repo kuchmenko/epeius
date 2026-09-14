@@ -239,28 +239,29 @@ export function atomicExecutorV1(
         !wirePlan ||
         !route ||
         p.allocations.length ||
-        route.legs.length !== 1
+        !route.legs.length ||
+        route.legs.length > 2
       )
         throw new Error("Invalid Atomic V1 plan.");
       admitV3Route(route, p, deployment, tokens);
+      if (
+        new Set(route.legs.map((leg) => leg.pool.toLowerCase())).size !==
+        route.legs.length
+      )
+        throw new Error("Atomic V1 operations must use distinct pools.");
       const branch = wirePlan.branches[0];
-      const operation = branch?.operations[0];
       if (
         wirePlan.branches.length !== 1 ||
         !branch ||
-        branch.operations.length !== 1 ||
-        !operation
+        branch.operations.length !== route.legs.length
       )
-        throw new Error("Atomic V1 requires one branch and one operation.");
-      const leg = route.legs[0];
+        throw new Error(
+          "Atomic V1 requires one branch with one or two operations.",
+        );
       const accepted = wirePlan.acceptedTerms;
       const program = accepted?.program;
       const acceptedBranch = program?.branches[0];
-      const acceptedOperation = acceptedBranch?.operations[0];
-      const acceptedPool =
-        acceptedOperation?.pool.case === "uniswapV3"
-          ? acceptedOperation.pool.value
-          : undefined;
+      const acceptedOperations = acceptedBranch?.operations;
       const quoteBlock = accepted?.quoteBlock;
       const acceptedExecutor = accepted?.executor;
       rejectUnknownFields(wirePlan);
@@ -268,16 +269,19 @@ export function atomicExecutorV1(
         !accepted ||
         !program ||
         !acceptedBranch ||
-        !acceptedOperation ||
-        !acceptedPool ||
+        !acceptedOperations ||
         !quoteBlock ||
         !acceptedExecutor ||
         program.formatVersion !== 1 ||
         program.branches.length !== 1 ||
-        acceptedBranch.operations.length !== 1 ||
+        acceptedOperations.length !== route.legs.length ||
         accepted.branchMinima.length !== 1 ||
         acceptedExecutor.version !== 2 ||
-        acceptedPool.feePips === undefined ||
+        acceptedOperations.some(
+          (operation) =>
+            operation.pool.case !== "uniswapV3" ||
+            operation.pool.value.feePips === undefined,
+        ) ||
         !wirePlan.planId ||
         wirePlan.planId.length !== 32 ||
         !wirePlan.transactionFingerprint ||
@@ -300,11 +304,16 @@ export function atomicExecutorV1(
         wirePlan.deadlineUnix !== p.deadlineUnix ||
         branch.amountInAtomic !== p.amountInAtomic ||
         branch.amountOutMinimumAtomic !== p.amountOutMinimumAtomic ||
-        operation.kind !== 1 ||
-        !same(operation.tokenOut, leg.tokenOut) ||
-        operation.feePips !== leg.selector.value ||
-        operation.tickSpacing !== 0 ||
-        !same(operation.poolId, zeroHash)
+        branch.operations.some((operation, i) => {
+          const leg = route.legs[i];
+          return (
+            operation.kind !== 1 ||
+            !same(operation.tokenOut, leg.tokenOut) ||
+            operation.feePips !== leg.selector.value ||
+            operation.tickSpacing !== 0 ||
+            !same(operation.poolId, zeroHash)
+          );
+        })
       )
         throw new Error("Atomic V1 plan differs from prepared route terms.");
       const plan = {
@@ -323,15 +332,13 @@ export function atomicExecutorV1(
               branch.amountOutMinimumAtomic,
               "Branch minimum output",
             ),
-            operations: [
-              {
-                kind: operation.kind,
-                tokenOut: getAddress(operation.tokenOut),
-                fee: operation.feePips,
-                tickSpacing: operation.tickSpacing,
-                poolId: operation.poolId as `0x${string}`,
-              },
-            ],
+            operations: branch.operations.map((operation) => ({
+              kind: operation.kind,
+              tokenOut: getAddress(operation.tokenOut),
+              fee: operation.feePips,
+              tickSpacing: operation.tickSpacing,
+              poolId: operation.poolId as `0x${string}`,
+            })),
           },
         ],
       } as const;
@@ -350,23 +357,41 @@ export function atomicExecutorV1(
         acceptedBranch.amountIn,
         "branch input",
       );
-      const acceptedOperationIn = requiredBytes(
-        acceptedOperation.tokenIn,
-        20,
-        "operation input token",
-      );
-      const acceptedOperationOut = requiredBytes(
-        acceptedOperation.tokenOut,
-        20,
-        "operation output token",
-      );
-      const acceptedFactory = requiredBytes(
-        acceptedPool.factory,
-        20,
-        "factory",
-      );
-      const acceptedRouter = requiredBytes(acceptedPool.router, 20, "router");
-      const acceptedPoolAddress = requiredBytes(acceptedPool.pool, 20, "pool");
+      const decodedOperations = acceptedOperations.map((operation, i) => {
+        if (
+          operation.pool.case !== "uniswapV3" ||
+          operation.pool.value.feePips === undefined
+        )
+          throw new Error("Invalid Atomic V1 accepted provider.");
+        return {
+          tokenIn: requiredBytes(
+            operation.tokenIn,
+            20,
+            `operation ${i} input token`,
+          ),
+          tokenOut: requiredBytes(
+            operation.tokenOut,
+            20,
+            `operation ${i} output token`,
+          ),
+          factory: requiredBytes(
+            operation.pool.value.factory,
+            20,
+            `operation ${i} factory`,
+          ),
+          router: requiredBytes(
+            operation.pool.value.router,
+            20,
+            `operation ${i} router`,
+          ),
+          pool: requiredBytes(
+            operation.pool.value.pool,
+            20,
+            `operation ${i} pool`,
+          ),
+          fee: operation.pool.value.feePips,
+        };
+      });
       const acceptedExecutorAddress = requiredBytes(
         acceptedExecutor.address,
         20,
@@ -408,12 +433,20 @@ export function atomicExecutorV1(
         !same(acceptedTokenOut, p.tokenOut) ||
         acceptedAmountIn !== plan.amountIn ||
         acceptedBranchAmount !== plan.amountIn ||
-        !same(acceptedOperationIn, p.tokenIn) ||
-        !same(acceptedOperationOut, p.tokenOut) ||
-        !same(acceptedFactory, factory) ||
-        !same(acceptedRouter, deployment.router) ||
-        !same(acceptedPoolAddress, leg.pool) ||
-        acceptedPool.feePips !== leg.selector.value ||
+        decodedOperations.some((operation, i) => {
+          const leg = route.legs[i];
+          return (
+            !same(operation.tokenIn, leg.tokenIn) ||
+            !same(operation.tokenOut, leg.tokenOut) ||
+            !same(operation.factory, factory) ||
+            !same(operation.router, deployment.router) ||
+            !same(operation.pool, leg.pool) ||
+            operation.fee !== leg.selector.value
+          );
+        }) ||
+        new Set(
+          decodedOperations.map((operation) => operation.pool.toLowerCase()),
+        ).size !== decodedOperations.length ||
         !same(acceptedExecutorAddress, address) ||
         !same(acceptedRuntimeHash, runtimeCodeHash) ||
         !same(acceptedSigner, p.recipient) ||
@@ -428,44 +461,46 @@ export function atomicExecutorV1(
       )
         throw new Error("Atomic V1 accepted terms differ from preparation.");
 
-      const providerHash = keccak256(
-        encodeAbiParameters(
-          [
-            { type: "bytes32" },
-            { type: "uint8" },
-            { type: "address" },
-            { type: "address" },
-            { type: "address" },
-            { type: "uint24" },
-          ],
-          [
-            domain("Epeius.AtomicProvider.v1"),
-            1,
-            getAddress(acceptedFactory),
-            getAddress(acceptedRouter),
-            getAddress(acceptedPoolAddress),
-            acceptedPool.feePips,
-          ],
-        ),
-      );
-      const operationHash = keccak256(
-        encodeAbiParameters(
-          [
-            { type: "bytes32" },
-            { type: "uint8" },
-            { type: "address" },
-            { type: "address" },
-            { type: "bytes32" },
-          ],
-          [
-            domain("Epeius.AtomicOperation.v1"),
-            1,
-            getAddress(acceptedOperationIn),
-            getAddress(acceptedOperationOut),
-            providerHash,
-          ],
-        ),
-      );
+      const operationHashes = decodedOperations.map((operation) => {
+        const providerHash = keccak256(
+          encodeAbiParameters(
+            [
+              { type: "bytes32" },
+              { type: "uint8" },
+              { type: "address" },
+              { type: "address" },
+              { type: "address" },
+              { type: "uint24" },
+            ],
+            [
+              domain("Epeius.AtomicProvider.v1"),
+              1,
+              getAddress(operation.factory),
+              getAddress(operation.router),
+              getAddress(operation.pool),
+              operation.fee,
+            ],
+          ),
+        );
+        return keccak256(
+          encodeAbiParameters(
+            [
+              { type: "bytes32" },
+              { type: "uint8" },
+              { type: "address" },
+              { type: "address" },
+              { type: "bytes32" },
+            ],
+            [
+              domain("Epeius.AtomicOperation.v1"),
+              1,
+              getAddress(operation.tokenIn),
+              getAddress(operation.tokenOut),
+              providerHash,
+            ],
+          ),
+        );
+      });
       const branchHash = keccak256(
         encodeAbiParameters(
           [
@@ -478,7 +513,7 @@ export function atomicExecutorV1(
             domain("Epeius.AtomicAcceptedBranch.v1"),
             acceptedBranchAmount,
             branchMinimum,
-            [operationHash],
+            operationHashes,
           ],
         ),
       );
@@ -543,24 +578,35 @@ export function atomicExecutorV1(
         quotedOutput: route.amountOutAtomic,
         routeDetails: [v3Review(route)],
         receipt: {
-          intermediate: [],
           atomicPlan: {
             executor: address,
             planHash: wirePlan.executorPlanHash,
             planId,
             transactionFingerprint: bytesToHex(wirePlan.transactionFingerprint),
-            operation: {
+            operations: route.legs.map((leg, i) => ({
               kind: 1,
-              tokenIn: p.tokenIn,
-              tokenOut: p.tokenOut,
-              amountInAtomic: p.amountInAtomic,
-              branchMinimumAtomic: branch.amountOutMinimumAtomic,
-            },
+              tokenIn: leg.tokenIn,
+              tokenOut: leg.tokenOut,
+              amountInAtomic: i === 0 ? p.amountInAtomic : undefined,
+            })),
+            branchAmountInAtomic: branch.amountInAtomic,
+            branchMinimumAtomic: branch.amountOutMinimumAtomic,
           },
+          intermediate: route.legs.slice(0, -1).map((leg) => ({
+            token: leg.tokenOut,
+            owner: deployment.router,
+          })),
           touched: [
             { token: p.tokenIn, owner: address },
+            ...route.legs
+              .slice(0, -1)
+              .map((leg) => ({ token: leg.tokenOut, owner: address })),
             { token: p.tokenOut, owner: address },
             { token: p.tokenIn, owner: deployment.router },
+            ...route.legs.slice(0, -1).map((leg) => ({
+              token: leg.tokenOut,
+              owner: deployment.router,
+            })),
             { token: p.tokenOut, owner: deployment.router },
           ],
         },

@@ -74,14 +74,72 @@ func TestAtomicV1BuildsExactOnePoolPlan(t *testing.T) {
 	}
 }
 
-func TestAtomicV1RejectsNonSingleUniswapRoute(t *testing.T) {
+func TestAtomicV1BuildsIndependentTwoHopVector(t *testing.T) {
+	var fixture struct {
+		ChainID, Executor, Sender, RuntimeCodeHash, Factory, Router, TokenIn, IntermediateToken, TokenOut     string
+		AmountInAtomic, AmountOutMinimumAtomic, DeadlineUnix, ExpiresAtUnix, QuoteBlockNumber, QuoteBlockHash string
+		Pools                                                                                                 []string
+		Calldata, ExecutorPlanHash, PlanID, TransactionFingerprint                                            string
+	}
+	raw, err := os.ReadFile("../../../../contracts/fixtures/atomic-v1-two-hop-plan.json")
+	if err != nil || json.Unmarshal(raw, &fixture) != nil {
+		t.Fatal("could not read two-hop Atomic V1 fixture")
+	}
+	strategy := atomicV1Preparation{chain: Chain{ChainID: fixture.ChainID, Config: config.Chain{
+		AtomicExecutor: &config.AtomicExecutor{Address: fixture.Executor, RuntimeCodeHash: fixture.RuntimeCodeHash, UniswapDeployment: "uni"},
+		Deployments:    map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Factory: fixture.Factory, Router: fixture.Router}},
+	}}}
+	route := &quotev1.RouteQuote{
+		RouteId: "uni:500:3000", Provider: "uniswap-v3", DeploymentId: "uni", AmountOutAtomic: "12",
+		Block: &quotev1.BlockContext{Number: fixture.QuoteBlockNumber, Hash: fixture.QuoteBlockHash},
+		Legs: []*quotev1.RouteLeg{
+			{Pool: fixture.Pools[0], TokenIn: fixture.TokenIn, TokenOut: fixture.IntermediateToken, Selector: &quotev1.RouteLeg_FeePips{FeePips: 500}},
+			{Pool: fixture.Pools[1], TokenIn: fixture.IntermediateToken, TokenOut: fixture.TokenOut, Selector: &quotev1.RouteLeg_FeePips{FeePips: 3000}},
+		},
+	}
+	p := &quotev1.PrepareExecutionResponse{
+		Recipient: fixture.Sender, TokenIn: fixture.TokenIn, TokenOut: fixture.TokenOut, AmountInAtomic: fixture.AmountInAtomic,
+		AmountOutMinimumAtomic: fixture.AmountOutMinimumAtomic, ExpiresAtUnix: fixture.ExpiresAtUnix, DeadlineUnix: fixture.DeadlineUnix, Route: route,
+	}
+	plan, message := strategy.Build(p)
+	if message != "" || plan.atomicPlan == nil || plan.transaction == nil {
+		t.Fatalf("two-hop build failed: %s", message)
+	}
+	if plan.transaction.Data != fixture.Calldata || plan.atomicPlan.ExecutorPlanHash != fixture.ExecutorPlanHash || hexutil.Encode(plan.atomicPlan.PlanId) != fixture.PlanID || hexutil.Encode(plan.atomicPlan.TransactionFingerprint) != fixture.TransactionFingerprint {
+		t.Fatalf("two-hop vector mismatch: plan=%+v transaction=%+v", plan.atomicPlan, plan.transaction)
+	}
+	if len(plan.atomicPlan.Branches) != 1 || len(plan.atomicPlan.Branches[0].Operations) != 2 || len(plan.atomicPlan.AcceptedTerms.GetProgram().GetBranches()[0].GetOperations()) != 2 || len(plan.checks.ClearAllowances) != 2 || len(plan.checks.Preserve) != 6 {
+		t.Fatalf("two-hop obligations incomplete: %+v", plan)
+	}
+	saved := storedQuote{request: &quotev1.QuoteRequest{TokenIn: fixture.TokenIn, TokenOut: fixture.TokenOut}}
+	if _, message := strategy.Select(t.Context(), saved, nil, route); message != "" {
+		t.Fatalf("valid returned two-hop route rejected: %s", message)
+	}
+
+	for name, mutate := range map[string]func(*quotev1.RouteQuote){
+		"broken continuity": func(value *quotev1.RouteQuote) { value.Legs[1].TokenIn = fixture.TokenIn },
+		"repeated pool":     func(value *quotev1.RouteQuote) { value.Legs[1].Pool = value.Legs[0].Pool },
+		"reverse pool": func(value *quotev1.RouteQuote) {
+			value.Legs[1].Pool = value.Legs[0].Pool
+			value.Legs[1].TokenOut = fixture.TokenIn
+		},
+	} {
+		changed := proto.CloneOf(route)
+		mutate(changed)
+		if _, message := strategy.Select(t.Context(), saved, nil, changed); message == "" {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+}
+
+func TestAtomicV1RejectsUnsupportedUniswapRoute(t *testing.T) {
 	strategy := atomicV1Preparation{chain: Chain{Config: config.Chain{AtomicExecutor: &config.AtomicExecutor{UniswapDeployment: "uni"}}}}
 	saved := storedQuote{request: &quotev1.QuoteRequest{TokenIn: tokenA, TokenOut: tokenC}}
 	for _, route := range []*quotev1.RouteQuote{
 		nil,
 		{Provider: "pancake-v3", DeploymentId: "uni", Legs: []*quotev1.RouteLeg{{}}},
 		{Provider: "uniswap-v3", DeploymentId: "other", Legs: []*quotev1.RouteLeg{{}}},
-		{Provider: "uniswap-v3", DeploymentId: "uni", Legs: []*quotev1.RouteLeg{{}, {}}},
+		{Provider: "uniswap-v3", DeploymentId: "uni", Legs: []*quotev1.RouteLeg{{}, {}, {}}},
 		{Provider: "uniswap-v3", DeploymentId: "uni", Legs: []*quotev1.RouteLeg{nil}},
 	} {
 		if _, message := strategy.Select(t.Context(), saved, nil, route); message == "" {
@@ -95,18 +153,24 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 	const factory = "0x4444444444444444444444444444444444444444"
 	const router = "0x5555555555555555555555555555555555555555"
 	const pool = "0x3333333333333333333333333333333333333333"
+	const pool2 = "0x6666666666666666666666666666666666666666"
 	const sender = "0x2222222222222222222222222222222222222222"
+	intermediate := common.HexToAddress("0x7777777777777777777777777777777777777777")
 	route := &quotev1.RouteQuote{
 		RouteId: "uni:500", Provider: "uniswap-v3", DeploymentId: "uni", AmountOutAtomic: "347415981",
 		Block: &quotev1.BlockContext{Number: "12345677", Hash: blockHash},
-		Legs:  []*quotev1.RouteLeg{{Pool: pool, TokenIn: testWETH.Hex(), TokenOut: testUSDC.Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: 500}}},
+		Legs: []*quotev1.RouteLeg{
+			{Pool: pool, TokenIn: testWETH.Hex(), TokenOut: intermediate.Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: 500}},
+			{Pool: pool2, TokenIn: intermediate.Hex(), TokenOut: testUSDC.Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: 500}},
+		},
 	}
 	chainConfig := config.Chain{
 		ExecutionEnabled: true,
-		Tokens:           []config.Token{{Address: testWETH.Hex()}, {Address: testUSDC.Hex()}},
+		Tokens:           []config.Token{{Address: testWETH.Hex()}, {Address: intermediate.Hex()}, {Address: testUSDC.Hex()}},
 		AtomicExecutor:   &config.AtomicExecutor{Address: executor, RuntimeCodeHash: crypto.Keccak256Hash([]byte{1}).Hex(), UniswapDeployment: "uni"},
 		Deployments:      map[string]config.Deployment{"uni": {Kind: "uniswap-v3", Factory: factory, Router: router, Fees: []uint32{500}}},
 	}
+	poolCalls := 0
 	reader := executorReader{executionFake{readerFake: readerFake{
 		snapshot: func(context.Context) (rpc.Snapshot, error) {
 			return rpc.Snapshot{ChainID: "8453", BlockNumber: "12345678", BlockHash: blockHash, Timestamp: 1999999880}, nil
@@ -121,7 +185,12 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 			case hexutil.Encode(contractabi.ExecutorV2.Methods["version"].ID):
 				return uintWord(2), nil
 			case "0x1698ee82":
-				return common.LeftPadBytes(common.HexToAddress(pool).Bytes(), 32), nil
+				poolCalls++
+				selected := pool
+				if poolCalls%2 == 0 {
+					selected = pool2
+				}
+				return common.LeftPadBytes(common.HexToAddress(selected).Bytes(), 32), nil
 			case "0xdd62ed3e":
 				return uintWord(123456789012345678), nil
 			default:
@@ -139,7 +208,7 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 		Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: chainConfig, AtomicPreparer: atomicV1Preparation{chain: Chain{ChainID: "8453", Client: reader, Config: chainConfig}}}},
 		Simulator: simulationFake(func(_ context.Context, tx *quotev1.UnsignedTransaction, checks SimulationChecks, _ rpc.Snapshot, amount, minimum *big.Int) (string, error) {
 			simulated = true
-			if tx.To != executor || amount.String() != "123456789012345678" || minimum.String() != "345678901" || len(checks.ClearAllowances) != 1 {
+			if tx.To != executor || amount.String() != "123456789012345678" || minimum.String() != "345678901" || len(checks.ClearAllowances) != 2 || len(checks.Preserve) != 6 {
 				t.Fatal("wrong simulation terms")
 			}
 			return "347415980", nil
