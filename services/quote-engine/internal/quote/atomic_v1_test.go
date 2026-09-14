@@ -267,6 +267,8 @@ func TestPrepareAtomicV1RunsVerificationAndSimulation(t *testing.T) {
 				return common.LeftPadBytes(common.HexToAddress(router).Bytes(), 32), nil
 			case hexutil.Encode(contractabi.ExecutorV2.Methods["pancakeRouter"].ID):
 				return make([]byte, 32), nil
+			case hexutil.Encode(contractabi.ExecutorV2.Methods["slipstreamRouter"].ID):
+				return make([]byte, 32), nil
 			case hexutil.Encode(contractabi.ExecutorV2.Methods["version"].ID):
 				return uintWord(2), nil
 			case "0x1698ee82":

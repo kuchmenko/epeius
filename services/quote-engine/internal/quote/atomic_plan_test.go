@@ -26,6 +26,7 @@ type atomicPlanReader struct {
 	program   *atomicv1.PlanProgram
 	runtime   []byte
 	allowance *big.Int
+	discount  *big.Int
 	snapshots []rpc.Snapshot
 	canonical int
 }
@@ -54,11 +55,16 @@ func (r *atomicPlanReader) Call(_ context.Context, to common.Address, data []byt
 	executor := common.HexToAddress(r.config.AtomicExecutor.Address)
 	uniswap := r.config.Deployments[r.config.AtomicExecutor.UniswapDeployment]
 	pancake := r.config.Deployments[r.config.AtomicExecutor.PancakeDeployment]
+	slipstream := r.config.Deployments[r.config.AtomicExecutor.SlipstreamDeployment]
+	feeModule := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["uniswapRouter"].ID) {
 		return contractabi.ExecutorV2.Methods["uniswapRouter"].Outputs.Pack(common.HexToAddress(uniswap.Router))
 	}
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["pancakeRouter"].ID) {
 		return contractabi.ExecutorV2.Methods["pancakeRouter"].Outputs.Pack(common.HexToAddress(pancake.Router))
+	}
+	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["slipstreamRouter"].ID) {
+		return contractabi.ExecutorV2.Methods["slipstreamRouter"].Outputs.Pack(common.HexToAddress(slipstream.Router))
 	}
 	if to == executor && bytes.Equal(data[:4], contractabi.ExecutorV2.Methods["version"].ID) {
 		return contractabi.ExecutorV2.Methods["version"].Outputs.Pack(big.NewInt(2))
@@ -71,6 +77,28 @@ func (r *atomicPlanReader) Call(_ context.Context, to common.Address, data []byt
 				return contractabi.UniswapV3Factory.Methods["getPool"].Outputs.Pack(common.BytesToAddress(pool.Pool))
 			}
 		}
+	}
+	if to == common.HexToAddress(slipstream.Factory) && bytes.Equal(data[:4], contractabi.AerodromeSlipstreamFactory.Methods["getPool"].ID) {
+		values, _ := contractabi.AerodromeSlipstreamFactory.Methods["getPool"].Inputs.Unpack(data[4:])
+		for _, operation := range r.program.Branches[0].Operations {
+			pool := operation.GetSlipstreamInitial()
+			if pool != nil && values[0].(common.Address) == common.BytesToAddress(operation.TokenIn) && values[1].(common.Address) == common.BytesToAddress(operation.TokenOut) && values[2].(*big.Int).Int64() == int64(pool.GetTickSpacing()) {
+				return contractabi.AerodromeSlipstreamFactory.Methods["getPool"].Outputs.Pack(common.BytesToAddress(pool.Pool))
+			}
+		}
+	}
+	if to == common.HexToAddress(slipstream.Factory) && bytes.Equal(data[:4], contractabi.AerodromeSlipstreamFactory.Methods["swapFeeModule"].ID) {
+		return contractabi.AerodromeSlipstreamFactory.Methods["swapFeeModule"].Outputs.Pack(feeModule)
+	}
+	if to == feeModule && bytes.Equal(data[:4], contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["factory"].ID) {
+		return contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["factory"].Outputs.Pack(common.HexToAddress(slipstream.Factory))
+	}
+	if to == feeModule && bytes.Equal(data[:4], contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["discounted"].ID) {
+		discount := r.discount
+		if discount == nil {
+			discount = new(big.Int)
+		}
+		return contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["discounted"].Outputs.Pack(discount)
 	}
 	if to == common.BytesToAddress(r.program.TokenIn) && bytes.Equal(data[:4], erc20ABI.Methods["allowance"].ID) {
 		return erc20ABI.Methods["allowance"].Outputs.Pack(r.allowance)
@@ -139,7 +167,8 @@ func atomicPlanLogs(t *testing.T, executor common.Address, caller common.Address
 	previous := new(big.Int).SetBytes(program.AmountIn)
 	for i, output := range outputs {
 		operation := program.Branches[0].Operations[i]
-		_, kind := atomicV3Pool(operation)
+		pool, _ := atomicPool(operation)
+		kind := pool.kind
 		data, err := contractabi.ExecutorV2.Events["OperationExecuted"].Inputs.NonIndexed().Pack(kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), previous, big.NewInt(output))
 		if err != nil {
 			t.Fatal(err)
@@ -152,6 +181,16 @@ func atomicPlanLogs(t *testing.T, executor common.Address, caller common.Address
 	planData, _ := contractabi.ExecutorV2.Events["PlanExecuted"].Inputs.NonIndexed().Pack(common.BytesToAddress(program.TokenIn), new(big.Int).SetBytes(program.AmountIn), previous)
 	logs = append(logs, SimulationLog{Address: executor, Topics: []common.Hash{atomicPlanTopic, planHash, common.BytesToHash(common.LeftPadBytes(caller.Bytes(), 32)), common.BytesToHash(common.LeftPadBytes(program.TokenOut, 32))}, Data: planData})
 	return logs
+}
+
+func withAtomicNativeRefund(t *testing.T, logs []SimulationLog, executor, caller common.Address, planHash common.Hash, amount int64) []SimulationLog {
+	t.Helper()
+	data, err := contractabi.ExecutorV2.Events["NativeRefunded"].Inputs.NonIndexed().Pack(big.NewInt(amount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refund := SimulationLog{Address: executor, Topics: []common.Hash{atomicNativeTopic, planHash, common.BytesToHash(common.LeftPadBytes(caller.Bytes(), 32))}, Data: data}
+	return append(append(logs[:len(logs)-1:len(logs)-1], refund), logs[len(logs)-1])
 }
 
 func pancakeAtomicPlanTestData(t *testing.T) (Chain, *atomicv1.PlanCandidate, *atomicv1.AcceptedPlanTerms, common.Hash) {
@@ -178,6 +217,68 @@ func pancakeAtomicPlanTestData(t *testing.T) (Chain, *atomicv1.PlanCandidate, *a
 		t.Fatal(err)
 	}
 	return chain, candidate, terms, planID
+}
+
+func slipstreamAtomicPlanTestData(t *testing.T) (Chain, *atomicv1.PlanCandidate, *atomicv1.AcceptedPlanTerms, common.Hash) {
+	t.Helper()
+	chain, candidate, terms, _ := atomicPlanTestData(t)
+	factory := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	router := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	spacings := []int32{100, 200}
+	for i, operation := range candidate.Program.Branches[0].Operations {
+		pool := operation.GetUniswapV3()
+		operation.Pool = &atomicv1.PoolOperation_SlipstreamInitial{SlipstreamInitial: &atomicv1.SlipstreamPool{Factory: factory.Bytes(), Router: router.Bytes(), Pool: pool.Pool, TickSpacing: proto.Int32(spacings[i])}}
+	}
+	candidateID, err := atomicCandidateHash(candidate.Program, candidate.QuoteBlock, candidate.BranchQuotes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.CandidateId = candidateID.Bytes()
+	terms.Program = proto.CloneOf(candidate.Program)
+	chain.Config.Deployments = map[string]config.Deployment{"slip": {Kind: "aerodrome-slipstream", Factory: factory.Hex(), Router: router.Hex()}}
+	chain.Config.AtomicExecutor.UniswapDeployment = ""
+	chain.Config.AtomicExecutor.SlipstreamDeployment = "slip"
+	planID, err := atomicV1PlanID(terms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return chain, candidate, terms, planID
+}
+
+func TestPrepareSlipstreamAtomicPlanUsesKindThreeMeasuredEventsAndZeroDiscount(t *testing.T) {
+	chain, candidate, terms, planID := slipstreamAtomicPlanTestData(t)
+	reader := &atomicPlanReader{config: chain.Config, program: candidate.Program, runtime: []byte{1, 2, 3, 4}, allowance: big.NewInt(37), snapshots: []rpc.Snapshot{{ChainID: "8453", BlockNumber: "12345679", BlockHash: common.HexToHash("0xbb").Hex(), Timestamp: uint64(time.Now().Unix())}}}
+	chain.Client = reader
+	validated, err := validateAcceptedAtomicTerms(chain, terms, planID.Bytes(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedPlan := atomicV1ExecutorPlan{
+		TokenIn: common.BytesToAddress(candidate.Program.TokenIn), TokenOut: common.BytesToAddress(candidate.Program.TokenOut), AmountIn: big.NewInt(37), MinAmountOut: big.NewInt(60), Deadline: new(big.Int).SetBytes(terms.DeadlineUnix),
+		Branches: []atomicV1Branch{{AmountIn: big.NewInt(37), MinAmountOut: big.NewInt(60), Operations: []atomicV1Operation{{Kind: 3, TokenOut: common.BytesToAddress(candidate.Program.Branches[0].Operations[0].TokenOut), Fee: new(big.Int), TickSpacing: big.NewInt(100)}, {Kind: 3, TokenOut: common.BytesToAddress(candidate.Program.Branches[0].Operations[1].TokenOut), Fee: new(big.Int), TickSpacing: big.NewInt(200)}}}},
+	}
+	expectedData, err := contractabi.ExecutorV2.Pack("execute", expectedPlan)
+	if err != nil || validated.transaction.Data != hexutil.Encode(expectedData) {
+		t.Fatal("Slipstream operation did not encode kind 3")
+	}
+	executor, signer := common.BytesToAddress(terms.Executor.Address), common.BytesToAddress(terms.Signer)
+	store := NewStore()
+	quoteID := bytes.Repeat([]byte{0x28}, 32)
+	store.saveAtomicQuote("base", &atomicv1.PlanQuoteResponse{QuoteId: quoteID, Candidates: []*atomicv1.PlanCandidate{candidate}, SearchComplete: proto.Bool(true)}, time.Now())
+	logs := atomicPlanLogs(t, executor, signer, validated.executorPlanHash, candidate.Program, 83, 61)
+	logs = withAtomicNativeRefund(t, logs, executor, signer, validated.executorPlanHash, 1)
+	handler := Handler{Chains: map[string]Chain{"base": chain}, Store: store, Simulator: &atomicPlanSimulator{results: []SimulationResult{{Output: "61", Logs: logs}}}}
+	response, err := handler.PreparePlan(t.Context(), connect.NewRequest(&atomicv1.PreparePlanRequest{QuoteId: quoteID, CandidateId: candidate.CandidateId, Terms: terms, PlanId: planID.Bytes()}))
+	if err != nil || response.Msg.GetStatus() != atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_READY || new(big.Int).SetBytes(response.Msg.Simulation.BranchResults[0].OperationOutputs[0]).Cmp(big.NewInt(83)) != 0 {
+		t.Fatalf("Slipstream preparation failed: %+v %v", response, err)
+	}
+
+	reader.discount = big.NewInt(1)
+	reader.snapshots = []rpc.Snapshot{{ChainID: "8453", BlockNumber: "12345680", BlockHash: common.HexToHash("0xcc").Hex(), Timestamp: uint64(time.Now().Unix())}}
+	rejected, err := handler.PreparePlan(t.Context(), connect.NewRequest(&atomicv1.PreparePlanRequest{QuoteId: quoteID, CandidateId: candidate.CandidateId, Terms: terms, PlanId: planID.Bytes()}))
+	if err != nil || rejected.Msg.GetStatus() != atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_REJECTED {
+		t.Fatalf("discounted Slipstream signer was not rejected: %+v %v", rejected, err)
+	}
 }
 
 func TestPreparePancakeAtomicPlanUsesKindTwoAndMeasuredEvents(t *testing.T) {
@@ -366,6 +467,10 @@ func TestAtomicPlanRejectsMutatedTermsAndSimulationEvents(t *testing.T) {
 	}
 	executor, signer := common.BytesToAddress(terms.Executor.Address), common.BytesToAddress(terms.Signer)
 	base := atomicPlanLogs(t, executor, signer, validated.executorPlanHash, candidate.Program, 83, 61)
+	withRefund := withAtomicNativeRefund(t, base, executor, signer, validated.executorPlanHash, 1)
+	if _, err := validateAtomicSimulationLogs(withRefund, executor, signer, validated.executorPlanHash, candidate.Program, big.NewInt(60)); err == nil {
+		t.Fatal("non-Slipstream native refund event accepted")
+	}
 	eventMutations := map[string]func([]SimulationLog){
 		"emitter": func(v []SimulationLog) { v[0].Address[19]++ },
 		"hash":    func(v []SimulationLog) { v[0].Topics[1][31]++ },

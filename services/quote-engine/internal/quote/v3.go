@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv3"
 	"google.golang.org/protobuf/proto"
 )
@@ -105,11 +106,13 @@ type candidate struct {
 	id, deployment string
 	tokens         []common.Address
 	fees           []uint32
+	spacings       []int32
 }
 
 type candidateDeployment struct {
-	id   string
-	fees []uint32
+	id       string
+	fees     []uint32
+	spacings []int32
 }
 
 type candidateIterator struct {
@@ -136,9 +139,15 @@ func newCandidates(chain config.Chain, in, out common.Address) *candidateIterato
 	}
 	sort.Slice(iterator.intermediates, func(i, j int) bool { return iterator.intermediates[i].Hex() < iterator.intermediates[j].Hex() })
 	for _, id := range ids {
-		fees := append([]uint32(nil), chain.Deployments[id].Fees...)
+		deployment := chain.Deployments[id]
+		fees := append([]uint32(nil), deployment.Fees...)
 		sort.Slice(fees, func(i, j int) bool { return fees[i] < fees[j] })
-		iterator.deployments = append(iterator.deployments, candidateDeployment{id: id, fees: fees})
+		var spacings []int32
+		if options, ok := deployment.ProviderConfig.(slipstream.Options); ok {
+			spacings = append(spacings, options.TickSpacings...)
+			sort.Slice(spacings, func(i, j int) bool { return spacings[i] < spacings[j] })
+		}
+		iterator.deployments = append(iterator.deployments, candidateDeployment{id: id, fees: fees, spacings: spacings})
 	}
 	return iterator
 }
@@ -151,29 +160,49 @@ func (i *candidateIterator) next(ctx context.Context) (int, candidate, bool) {
 	}
 	for i.deployment < len(i.deployments) {
 		deployment := i.deployments[i.deployment]
+		if len(deployment.spacings) != 0 {
+			if i.direct < len(deployment.spacings) {
+				spacing := deployment.spacings[i.direct]
+				i.direct++
+				return i.take(candidate{fmt.Sprintf("%s:%d", deployment.id, spacing), deployment.id, []common.Address{i.in, i.out}, nil, []int32{spacing}})
+			}
+			if i.middle < len(i.intermediates) {
+				first, second := deployment.spacings[i.first], deployment.spacings[i.second]
+				middle := i.intermediates[i.middle]
+				i.advance(len(deployment.spacings))
+				return i.take(candidate{fmt.Sprintf("%s:%d:%s:%d", deployment.id, first, middle.Hex(), second), deployment.id, []common.Address{i.in, middle, i.out}, nil, []int32{first, second}})
+			}
+			i.deployment++
+			i.direct, i.middle, i.first, i.second = 0, 0, 0, 0
+			continue
+		}
 		if i.direct < len(deployment.fees) {
 			fee := deployment.fees[i.direct]
 			i.direct++
-			return i.take(candidate{fmt.Sprintf("%s:%d", deployment.id, fee), deployment.id, []common.Address{i.in, i.out}, []uint32{fee}})
+			return i.take(candidate{fmt.Sprintf("%s:%d", deployment.id, fee), deployment.id, []common.Address{i.in, i.out}, []uint32{fee}, nil})
 		}
 		if i.middle < len(i.intermediates) {
 			first, second := deployment.fees[i.first], deployment.fees[i.second]
 			middle := i.intermediates[i.middle]
-			i.second++
-			if i.second == len(deployment.fees) {
-				i.second = 0
-				i.first++
-				if i.first == len(deployment.fees) {
-					i.first = 0
-					i.middle++
-				}
-			}
-			return i.take(candidate{fmt.Sprintf("%s:%d:%s:%d", deployment.id, first, middle.Hex(), second), deployment.id, []common.Address{i.in, middle, i.out}, []uint32{first, second}})
+			i.advance(len(deployment.fees))
+			return i.take(candidate{fmt.Sprintf("%s:%d:%s:%d", deployment.id, first, middle.Hex(), second), deployment.id, []common.Address{i.in, middle, i.out}, []uint32{first, second}, nil})
 		}
 		i.deployment++
 		i.direct, i.middle, i.first, i.second = 0, 0, 0, 0
 	}
 	return 0, candidate{}, false
+}
+
+func (i *candidateIterator) advance(selectorCount int) {
+	i.second++
+	if i.second == selectorCount {
+		i.second = 0
+		i.first++
+		if i.first == selectorCount {
+			i.first = 0
+			i.middle++
+		}
+	}
 }
 
 func (i *candidateIterator) take(value candidate) (int, candidate, bool) {

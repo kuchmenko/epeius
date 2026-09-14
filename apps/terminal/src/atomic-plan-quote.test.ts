@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { create } from "@bufbuild/protobuf";
-import { type Hex, hexToBytes } from "viem";
+import {
+  encodeAbiParameters,
+  type Hex,
+  hexToBytes,
+  keccak256,
+  stringToHex,
+} from "viem";
 import {
   BranchQuoteSchema,
   PinnedBlockSchema,
@@ -9,6 +15,7 @@ import {
   PlanProgramSchema,
   PlanQuoteResponseSchema,
   PoolOperationSchema,
+  SlipstreamPoolSchema,
   V3PoolSchema,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import { TokenSchema } from "../../../generated/ts/epeius/quote/v1/quote_pb";
@@ -24,6 +31,9 @@ const fixture = await Bun.file(
 ).json();
 const pancakeFixture = await Bun.file(
   "contracts/fixtures/atomic-v1-pancake.json",
+).json();
+const slipstreamFixture = await Bun.file(
+  "contracts/fixtures/atomic-v1-slipstream.json",
 ).json();
 const word = (value: string) =>
   hexToBytes(`0x${BigInt(value).toString(16).padStart(64, "0")}`);
@@ -87,6 +97,58 @@ function response(
   });
 }
 
+function slipstreamResponse(spacings = slipstreamFixture.tickSpacings) {
+  const tokens = [
+    slipstreamFixture.tokenIn,
+    slipstreamFixture.intermediateToken,
+    slipstreamFixture.tokenOut,
+  ];
+  const candidate = create(PlanCandidateSchema, {
+    candidateId: hexToBytes(slipstreamFixture.candidateId),
+    program: create(PlanProgramSchema, {
+      formatVersion: 1,
+      chainId: word(slipstreamFixture.chainId),
+      tokenIn: address(slipstreamFixture.tokenIn),
+      tokenOut: address(slipstreamFixture.tokenOut),
+      amountIn: word(slipstreamFixture.amountIn),
+      branches: [
+        create(PlanBranchSchema, {
+          amountIn: word(slipstreamFixture.amountIn),
+          operations: spacings.map((tickSpacing: number, index: number) =>
+            create(PoolOperationSchema, {
+              tokenIn: address(tokens[index]),
+              tokenOut: address(tokens[index + 1]),
+              pool: {
+                case: "slipstreamInitial",
+                value: create(SlipstreamPoolSchema, {
+                  factory: address(slipstreamFixture.factory),
+                  router: address(slipstreamFixture.router),
+                  pool: address(slipstreamFixture.pools[index]),
+                  tickSpacing,
+                }),
+              },
+            }),
+          ),
+        }),
+      ],
+    }),
+    quoteBlock: create(PinnedBlockSchema, {
+      number: word(slipstreamFixture.quoteBlockNumber),
+      hash: hexToBytes(slipstreamFixture.quoteBlockHash),
+    }),
+    branchQuotes: [
+      create(BranchQuoteSchema, {
+        operationOutputs: slipstreamFixture.operationOutputs.map(word),
+      }),
+    ],
+  });
+  return create(PlanQuoteResponseSchema, {
+    quoteId: new Uint8Array(32).fill(0xbb),
+    candidates: [candidate],
+    searchComplete: true,
+  });
+}
+
 function program(value: ReturnType<typeof response>) {
   const result = value.candidates[0]?.program;
   if (!result) throw new Error("test candidate program missing");
@@ -133,6 +195,55 @@ test("Atomic Pancake candidate identity matches the independent Cast two-hop vec
       amountIn: BigInt(pancakeFixture.amountIn),
     }),
   ).toBe(value);
+});
+
+test("Atomic Slipstream candidate identity matches the independent Cast int24 vector", () => {
+  const value = slipstreamResponse();
+  expect(atomicCandidateId(value.candidates[0])).toBe(
+    slipstreamFixture.candidateId,
+  );
+  expect(
+    validateAtomicPlanQuote(value, {
+      chainId: BigInt(slipstreamFixture.chainId),
+      tokenIn: slipstreamFixture.tokenIn,
+      tokenOut: slipstreamFixture.tokenOut,
+      amountIn: BigInt(slipstreamFixture.amountIn),
+    }),
+  ).toBe(value);
+
+  const negative = slipstreamResponse([-100, 200]);
+  const negativeProviderHash = keccak256(
+    encodeAbiParameters(
+      [
+        { type: "bytes32" },
+        { type: "uint8" },
+        { type: "address" },
+        { type: "address" },
+        { type: "address" },
+        { type: "int24" },
+      ],
+      [
+        keccak256(stringToHex("Epeius.AtomicProvider.v1")),
+        3,
+        slipstreamFixture.factory,
+        slipstreamFixture.router,
+        slipstreamFixture.pools[0],
+        -100,
+      ],
+    ),
+  );
+  expect(negativeProviderHash).toBe(
+    slipstreamFixture.negativeSpacingProviderHash,
+  );
+  expect(negativeProviderHash).not.toBe(slipstreamFixture.providerHashes[0]);
+  expect(() =>
+    validateAtomicPlanQuote(negative, {
+      chainId: BigInt(slipstreamFixture.chainId),
+      tokenIn: slipstreamFixture.tokenIn,
+      tokenOut: slipstreamFixture.tokenOut,
+      amountIn: BigInt(slipstreamFixture.amountIn),
+    }),
+  ).toThrow();
 });
 
 test("Atomic quote rejects every identity and recursive structure mutation", () => {

@@ -12,6 +12,7 @@ import (
 var (
 	atomicOperationTopic = crypto.Keccak256Hash([]byte("OperationExecuted(bytes32,uint256,uint256,uint8,address,address,uint256,uint256)"))
 	atomicBranchTopic    = crypto.Keccak256Hash([]byte("BranchExecuted(bytes32,uint256,uint256,uint256)"))
+	atomicNativeTopic    = crypto.Keccak256Hash([]byte("NativeRefunded(bytes32,address,uint256)"))
 	atomicPlanTopic      = crypto.Keccak256Hash([]byte("PlanExecuted(bytes32,address,address,address,uint256,uint256)"))
 )
 
@@ -26,7 +27,15 @@ func validateAtomicSimulationLogs(logs []SimulationLog, executor, caller common.
 		}
 	}
 	operations := program.Branches[0].Operations
-	if len(actual) != len(operations)+2 {
+	if len(actual) != len(operations)+2 && len(actual) != len(operations)+3 {
+		return AtomicSimulationResult{}, errSimulationEvidence
+	}
+	hasSlipstream := false
+	for _, operation := range operations {
+		pool, ok := atomicPool(operation)
+		hasSlipstream = hasSlipstream || (ok && pool.kind == 3)
+	}
+	if len(actual) == len(operations)+3 && !hasSlipstream {
 		return AtomicSimulationResult{}, errSimulationEvidence
 	}
 	amountIn := new(big.Int).SetBytes(program.AmountIn)
@@ -46,8 +55,9 @@ func validateAtomicSimulationLogs(logs []SimulationLog, executor, caller common.
 		tokenOut, outOK := values[2].(common.Address)
 		measuredIn, amountOK := values[3].(*big.Int)
 		measuredOut, outputOK := values[4].(*big.Int)
-		_, expectedKind := atomicV3Pool(operation)
-		if !kindOK || !inOK || !outOK || !amountOK || !outputOK || kind != expectedKind || expectedKind == 0 || tokenIn != common.BytesToAddress(operation.TokenIn) || tokenOut != common.BytesToAddress(operation.TokenOut) || measuredIn.Cmp(previous) != 0 || measuredOut.Sign() <= 0 {
+		pool, ok := atomicPool(operation)
+		expectedKind := pool.kind
+		if !ok || !kindOK || !inOK || !outOK || !amountOK || !outputOK || kind != expectedKind || expectedKind == 0 || tokenIn != common.BytesToAddress(operation.TokenIn) || tokenOut != common.BytesToAddress(operation.TokenOut) || measuredIn.Cmp(previous) != 0 || measuredOut.Sign() <= 0 {
 			return AtomicSimulationResult{}, errSimulationEvidence
 		}
 		outputs[i] = new(big.Int).Set(measuredOut)
@@ -66,7 +76,19 @@ func validateAtomicSimulationLogs(logs []SimulationLog, executor, caller common.
 	if !inputOK || !outputOK || branchInput.Cmp(amountIn) != 0 || branchOutput.Cmp(previous) != 0 || previous.Cmp(minimum) < 0 {
 		return AtomicSimulationResult{}, errSimulationEvidence
 	}
-	plan := actual[len(operations)+1]
+	planIndex := len(operations) + 1
+	if len(actual) == len(operations)+3 {
+		refund := actual[planIndex]
+		if len(refund.Topics) != 3 || refund.Topics[0] != atomicNativeTopic || refund.Topics[1] != planHash || refund.Topics[2] != common.BytesToHash(common.LeftPadBytes(caller.Bytes(), 32)) {
+			return AtomicSimulationResult{}, errSimulationEvidence
+		}
+		values, err := contractabi.ExecutorV2.Events["NativeRefunded"].Inputs.NonIndexed().Unpack(refund.Data)
+		if err != nil || len(values) != 1 || values[0].(*big.Int).Sign() <= 0 {
+			return AtomicSimulationResult{}, errSimulationEvidence
+		}
+		planIndex++
+	}
+	plan := actual[planIndex]
 	if len(plan.Topics) != 4 || plan.Topics[0] != atomicPlanTopic || plan.Topics[1] != planHash || plan.Topics[2] != common.BytesToHash(common.LeftPadBytes(caller.Bytes(), 32)) || plan.Topics[3] != common.BytesToHash(common.LeftPadBytes(program.TokenOut, 32)) {
 		return AtomicSimulationResult{}, errSimulationEvidence
 	}

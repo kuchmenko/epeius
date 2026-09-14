@@ -54,6 +54,8 @@ export type TrustedExecution = {
     router: string;
     pancakeFactory?: string;
     pancakeRouter?: string;
+    slipstreamFactory?: string;
+    slipstreamRouter?: string;
   };
 };
 

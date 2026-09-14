@@ -54,11 +54,31 @@ function rejectUnknown(value: unknown) {
   for (const child of Object.values(value)) rejectUnknown(child);
 }
 
-const atomicV3Pool = (operation: PoolOperation) => {
+const atomicPool = (operation: PoolOperation) => {
   if (operation.pool.case === "uniswapV3")
-    return { pool: operation.pool.value, kind: 1, name: "Uniswap V3" };
+    return {
+      pool: operation.pool.value,
+      kind: 1,
+      name: "Uniswap V3",
+      selector: operation.pool.value.feePips,
+      selectorType: "uint24" as const,
+    };
   if (operation.pool.case === "pancakeV3")
-    return { pool: operation.pool.value, kind: 2, name: "Pancake V3" };
+    return {
+      pool: operation.pool.value,
+      kind: 2,
+      name: "Pancake V3",
+      selector: operation.pool.value.feePips,
+      selectorType: "uint24" as const,
+    };
+  if (operation.pool.case === "slipstreamInitial")
+    return {
+      pool: operation.pool.value,
+      kind: 3,
+      name: "Aerodrome Slipstream Initial",
+      selector: operation.pool.value.tickSpacing,
+      selectorType: "int24" as const,
+    };
   throw new Error("Atomic V1 quote uses an unsupported operation.");
 };
 
@@ -76,9 +96,14 @@ export function atomicCandidateId(candidate: PlanCandidate) {
     if (!quote || quote.operationOutputs.length !== branch.operations.length)
       throw new Error("Atomic V1 operation output cardinality is invalid.");
     for (const operation of branch.operations) {
-      const { pool, kind } = atomicV3Pool(operation);
-      if (pool.feePips === undefined || pool.feePips >= 1_000_000)
-        throw new Error("Atomic V1 quote has an invalid pool fee.");
+      const { pool, kind, selector, selectorType } = atomicPool(operation);
+      if (
+        selector === undefined ||
+        (kind === 3
+          ? selector <= 0 || selector > 8_388_607
+          : selector < 0 || selector >= 1_000_000)
+      )
+        throw new Error("Atomic V1 quote has an invalid pool selector.");
       const provider = keccak256(
         encodeAbiParameters(
           [
@@ -87,7 +112,7 @@ export function atomicCandidateId(candidate: PlanCandidate) {
             { type: "address" },
             { type: "address" },
             { type: "address" },
-            { type: "uint24" },
+            { type: selectorType },
           ],
           [
             domain("Epeius.AtomicProvider.v1"),
@@ -95,7 +120,7 @@ export function atomicCandidateId(candidate: PlanCandidate) {
             requiredAddress(pool.factory, "factory"),
             requiredAddress(pool.router, "router"),
             requiredAddress(pool.pool, "pool"),
-            pool.feePips,
+            selector,
           ],
         ),
       );
@@ -248,7 +273,7 @@ export function validateAtomicPlanQuote(
     for (const operation of operations) {
       if (!same(operation.tokenIn, current) || !operation.tokenOut)
         throw new Error("Atomic V1 candidate token continuity is invalid.");
-      const { pool, kind } = atomicV3Pool(operation);
+      const { pool, kind, selector } = atomicPool(operation);
       const poolAddress = requiredAddress(pool.pool, "pool");
       const nextFactory = requiredAddress(pool.factory, "factory");
       const nextRouter = requiredAddress(pool.router, "router");
@@ -267,7 +292,7 @@ export function validateAtomicPlanQuote(
       if (input === output)
         throw new Error("Atomic V1 operation tokens must be distinct.");
       const pair = input < output ? `${input}:${output}` : `${output}:${input}`;
-      const physical = `${pair}:${pool.feePips}`;
+      const physical = `${pair}:${selector}`;
       if (pools.has(poolAddress) || physicalPools.has(physical))
         throw new Error("Atomic V1 candidate reuses a pool.");
       pools.add(poolAddress);
@@ -276,14 +301,14 @@ export function validateAtomicPlanQuote(
     }
     if (!same(current, addressBytes(request.tokenOut)))
       throw new Error("Atomic V1 candidate final token is invalid.");
-    const fees = operations.map((operation) =>
-      String(atomicV3Pool(operation).pool.feePips).padStart(7, "0"),
+    const selectors = operations.map((operation) =>
+      String(atomicPool(operation).selector).padStart(9, "0"),
     );
     const middle =
       operations.length === 2
         ? getAddress(exact(operations[0].tokenOut, 20, "intermediate token"))
         : "";
-    const key = `${operations.length - 1}:${middle}:${fees.join(":")}`;
+    const key = `${operations.length - 1}:${middle}:${selectors.join(":")}`;
     const provider = `${providerKind}:${factory}:${router}`;
     if (provider !== previousProvider) {
       if (seenProviders.has(provider))
@@ -334,9 +359,9 @@ export function formatAtomicPlanQuote(
       const outputAddress = exact(operation.tokenOut, 20, "operation output");
       const metadata = token(outputAddress);
       const output = BigInt(exact(outputs[hopIndex], 32, "operation output"));
-      const { pool, name } = atomicV3Pool(operation);
+      const { pool, name, selector, kind } = atomicPool(operation);
       lines.push(
-        `Hop ${hopIndex + 1} (${name}): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool.pool, 20, "pool")}; fee ${pool.feePips} pips; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
+        `Hop ${hopIndex + 1} (${name}): ${exact(operation.tokenIn, 20, "operation input")} to ${outputAddress}; pool ${exact(pool.pool, 20, "pool")}; ${kind === 3 ? `tick spacing ${selector}` : `fee ${selector} pips`}; output ${metadata ? amount(metadata, output) : `${output} atomic`}`,
       );
     }
     const final = BigInt(exact(outputs.at(-1), 32, "final output"));

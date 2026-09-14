@@ -11,9 +11,18 @@
         "name": "pancakeRouter_",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "slipstreamRouter_",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "receive",
+    "stateMutability": "payable"
   },
   {
     "type": "function",
@@ -125,6 +134,19 @@
   },
   {
     "type": "function",
+    "name": "slipstreamRouter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "uniswapRouter",
     "inputs": [],
     "outputs": [
@@ -173,6 +195,31 @@
       },
       {
         "name": "amountOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "NativeRefunded",
+    "inputs": [
+      {
+        "name": "planHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "caller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -422,6 +469,22 @@
   },
   {
     "type": "error",
+    "name": "NativeRefundFailed",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "NonCanonicalEncoding",
     "inputs": []
   },
@@ -489,6 +552,17 @@
     "inputs": [
       {
         "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "UnexpectedNativeSender",
+    "inputs": [
+      {
+        "name": "sender",
         "type": "address",
         "internalType": "address"
       }

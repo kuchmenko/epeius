@@ -74,10 +74,25 @@ func ValidateChain(chain Chain) error {
 	if e := chain.AtomicExecutor; e != nil {
 		uniswap, uniswapOK := chain.Deployments[e.UniswapDeployment]
 		pancake, pancakeOK := chain.Deployments[e.PancakeDeployment]
+		slipstream, slipstreamOK := chain.Deployments[e.SlipstreamDeployment]
 		uniswapOK = e.UniswapDeployment != "" && uniswapOK && uniswap.Kind == "uniswap-v3"
 		pancakeOK = e.PancakeDeployment != "" && pancakeOK && pancake.Kind == "pancake-v3"
-		if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || (!uniswapOK && !pancakeOK) || (e.UniswapDeployment != "" && !uniswapOK) || (e.PancakeDeployment != "" && !pancakeOK) || (uniswapOK && pancakeOK && common.HexToAddress(uniswap.Router) == common.HexToAddress(pancake.Router)) {
-			return errors.New("atomic executor needs a nonzero address, runtime code hash, and at least one valid distinct Uniswap or Pancake V3 deployment")
+		slipstreamOK = e.SlipstreamDeployment != "" && slipstreamOK && slipstream.Kind == "aerodrome-slipstream"
+		routers := map[common.Address]bool{}
+		for _, deployment := range []struct {
+			enabled bool
+			value   Deployment
+		}{{uniswapOK, uniswap}, {pancakeOK, pancake}, {slipstreamOK, slipstream}} {
+			if deployment.enabled {
+				router := common.HexToAddress(deployment.value.Router)
+				if routers[router] {
+					return errors.New("atomic executor provider routers must be distinct")
+				}
+				routers[router] = true
+			}
+		}
+		if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || (!uniswapOK && !pancakeOK && !slipstreamOK) || (e.UniswapDeployment != "" && !uniswapOK) || (e.PancakeDeployment != "" && !pancakeOK) || (e.SlipstreamDeployment != "" && !slipstreamOK) {
+			return errors.New("atomic executor needs a nonzero address, runtime code hash, and at least one valid U3 deployment")
 		}
 	}
 	for id, d := range chain.Deployments {

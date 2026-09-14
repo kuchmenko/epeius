@@ -29,6 +29,7 @@ import {
   PreparePlanResponseSchema,
   SimulationEvidenceSchema,
   SimulationStatus,
+  SlipstreamPoolSchema,
   UnsignedPreparationSchema,
   V3PoolSchema,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
@@ -52,6 +53,9 @@ const fixture = await Bun.file(
 const pancakeFixture = await Bun.file(
   "contracts/fixtures/atomic-v1-pancake.json",
 ).json();
+const slipstreamFixture = await Bun.file(
+  "contracts/fixtures/atomic-v1-slipstream.json",
+).json();
 const word = (value: string | bigint | number) =>
   hexToBytes(padHex(toHex(BigInt(value)), { size: 32 }));
 const address = (value: string) => hexToBytes(value as Hex);
@@ -64,9 +68,11 @@ const executor = {
   router: fixture.router,
   pancakeFactory: "0x0000000000000000000000000000000000000066",
   pancakeRouter: "0x0000000000000000000000000000000000000077",
+  slipstreamFactory: "0x00000000000000000000000000000000000000aa",
+  slipstreamRouter: "0x00000000000000000000000000000000000000bb",
 } as const;
 
-function candidate(kind: 1 | 2 = 1) {
+function candidate(kind: 1 | 2 | 3 = 1) {
   const tokens = [fixture.tokenIn, fixture.intermediateToken, fixture.tokenOut];
   return create(PlanCandidateSchema, {
     candidateId: hexToBytes(fixture.candidateId),
@@ -94,15 +100,25 @@ function candidate(kind: 1 | 2 = 1) {
                         feePips: fee,
                       }),
                     }
-                  : {
-                      case: "pancakeV3" as const,
-                      value: create(V3PoolSchema, {
-                        factory: address(executor.pancakeFactory),
-                        router: address(executor.pancakeRouter),
-                        pool: address(fixture.pools[index]),
-                        feePips: fee,
-                      }),
-                    },
+                  : kind === 2
+                    ? {
+                        case: "pancakeV3" as const,
+                        value: create(V3PoolSchema, {
+                          factory: address(executor.pancakeFactory),
+                          router: address(executor.pancakeRouter),
+                          pool: address(fixture.pools[index]),
+                          feePips: fee,
+                        }),
+                      }
+                    : {
+                        case: "slipstreamInitial" as const,
+                        value: create(SlipstreamPoolSchema, {
+                          factory: address(executor.slipstreamFactory),
+                          router: address(executor.slipstreamRouter),
+                          pool: address(fixture.pools[index]),
+                          tickSpacing: fee,
+                        }),
+                      },
             }),
           ),
         }),
@@ -120,7 +136,7 @@ function candidate(kind: 1 | 2 = 1) {
   });
 }
 
-function ready(kind: 1 | 2 = 1) {
+function ready(kind: 1 | 2 | 3 = 1) {
   const accepted = acceptAtomicCandidate(
     candidate(kind),
     signer,
@@ -141,6 +157,15 @@ function ready(kind: 1 | 2 = 1) {
         amountIn: BigInt(fixture.amountIn),
         minAmountOut: accepted.minimum,
         operations: program.branches[0].operations.map((operation) => {
+          if (operation.pool.case === "slipstreamInitial")
+            return {
+              kind,
+              tokenOut:
+                `0x${Buffer.from(operation.tokenOut ?? []).toString("hex")}` as Hex,
+              fee: 0,
+              tickSpacing: operation.pool.value.tickSpacing ?? 0,
+              poolId: zeroHash,
+            };
           if (
             operation.pool.case !== "uniswapV3" &&
             operation.pool.case !== "pancakeV3"
@@ -243,6 +268,22 @@ test("Pancake Atomic plan keeps kind 2 through accepted identity, calldata, and 
   expect(checked.executorPlanHash).toBe(value.planHash);
 });
 
+test("Slipstream Atomic plan keeps kind 3 through accepted identity, calldata, and receipt", () => {
+  const value = ready(3);
+  const checked = validateAtomicPlanPreparation(
+    value.response,
+    value.accepted,
+    executor,
+  );
+  expect(checked.kind).toBe("swap");
+  if (checked.kind !== "swap") throw new Error("swap missing");
+  expect(checked.receipt.atomicPlan?.branches[0].operations).toEqual([
+    expect.objectContaining({ kind: 3 }),
+    expect.objectContaining({ kind: 3 }),
+  ]);
+  expect(checked.executorPlanHash).toBe(value.planHash);
+});
+
 test("Pancake plan, calldata, and fingerprint match independent Cast vectors", () => {
   const tokens = [
     pancakeFixture.tokenIn,
@@ -334,6 +375,102 @@ test("Pancake plan, calldata, and fingerprint match independent Cast vectors", (
       gasLimit: BigInt(pancakeFixture.gasLimit),
     }),
   ).toBe(pancakeFixture.transactionFingerprint);
+});
+
+test("Slipstream plan, calldata, and fingerprint match independent Cast int24 vectors", () => {
+  const tokens = [
+    slipstreamFixture.tokenIn,
+    slipstreamFixture.intermediateToken,
+    slipstreamFixture.tokenOut,
+  ];
+  const program = create(PlanProgramSchema, {
+    formatVersion: 1,
+    chainId: word(slipstreamFixture.chainId),
+    tokenIn: address(slipstreamFixture.tokenIn),
+    tokenOut: address(slipstreamFixture.tokenOut),
+    amountIn: word(slipstreamFixture.amountIn),
+    branches: [
+      create(PlanBranchSchema, {
+        amountIn: word(slipstreamFixture.amountIn),
+        operations: slipstreamFixture.tickSpacings.map(
+          (tickSpacing: number, index: number) =>
+            create(PoolOperationSchema, {
+              tokenIn: address(tokens[index]),
+              tokenOut: address(tokens[index + 1]),
+              pool: {
+                case: "slipstreamInitial",
+                value: create(SlipstreamPoolSchema, {
+                  factory: address(slipstreamFixture.factory),
+                  router: address(slipstreamFixture.router),
+                  pool: address(slipstreamFixture.pools[index]),
+                  tickSpacing,
+                }),
+              },
+            }),
+        ),
+      }),
+    ],
+  });
+  const minimum = BigInt(slipstreamFixture.minimum);
+  const planId = atomicV1PlanId({
+    chainId: BigInt(slipstreamFixture.chainId),
+    executor: slipstreamFixture.executor,
+    runtimeCodeHash: slipstreamFixture.runtimeCodeHash,
+    signer: slipstreamFixture.signer,
+    recipient: slipstreamFixture.signer,
+    tokenIn: slipstreamFixture.tokenIn,
+    tokenOut: slipstreamFixture.tokenOut,
+    amountIn: BigInt(slipstreamFixture.amountIn),
+    minimum,
+    quoteBlockNumber: BigInt(slipstreamFixture.quoteBlockNumber),
+    quoteBlockHash: slipstreamFixture.quoteBlockHash,
+    expiresAt: BigInt(slipstreamFixture.expiresAtUnix),
+    deadline: BigInt(slipstreamFixture.deadlineUnix),
+    branchHashes: atomicV1AcceptedBranchHashes(program, [minimum]),
+  });
+  const plan: AtomicExecutorPlan = {
+    tokenIn: slipstreamFixture.tokenIn,
+    tokenOut: slipstreamFixture.tokenOut,
+    amountIn: BigInt(slipstreamFixture.amountIn),
+    minAmountOut: minimum,
+    deadline: BigInt(slipstreamFixture.deadlineUnix),
+    branches: [
+      {
+        amountIn: BigInt(slipstreamFixture.amountIn),
+        minAmountOut: minimum,
+        operations: slipstreamFixture.tickSpacings.map(
+          (tickSpacing: number, index: number) => ({
+            kind: 3,
+            tokenOut: tokens[index + 1],
+            fee: 0,
+            tickSpacing,
+            poolId: zeroHash,
+          }),
+        ),
+      },
+    ],
+  };
+  const data = atomicV1ExecutorCalldata(plan);
+  const executorHash = atomicV1ExecutorPlanHash({
+    chainId: BigInt(slipstreamFixture.chainId),
+    executor: slipstreamFixture.executor,
+    sender: slipstreamFixture.signer,
+    plan,
+  });
+  expect(planId).toBe(slipstreamFixture.planId);
+  expect(executorHash).toBe(slipstreamFixture.executorPlanHash);
+  expect(keccak256(data)).toBe(slipstreamFixture.executorCalldataHash);
+  expect(
+    atomicV1TransactionFingerprint({
+      planId,
+      chainId: BigInt(slipstreamFixture.chainId),
+      from: slipstreamFixture.signer,
+      to: slipstreamFixture.executor,
+      value: 0n,
+      data,
+      gasLimit: BigInt(slipstreamFixture.gasLimit),
+    }),
+  ).toBe(slipstreamFixture.transactionFingerprint);
 });
 
 test("Atomic plan preparation rejects identity, transaction, and evidence mutations", () => {

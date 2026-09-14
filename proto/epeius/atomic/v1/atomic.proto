@@ -96,6 +96,7 @@ message PoolOperation {
   oneof pool {
     V3Pool uniswap_v3 = 10;
     V3Pool pancake_v3 = 11;
+    SlipstreamPool slipstream_initial = 12;
   }
 }
 
@@ -104,6 +105,13 @@ message V3Pool {
   optional bytes router = 2;
   optional bytes pool = 3;
   optional uint32 fee_pips = 4;
+}
+
+message SlipstreamPool {
+  optional bytes factory = 1;
+  optional bytes router = 2;
+  optional bytes pool = 3;
+  optional sint32 tick_spacing = 4;
 }
 
 message PinnedBlock {

@@ -98,14 +98,22 @@ factory = "0x5555555555555555555555555555555555555555"
 quoter = "0x6666666666666666666666666666666666666666"
 router = "0x7777777777777777777777777777777777777777"
 fees = [2500]
+[chains.test-net.deployments.slip]
+kind = "aerodrome-slipstream"
+factory = "0x8888888888888888888888888888888888888888"
+quoter = "0x9999999999999999999999999999999999999999"
+router = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+[chains.test-net.deployments.slip.options]
+tick_spacings = [100, 200]
 [chains.test-net.atomic_executor]
 address = "0x4444444444444444444444444444444444444444"
 runtime_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 uniswap_deployment = "uni"
 pancake_deployment = "pan"
+slipstream_deployment = "slip"
 `
 	got, err := loadText(t, text)
-	if err != nil || got.Chains["test-net"].AtomicExecutor.UniswapDeployment != "uni" || got.Chains["test-net"].AtomicExecutor.PancakeDeployment != "pan" {
+	if err != nil || got.Chains["test-net"].AtomicExecutor.UniswapDeployment != "uni" || got.Chains["test-net"].AtomicExecutor.PancakeDeployment != "pan" || got.Chains["test-net"].AtomicExecutor.SlipstreamDeployment != "slip" {
 		t.Fatalf("Atomic V1 config rejected: %v", err)
 	}
 	for _, only := range []string{
@@ -131,7 +139,8 @@ pancake_deployment = "pan"
 	for _, changed := range []string{
 		strings.Replace(text, "pancake_deployment = \"pan\"", "pancake_deployment = \"uni\"", 1),
 		strings.Replace(text, "router = \"0x7777777777777777777777777777777777777777\"", "router = \"0x3333333333333333333333333333333333333333\"", 1),
-		strings.Replace(strings.Replace(text, "uniswap_deployment = \"uni\"\n", "", 1), "pancake_deployment = \"pan\"\n", "", 1),
+		strings.Replace(text, "router = \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", "router = \"0x3333333333333333333333333333333333333333\"", 1),
+		strings.Replace(strings.Replace(strings.Replace(text, "uniswap_deployment = \"uni\"\n", "", 1), "pancake_deployment = \"pan\"\n", "", 1), "slipstream_deployment = \"slip\"\n", "", 1),
 	} {
 		if _, err := loadText(t, changed); err == nil {
 			t.Fatal("invalid Atomic V1 provider selection accepted")

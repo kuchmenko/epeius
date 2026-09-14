@@ -6,7 +6,7 @@
 
 For exact-input multihop swaps, the path is packed as `address | int24 | address`, repeated for each next hop. The router sends each hop's actual output into the next hop. The pool can reach an end-price extreme without consuming the full requested input.
 
-**Epeius policy.** Epeius supports exact-input quotes and direct-router preparation for configured, ABI-compatible Slipstream deployments. It does not support Slipstream allocation re-quotes or the configured Uniswap/Pancake executor. It does not use gauges or rewards.
+**Epeius policy.** Epeius supports exact-input quotes and direct-router preparation for configured, ABI-compatible Slipstream deployments. Atomic V1 also supports homogeneous one-branch direct or configured-base-token two-hop Slipstream Initial candidates through ExecutorV2 kind 3. It does not support Slipstream split allocations or mixed-provider Atomic candidates. It does not use gauges or rewards.
 
 ## Comparison with other V3 providers
 
@@ -16,7 +16,7 @@ For exact-input multihop swaps, the path is packed as `address | int24 | address
 | Path segment | `address | uint24 | address` | `address | uint24 | address` | `address | int24 | address` |
 | Direct router tuple | Uniswap SwapRouter02 form; deadline supplied by its multicall | Pancake deadline-bearing tuple | Slipstream deadline-bearing tuple |
 | Fee model relevant to Epeius | Selector is fee | Selector is fee | Selector identifies pool; fee may be dynamic |
-| Configured executor | Supported | Supported | Not supported |
+| Atomic ExecutorV2 | Kind 1 | Kind 2 | Initial kind 3 |
 
 ## Configuration
 
@@ -75,7 +75,7 @@ Preparation requires the selected route and deployment to remain valid, the sign
 
 - Exact-input ERC-20 swaps only.
 - One or two hops only; no arbitrary-length or mixed-provider route.
-- No Slipstream allocation re-quote, allocation optimizer, or executor capability.
+- No Slipstream allocation re-quote, allocation optimizer, split executor branch, or mixed-provider Atomic candidate.
 - No account-aware informational quote; nonzero signer discount is rejected during preparation.
 - No native ETH, Permit2, transfer-tax token, rebasing token, gauge, or reward support.
 - No on-chain full-consumption guarantee. Epeius rejects an extreme end price during quoting and checks consumption in simulation and receipt evidence, but pool state can change before inclusion.
@@ -97,9 +97,15 @@ bun run terminal -- quote --chain base --in WETH --out USDC --amount 0.01
 # Run the repository checks.
 bun run check
 bun run check:generated
+
+# Reproduce the final ExecutorV2 refund and exact-debit checks on the pinned read-only Base fork.
+forge test --root contracts --match-contract SlipstreamExecutorV2ForkTest \
+  --fork-url http://127.0.0.1:18545 --fork-block-number 51180007 -vv
 ```
 
 `chain check` and `quote` need the configured RPC environment variable. Informational quote commands do not sign or submit. Preparation and execution require the separate wallet, Tenderly, execution-enabled configuration, and consent flow described in [Terminal](../terminal.md#configured-chain-execution).
+
+The pinned fork test checks the final ExecutorV2 against the Base router and WETH/USDC pool state at block `51180007`; it neither signs nor broadcasts. It proves only that bytecode and state snapshot, not a future deployment or production execution.
 
 To repeat an exact prepared transaction without submitting to the source chain, pin the same block used by the quote, fork it locally, and use only values returned in Epeius's unsigned transaction:
 

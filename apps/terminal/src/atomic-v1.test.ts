@@ -878,6 +878,84 @@ test("Atomic V1 receipt requires ordered exact executor events and token deltas"
     verifyReceipt({ ...receipt, logs: reordered }, hash, obligations.receipt)
       .outcome,
   ).toBe("failed");
+
+  if (!obligations.receipt.atomicPlan)
+    throw new Error("missing Atomic receipt plan");
+  const nativeRefund = {
+    address: fixture.executor,
+    topics: encodeEventTopics({
+      abi: executorV2Abi,
+      eventName: "NativeRefunded",
+      args: {
+        planHash: fixture.executorPlanHash as `0x${string}`,
+        caller: fixture.sender as `0x${string}`,
+      },
+    }) as string[],
+    data: encodeAbiParameters([{ type: "uint256" }], [1n]),
+    transactionHash: hash,
+  };
+  const slipstreamLogs = [...logs];
+  const planLog = slipstreamLogs.at(-1);
+  if (!planLog) throw new Error("missing plan event");
+  slipstreamLogs[3] = {
+    ...slipstreamLogs[3],
+    data: encodeAbiParameters(
+      [
+        { type: "uint8" },
+        { type: "address" },
+        { type: "address" },
+        { type: "uint256" },
+        { type: "uint256" },
+      ],
+      [
+        3,
+        fixture.tokenIn as `0x${string}`,
+        fixture.tokenOut as `0x${string}`,
+        BigInt(fixture.amountInAtomic),
+        amountOut,
+      ],
+    ),
+  };
+  const withNativeRefund = [
+    ...slipstreamLogs.slice(0, -1),
+    nativeRefund,
+    planLog,
+  ];
+  expect(
+    verifyReceipt(
+      { ...receipt, logs: withNativeRefund },
+      hash,
+      obligations.receipt,
+    ).outcome,
+  ).toBe("failed");
+  obligations.receipt.atomicPlan.branches[0].operations[0].kind = 3;
+  expect(
+    verifyReceipt(
+      { ...receipt, logs: withNativeRefund },
+      hash,
+      obligations.receipt,
+    ),
+  ).toMatchObject({
+    outcome: "unavailable",
+    reason: expect.stringContaining("no transaction-specific native trace"),
+  });
+  expect(
+    verifyReceipt(
+      {
+        ...receipt,
+        logs: [
+          ...slipstreamLogs.slice(0, -1),
+          {
+            ...nativeRefund,
+            data: encodeAbiParameters([{ type: "uint256" }], [0n]),
+          },
+          planLog,
+        ],
+      },
+      hash,
+      obligations.receipt,
+    ).outcome,
+  ).toBe("failed");
 });
 
 test("Atomic V1 receipt proves measured two-hop chaining and exact event cardinality", () => {

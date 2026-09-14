@@ -33,7 +33,22 @@ interface IPancakeRouterV2 {
     function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
 }
 
-/// @notice Executes one V3 branch of up to two operations or two direct V3 branches.
+interface ISlipstreamRouterV2 {
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        int24 tickSpacing;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
+}
+
+/// @notice Executes one branch of up to two operations or two direct branches.
 contract ExecutorV2 {
     using SafeERC20 for IERC20;
 
@@ -68,14 +83,28 @@ contract ExecutorV2 {
         uint256 entryOutput;
         uint256 operationIndex;
         uint256 deadline;
+        uint256 entryNative;
+    }
+
+    struct EntryBalances {
+        uint256 input;
+        uint256 intermediate;
+        uint256 output;
+        uint256 nativeBalance;
+        uint256 callerInput;
+        uint256 callerIntermediate;
+        uint256 callerOutput;
     }
 
     uint8 private constant UNISWAP_V3 = 1;
     uint8 private constant PANCAKE_V3 = 2;
+    uint8 private constant SLIPSTREAM_INITIAL = 3;
 
     address public immutable uniswapRouter;
     address public immutable pancakeRouter;
+    address public immutable slipstreamRouter;
     bool private entered;
+    bool private slipstreamCallActive;
 
     error ReentrantCall();
     error NonCanonicalEncoding();
@@ -89,6 +118,8 @@ contract ExecutorV2 {
     error OutputNotIncreased(uint256 branchIndex, uint256 operationIndex);
     error BranchMinimumNotMet(uint256 branchIndex, uint256 minimum, uint256 actual);
     error PlanMinimumNotMet(uint256 minimum, uint256 actual);
+    error UnexpectedNativeSender(address sender);
+    error NativeRefundFailed(address caller, uint256 amount);
     error InvalidDeployment();
 
     event OperationExecuted(
@@ -102,6 +133,7 @@ contract ExecutorV2 {
         uint256 amountOut
     );
     event BranchExecuted(bytes32 indexed planHash, uint256 indexed branchIndex, uint256 amountIn, uint256 amountOut);
+    event NativeRefunded(bytes32 indexed planHash, address indexed caller, uint256 amount);
     event PlanExecuted(
         bytes32 indexed planHash,
         address indexed caller,
@@ -111,15 +143,27 @@ contract ExecutorV2 {
         uint256 amountOut
     );
 
-    constructor(address uniswapRouter_, address pancakeRouter_) {
+    constructor(address uniswapRouter_, address pancakeRouter_, address slipstreamRouter_) {
         if (
-            (uniswapRouter_ == address(0) && pancakeRouter_ == address(0))
+            (uniswapRouter_ == address(0) && pancakeRouter_ == address(0) && slipstreamRouter_ == address(0))
                 || (uniswapRouter_ != address(0) && uniswapRouter_.code.length == 0)
                 || (pancakeRouter_ != address(0) && pancakeRouter_.code.length == 0)
+                || (slipstreamRouter_ != address(0) && slipstreamRouter_.code.length == 0)
                 || (uniswapRouter_ != address(0) && uniswapRouter_ == pancakeRouter_)
+                || (uniswapRouter_ != address(0) && uniswapRouter_ == slipstreamRouter_)
+                || (pancakeRouter_ != address(0) && pancakeRouter_ == slipstreamRouter_)
         ) revert InvalidDeployment();
         uniswapRouter = uniswapRouter_;
         pancakeRouter = pancakeRouter_;
+        slipstreamRouter = slipstreamRouter_;
+    }
+
+    /// @dev Slipstream Initial refunds the router's native balance to its direct caller after a swap.
+    /// See https://github.com/aerodrome-finance/slipstream/blob/main/contracts/periphery/SwapRouter.sol.
+    receive() external payable {
+        if (!entered || !slipstreamCallActive || msg.sender != slipstreamRouter) {
+            revert UnexpectedNativeSender(msg.sender);
+        }
     }
 
     modifier nonReentrant() {
@@ -141,24 +185,32 @@ contract ExecutorV2 {
         bytes32 planHash = keccak256(abi.encode(uint256(2), block.chainid, address(this), msg.sender, plan));
         IERC20 input = IERC20(plan.tokenIn);
         IERC20 output = IERC20(plan.tokenOut);
-        uint256 entryInput = input.balanceOf(address(this));
-        uint256 entryOutput = output.balanceOf(address(this));
-        uint256 entryIntermediate;
+        EntryBalances memory entry = EntryBalances({
+            input: input.balanceOf(address(this)),
+            intermediate: 0,
+            output: output.balanceOf(address(this)),
+            nativeBalance: address(this).balance,
+            callerInput: input.balanceOf(msg.sender),
+            callerIntermediate: 0,
+            callerOutput: output.balanceOf(msg.sender)
+        });
         if (plan.branches[0].operations.length == 2) {
-            entryIntermediate = IERC20(plan.branches[0].operations[0].tokenOut).balanceOf(address(this));
+            entry.intermediate = IERC20(plan.branches[0].operations[0].tokenOut).balanceOf(address(this));
+            entry.callerIntermediate = IERC20(plan.branches[0].operations[0].tokenOut).balanceOf(msg.sender);
         }
 
-        _pullInput(input, plan.amountIn, entryInput);
-        amountOut = _executeBranches(planHash, plan, entryInput, entryIntermediate, entryOutput);
-        _requireBalance(output, address(this), entryOutput + amountOut);
+        _pullInput(input, plan.amountIn, entry.input);
+        amountOut = _executeBranches(planHash, plan, entry.input, entry.intermediate, entry.output, entry.nativeBalance);
+        _requireBalance(output, address(this), entry.output + amountOut);
         if (amountOut < plan.minAmountOut) revert PlanMinimumNotMet(plan.minAmountOut, amountOut);
 
         _payOutput(output, amountOut);
-        _requireBalance(input, address(this), entryInput);
+        _requireBalance(input, address(this), entry.input);
         if (plan.branches[0].operations.length == 2) {
-            _requireBalance(IERC20(plan.branches[0].operations[0].tokenOut), address(this), entryIntermediate);
+            _requireBalance(IERC20(plan.branches[0].operations[0].tokenOut), address(this), entry.intermediate);
         }
-        _requireBalance(output, address(this), entryOutput);
+        _requireBalance(output, address(this), entry.output);
+        _refundNative(planHash, plan, entry, amountOut);
         emit PlanExecuted(planHash, msg.sender, plan.tokenOut, plan.tokenIn, plan.amountIn, amountOut);
     }
 
@@ -167,14 +219,22 @@ contract ExecutorV2 {
         Plan calldata plan,
         uint256 entryInput,
         uint256 entryIntermediate,
-        uint256 entryOutput
+        uint256 entryOutput,
+        uint256 entryNative
     ) private returns (uint256 amountOut) {
         uint256 remainingInput = plan.amountIn;
         for (uint256 i; i < plan.branches.length; ++i) {
             Branch calldata branch = plan.branches[i];
             remainingInput -= branch.amountIn;
             uint256 branchOutput = _executeBranch(
-                planHash, branch, i, plan, entryInput + remainingInput, entryIntermediate, entryOutput + amountOut
+                planHash,
+                branch,
+                i,
+                plan,
+                entryInput + remainingInput,
+                entryIntermediate,
+                entryOutput + amountOut,
+                entryNative
             );
             if (branchOutput < branch.minAmountOut) {
                 revert BranchMinimumNotMet(i, branch.minAmountOut, branchOutput);
@@ -191,7 +251,8 @@ contract ExecutorV2 {
         Plan calldata plan,
         uint256 entryInput,
         uint256 entryIntermediate,
-        uint256 entryOutput
+        uint256 entryOutput,
+        uint256 entryNative
     ) private returns (uint256 amountOut) {
         address currentToken = plan.tokenIn;
         uint256 currentAmount = branch.amountIn;
@@ -205,7 +266,8 @@ contract ExecutorV2 {
                 i == 0 ? entryInput : entryIntermediate,
                 finalOperation ? entryOutput : entryIntermediate,
                 i,
-                plan.deadline
+                plan.deadline,
+                entryNative
             );
             amountOut = _swap(operation, request, branchIndex);
             _emitOperation(planHash, branchIndex, i, operation, currentToken, currentAmount, amountOut);
@@ -253,14 +315,20 @@ contract ExecutorV2 {
                     if (uniswapRouter == address(0)) revert UnsupportedKind(operation.kind);
                 } else if (operation.kind == PANCAKE_V3) {
                     if (pancakeRouter == address(0)) revert UnsupportedKind(operation.kind);
+                } else if (operation.kind == SLIPSTREAM_INITIAL) {
+                    if (slipstreamRouter == address(0)) revert UnsupportedKind(operation.kind);
                 } else {
                     revert UnsupportedKind(operation.kind);
                 }
+                bool invalidSelector = operation.kind == SLIPSTREAM_INITIAL
+                    ? operation.fee != 0 || operation.tickSpacing <= 0
+                    : operation.fee >= 1_000_000 || operation.tickSpacing != 0;
                 if (
-                    operation.tokenOut == currentToken || operation.tokenOut.code.length == 0
-                        || operation.fee >= 1_000_000 || operation.tickSpacing != 0 || operation.poolId != bytes32(0)
+                    operation.tokenOut == currentToken || operation.tokenOut.code.length == 0 || invalidSelector
+                        || operation.poolId != bytes32(0)
                 ) revert InvalidOperation(branchIndex, operationIndex);
-                bytes32 pool = _poolKey(operation.kind, currentToken, operation.tokenOut, operation.fee);
+                bytes32 pool =
+                    _poolKey(operation.kind, currentToken, operation.tokenOut, operation.fee, operation.tickSpacing);
                 if (branchIndex == 0 && operationIndex == 0) firstPool = pool;
                 else if (pool == firstPool) revert InvalidOperation(branchIndex, operationIndex);
                 currentToken = operation.tokenOut;
@@ -287,7 +355,9 @@ contract ExecutorV2 {
             revert AmountOutOfRange(branchIndex, request.operationIndex, request.amountIn, uint256(type(int256).max));
         }
         IERC20 input = IERC20(request.tokenIn);
-        address router = operation.kind == UNISWAP_V3 ? uniswapRouter : pancakeRouter;
+        address router = operation.kind == UNISWAP_V3
+            ? uniswapRouter
+            : operation.kind == PANCAKE_V3 ? pancakeRouter : slipstreamRouter;
         input.forceApprove(router, request.amountIn);
         if (operation.kind == UNISWAP_V3) {
             try IUniswapRouter02V2(router)
@@ -305,7 +375,7 @@ contract ExecutorV2 {
             catch (bytes memory reason) {
                 revert ProtocolCallFailed(branchIndex, request.operationIndex, reason);
             }
-        } else {
+        } else if (operation.kind == PANCAKE_V3) {
             try IPancakeRouterV2(router)
                 .exactInputSingle(
                     IPancakeRouterV2.ExactInputSingleParams(
@@ -322,18 +392,70 @@ contract ExecutorV2 {
             catch (bytes memory reason) {
                 revert ProtocolCallFailed(branchIndex, request.operationIndex, reason);
             }
+        } else {
+            slipstreamCallActive = true;
+            try ISlipstreamRouterV2(router)
+                .exactInputSingle(
+                    ISlipstreamRouterV2.ExactInputSingleParams(
+                        request.tokenIn,
+                        operation.tokenOut,
+                        operation.tickSpacing,
+                        address(this),
+                        request.deadline,
+                        request.amountIn,
+                        request.minimum,
+                        0
+                    )
+                ) {}
+            catch (bytes memory reason) {
+                revert ProtocolCallFailed(branchIndex, request.operationIndex, reason);
+            }
+            slipstreamCallActive = false;
         }
         input.forceApprove(router, 0);
         _requireBalance(input, address(this), request.entryInput);
 
         uint256 finalOutput = IERC20(operation.tokenOut).balanceOf(address(this));
         if (finalOutput <= request.entryOutput) revert OutputNotIncreased(branchIndex, request.operationIndex);
+        if (address(this).balance < request.entryNative) {
+            revert BalanceMismatch(address(0), address(this), request.entryNative, address(this).balance);
+        }
         return finalOutput - request.entryOutput;
     }
 
-    function _poolKey(uint8 kind, address tokenA, address tokenB, uint24 fee) private pure returns (bytes32) {
+    function _poolKey(uint8 kind, address tokenA, address tokenB, uint24 fee, int24 tickSpacing)
+        private
+        pure
+        returns (bytes32)
+    {
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
-        return keccak256(abi.encode(kind, token0, token1, fee));
+        return keccak256(abi.encode(kind, token0, token1, fee, tickSpacing));
+    }
+
+    function _refundNative(bytes32 planHash, Plan calldata plan, EntryBalances memory entry, uint256 amountOut)
+        private
+    {
+        // Return only value introduced during this execution; pre-existing executor value is never sweepable.
+        if (address(this).balance < entry.nativeBalance) {
+            revert BalanceMismatch(address(0), address(this), entry.nativeBalance, address(this).balance);
+        }
+        uint256 amount = address(this).balance - entry.nativeBalance;
+        if (amount != 0) {
+            (bool ok,) = msg.sender.call{value: amount}(hex"");
+            if (!ok) revert NativeRefundFailed(msg.sender, amount);
+        }
+        _requireBalance(IERC20(plan.tokenIn), address(this), entry.input);
+        _requireBalance(IERC20(plan.tokenIn), msg.sender, entry.callerInput - plan.amountIn);
+        if (plan.branches[0].operations.length == 2) {
+            _requireBalance(IERC20(plan.branches[0].operations[0].tokenOut), address(this), entry.intermediate);
+            _requireBalance(IERC20(plan.branches[0].operations[0].tokenOut), msg.sender, entry.callerIntermediate);
+        }
+        _requireBalance(IERC20(plan.tokenOut), address(this), entry.output);
+        _requireBalance(IERC20(plan.tokenOut), msg.sender, entry.callerOutput + amountOut);
+        if (address(this).balance != entry.nativeBalance) {
+            revert BalanceMismatch(address(0), address(this), entry.nativeBalance, address(this).balance);
+        }
+        if (amount != 0) emit NativeRefunded(planHash, msg.sender, amount);
     }
 
     function _payOutput(IERC20 output, uint256 amountOut) private {

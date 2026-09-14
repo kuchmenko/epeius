@@ -67,6 +67,10 @@ const branchExecuted = encodeEventTopics({
   abi: executorV2Abi,
   eventName: "BranchExecuted",
 })[0];
+const nativeRefunded = encodeEventTopics({
+  abi: executorV2Abi,
+  eventName: "NativeRefunded",
+})[0];
 const planExecuted = encodeEventTopics({
   abi: executorV2Abi,
   eventName: "PlanExecuted",
@@ -82,6 +86,7 @@ export type SwapVerification =
   | {
       outcome:
         | typeof VerificationOutcome.Passed
+        | typeof VerificationOutcome.Unavailable
         | typeof VerificationOutcome.Failed;
       inputSpentAtomic: string;
       outputReceivedAtomic: string;
@@ -161,20 +166,31 @@ export function verifyReceipt(
       ...(obligations.touched ?? []),
     ].some(({ token, owner }) => delta(token, owner) !== 0n);
     let atomicEventValid = true;
+    let nativeRefundSeen = false;
     if (obligations.atomicPlan) {
       const events = receipt.logs.filter(
         (log) =>
           same(log.address, obligations.atomicPlan?.executor ?? "") &&
-          [operationExecuted, branchExecuted, planExecuted].some((topic) =>
-            same(log.topics[0] ?? "", topic),
-          ),
+          [
+            operationExecuted,
+            branchExecuted,
+            nativeRefunded,
+            planExecuted,
+          ].some((topic) => same(log.topics[0] ?? "", topic)),
       );
       const expectedBranches = obligations.atomicPlan.branches;
+      const allowsNativeRefund = expectedBranches.some((branch) =>
+        branch.operations.some((operation) => operation.kind === 3),
+      );
       const expectedEventCount = expectedBranches.reduce(
         (count, branch) => count + branch.operations.length + 1,
         1,
       );
-      if (events.length !== expectedEventCount) atomicEventValid = false;
+      if (
+        events.length !== expectedEventCount &&
+        (!allowsNativeRefund || events.length !== expectedEventCount + 1)
+      )
+        atomicEventValid = false;
       else {
         let cursor = 0;
         let branchInputTotal = 0n;
@@ -240,6 +256,24 @@ export function verifyReceipt(
           branchOutputTotal += branch.args.amountOut;
         }
         if (atomicEventValid) {
+          if (
+            allowsNativeRefund &&
+            same(events[cursor]?.topics[0] ?? "", nativeRefunded)
+          ) {
+            const refund = decodeEventLog({
+              abi: executorV2Abi,
+              eventName: "NativeRefunded",
+              strict: true,
+              topics: events[cursor].topics as [Hex, ...Hex[]],
+              data: events[cursor].data as Hex,
+            });
+            atomicEventValid =
+              same(refund.args.planHash, obligations.atomicPlan.planHash) &&
+              same(refund.args.caller, obligations.recipient) &&
+              refund.args.amount > 0n;
+            nativeRefundSeen = atomicEventValid;
+            cursor++;
+          }
           const planEvent = events[cursor];
           if (!same(planEvent?.topics[0] ?? "", planExecuted))
             atomicEventValid = false;
@@ -252,6 +286,7 @@ export function verifyReceipt(
               data: planEvent.data as Hex,
             });
             atomicEventValid =
+              atomicEventValid &&
               branchInputTotal === BigInt(obligations.amountInAtomic) &&
               branchOutputTotal === output &&
               same(plan.args.planHash, obligations.atomicPlan.planHash) &&
@@ -264,21 +299,28 @@ export function verifyReceipt(
         }
       }
     }
+    const tokenProofPassed =
+      input === BigInt(obligations.amountInAtomic) &&
+      output >= BigInt(obligations.amountOutMinimumAtomic) &&
+      !residue &&
+      atomicEventValid;
     return {
       outcome:
-        input === BigInt(obligations.amountInAtomic) &&
-        output >= BigInt(obligations.amountOutMinimumAtomic) &&
-        !residue &&
-        atomicEventValid
-          ? VerificationOutcome.Passed
-          : VerificationOutcome.Failed,
+        tokenProofPassed && nativeRefundSeen
+          ? VerificationOutcome.Unavailable
+          : tokenProofPassed
+            ? VerificationOutcome.Passed
+            : VerificationOutcome.Failed,
       inputSpentAtomic: input.toString(),
       outputReceivedAtomic: output.toString(),
       routerIntermediateDeltas: intermediate,
       ...(obligations.touched ? { touchedTokenOwnerDeltas: touched } : {}),
-      reason: obligations.atomicPlan
-        ? "Ordered Atomic V1 executor events and standard ERC20 Transfer net deltas; no pre-existing balances counted."
-        : "Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted.",
+      reason:
+        tokenProofPassed && nativeRefundSeen
+          ? "Atomic V1 native refund event is valid, but this receipt has no transaction-specific native trace or state diff to prove delivery."
+          : obligations.atomicPlan
+            ? "Ordered Atomic V1 executor events and standard ERC20 Transfer net deltas; no pre-existing balances counted."
+            : "Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted.",
     };
   } catch {
     return {

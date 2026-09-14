@@ -149,28 +149,38 @@ func validateAcceptedAtomicTerms(chain Chain, terms *atomicv1.AcceptedPlanTerms,
 	var deployment config.Deployment
 	var providerKind uint8
 	for i, operation := range branch.Operations {
-		pool, kind := atomicV3Pool(operation)
+		pool, poolOK := atomicPool(operation)
+		kind := pool.kind
 		deploymentID := executor.UniswapDeployment
 		expectedKind := "uniswap-v3"
 		if kind == 2 {
 			deploymentID, expectedKind = executor.PancakeDeployment, "pancake-v3"
+		} else if kind == 3 {
+			deploymentID, expectedKind = executor.SlipstreamDeployment, "aerodrome-slipstream"
 		}
 		configured, ok := chain.Config.Deployments[deploymentID]
 		if deploymentID == "" || !ok || configured.Kind != expectedKind || chain.DeploymentErrors[deploymentID] != "" || (providerKind != 0 && providerKind != kind) {
 			return validatedAtomicTerms{}, errors.New("deployment unavailable")
 		}
 		deployment, providerKind = configured, kind
-		if operation == nil || len(operation.TokenIn) != 20 || len(operation.TokenOut) != 20 || pool == nil || pool.FeePips == nil || pool.GetFeePips() >= 1_000_000 || len(pool.Factory) != 20 || len(pool.Router) != 20 || len(pool.Pool) != 20 || common.BytesToAddress(operation.TokenIn) != current || common.BytesToAddress(operation.TokenIn) == common.BytesToAddress(operation.TokenOut) || common.BytesToAddress(pool.Factory) != common.HexToAddress(deployment.Factory) || common.BytesToAddress(pool.Router) != common.HexToAddress(deployment.Router) || common.BytesToAddress(pool.Pool) == (common.Address{}) {
+		invalidSelector := !poolOK || pool.selector == nil || (kind == 3 && (pool.selector.Sign() <= 0 || pool.selector.Cmp(big.NewInt(1<<23-1)) > 0)) || (kind != 3 && (pool.selector.Sign() < 0 || pool.selector.Cmp(big.NewInt(1_000_000)) >= 0))
+		if operation == nil || len(operation.TokenIn) != 20 || len(operation.TokenOut) != 20 || invalidSelector || len(pool.factory) != 20 || len(pool.router) != 20 || len(pool.pool) != 20 || common.BytesToAddress(operation.TokenIn) != current || common.BytesToAddress(operation.TokenIn) == common.BytesToAddress(operation.TokenOut) || common.BytesToAddress(pool.factory) != common.HexToAddress(deployment.Factory) || common.BytesToAddress(pool.router) != common.HexToAddress(deployment.Router) || common.BytesToAddress(pool.pool) == (common.Address{}) {
 			return validatedAtomicTerms{}, errors.New("invalid operation")
 		}
-		key := atomicV1PoolKeyFromValues(common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), pool.GetFeePips())
-		address := common.BytesToAddress(pool.Pool)
+		fee, spacing := uint32(0), int32(0)
+		if kind == 3 {
+			spacing = int32(pool.selector.Int64())
+		} else {
+			fee = uint32(pool.selector.Uint64())
+		}
+		key := atomicV1PoolKeyFromValues(kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), fee, spacing)
+		address := common.BytesToAddress(pool.pool)
 		if seenPools[address] || seenKeys[key] {
 			return validatedAtomicTerms{}, errors.New("repeated pool")
 		}
 		seenPools[address], seenKeys[key] = true, true
 		current = common.BytesToAddress(operation.TokenOut)
-		executorOperations[i] = atomicV1Operation{Kind: kind, TokenOut: current, Fee: new(big.Int).SetUint64(uint64(pool.GetFeePips())), TickSpacing: new(big.Int)}
+		executorOperations[i] = atomicV1Operation{Kind: kind, TokenOut: current, Fee: new(big.Int).SetUint64(uint64(fee)), TickSpacing: big.NewInt(int64(spacing))}
 	}
 	if current != common.BytesToAddress(terms.Program.TokenOut) {
 		return validatedAtomicTerms{}, errors.New("broken continuity")
@@ -234,7 +244,7 @@ func (h Handler) finishAtomicPreparation(ctx context.Context, chain Chain, chain
 	if new(big.Int).SetUint64(snapshot.Timestamp).Cmp(value.deadline) >= 0 || new(big.Int).SetInt64(time.Now().Unix()).Cmp(value.expires) >= 0 {
 		return atomicStatus(atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_REQUOTE_REQUIRED, "quote or preparation expired; request a fresh quote"), nil
 	}
-	if err := verifyAtomicV1Program(ctx, reader, chain.Config, value.program, common.HexToHash(snapshot.BlockHash)); err != nil {
+	if err := verifyAtomicV1Program(ctx, reader, chain.Config, value.program, common.BytesToAddress(value.terms.Signer), common.HexToHash(snapshot.BlockHash)); err != nil {
 		return atomicStatus(atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_REJECTED, "Atomic V1 executor verification failed"), nil
 	}
 	allowanceData, _ := erc20ABI.Pack("allowance", common.BytesToAddress(value.terms.Signer), common.BytesToAddress(value.terms.Executor.Address))
@@ -330,7 +340,7 @@ func planTransaction(transaction *quotev1.UnsignedTransaction) *atomicv1.PlanTra
 	return &atomicv1.PlanTransaction{ChainId: uint256Bytes(chain), From: common.HexToAddress(transaction.From).Bytes(), To: common.HexToAddress(transaction.To).Bytes(), Data: data, Value: uint256Bytes(value), GasLimit: uint256Bytes(gas)}
 }
 
-func verifyAtomicV1Program(ctx context.Context, reader Reader, chain config.Chain, program *atomicv1.PlanProgram, hash common.Hash) error {
+func verifyAtomicV1Program(ctx context.Context, reader Reader, chain config.Chain, program *atomicv1.PlanProgram, signer common.Address, hash common.Hash) error {
 	if program == nil || len(program.Branches) != 1 {
 		return errors.New("invalid Atomic V1 program")
 	}
@@ -338,22 +348,31 @@ func verifyAtomicV1Program(ctx context.Context, reader Reader, chain config.Chai
 	legs := make([]*quotev1.RouteLeg, len(operations))
 	provider := ""
 	for i, operation := range operations {
-		pool, kind := atomicV3Pool(operation)
-		if pool == nil {
+		pool, ok := atomicPool(operation)
+		if !ok {
 			return errors.New("invalid Atomic V1 operation")
 		}
 		operationProvider := "uniswap-v3"
-		if kind == 2 {
+		if pool.kind == 2 {
 			operationProvider = "pancake-v3"
+		} else if pool.kind == 3 {
+			operationProvider = "aerodrome-slipstream"
 		}
 		if provider != "" && provider != operationProvider {
 			return errors.New("mixed Atomic V1 providers")
 		}
 		provider = operationProvider
-		fee := pool.GetFeePips()
-		legs[i] = &quotev1.RouteLeg{
-			TokenIn: common.BytesToAddress(operation.TokenIn).Hex(), TokenOut: common.BytesToAddress(operation.TokenOut).Hex(),
-			Pool: common.BytesToAddress(pool.Pool).Hex(), Selector: &quotev1.RouteLeg_FeePips{FeePips: fee},
+		legs[i] = &quotev1.RouteLeg{TokenIn: common.BytesToAddress(operation.TokenIn).Hex(), TokenOut: common.BytesToAddress(operation.TokenOut).Hex(), Pool: common.BytesToAddress(pool.pool).Hex()}
+		if pool.kind == 3 {
+			legs[i].Selector = &quotev1.RouteLeg_TickSpacing{TickSpacing: int32(pool.selector.Int64())}
+		} else {
+			legs[i].Selector = &quotev1.RouteLeg_FeePips{FeePips: uint32(pool.selector.Uint64())}
+		}
+	}
+	if provider == "aerodrome-slipstream" {
+		deployment := chain.Deployments[chain.AtomicExecutor.SlipstreamDeployment]
+		if verifySlipstreamSignerDiscount(ctx, reader, hash, common.HexToAddress(deployment.Factory), signer.Hex()) != "" {
+			return errors.New("Slipstream signer discount is not zero")
 		}
 	}
 	return verifyAtomicV1Executor(ctx, reader, chain, &quotev1.RouteQuote{Provider: provider, Legs: legs}, hash)

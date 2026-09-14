@@ -346,20 +346,24 @@ func atomicV1PlanID(terms *atomicv1.AcceptedPlanTerms) (common.Hash, error) {
 	for i, branch := range terms.Program.Branches {
 		operationHashes := make([]common.Hash, len(branch.Operations))
 		for j, operation := range branch.Operations {
-			pool, kind := atomicV3Pool(operation)
-			if pool == nil {
+			pool, ok := atomicPool(operation)
+			if !ok {
 				return common.Hash{}, errors.New("unsupported operation")
 			}
+			selectorType := atomicABIType("uint24")
+			if pool.slipstream {
+				selectorType = atomicABIType("int24")
+			}
 			providerHash, err := atomicHash(
-				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("uint24")}},
-				crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), kind, common.BytesToAddress(pool.Factory), common.BytesToAddress(pool.Router), common.BytesToAddress(pool.Pool), new(big.Int).SetUint64(uint64(pool.GetFeePips())),
+				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: selectorType}},
+				crypto.Keccak256Hash([]byte("Epeius.AtomicProvider.v1")), pool.kind, common.BytesToAddress(pool.factory), common.BytesToAddress(pool.router), common.BytesToAddress(pool.pool), pool.selector,
 			)
 			if err != nil {
 				return common.Hash{}, err
 			}
 			operationHashes[j], err = atomicHash(
 				abi.Arguments{{Type: atomicABIType("bytes32")}, {Type: atomicABIType("uint8")}, {Type: atomicABIType("address")}, {Type: atomicABIType("address")}, {Type: atomicABIType("bytes32")}},
-				crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
+				crypto.Keccak256Hash([]byte("Epeius.AtomicOperation.v1")), pool.kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
 			)
 			if err != nil {
 				return common.Hash{}, err
@@ -435,8 +439,9 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 		return errors.New("Atomic V1 executor code unavailable")
 	}
 	deployments := map[string]config.Deployment{
-		"uniswapRouter": chain.Deployments[e.UniswapDeployment],
-		"pancakeRouter": chain.Deployments[e.PancakeDeployment],
+		"uniswapRouter":    chain.Deployments[e.UniswapDeployment],
+		"pancakeRouter":    chain.Deployments[e.PancakeDeployment],
+		"slipstreamRouter": chain.Deployments[e.SlipstreamDeployment],
 	}
 	for name, deployment := range deployments {
 		expected := deployment.Router
@@ -462,14 +467,23 @@ func verifyAtomicV1Executor(ctx context.Context, reader Reader, chain config.Cha
 	deploymentID := e.UniswapDeployment
 	if route.Provider == "pancake-v3" {
 		deploymentID = e.PancakeDeployment
+	} else if route.Provider == "aerodrome-slipstream" {
+		deploymentID = e.SlipstreamDeployment
 	}
 	deployment := chain.Deployments[deploymentID]
 	if deploymentID == "" || route.Provider != deployment.Kind {
 		return errors.New("Atomic V1 provider verification failed")
 	}
 	method := contractabi.UniswapV3Factory.Methods["getPool"]
+	if route.Provider == "aerodrome-slipstream" {
+		method = contractabi.AerodromeSlipstreamFactory.Methods["getPool"]
+	}
 	for _, leg := range route.Legs {
-		data, _ = method.Inputs.Pack(common.HexToAddress(leg.TokenIn), common.HexToAddress(leg.TokenOut), new(big.Int).SetUint64(uint64(leg.GetFeePips())))
+		selector := any(new(big.Int).SetUint64(uint64(leg.GetFeePips())))
+		if route.Provider == "aerodrome-slipstream" {
+			selector = big.NewInt(int64(leg.GetTickSpacing()))
+		}
+		data, _ = method.Inputs.Pack(common.HexToAddress(leg.TokenIn), common.HexToAddress(leg.TokenOut), selector)
 		result, err := reader.Call(ctx, common.HexToAddress(deployment.Factory), append(method.ID, data...), hash)
 		if err != nil {
 			return errors.New("Atomic V1 pool verification failed")

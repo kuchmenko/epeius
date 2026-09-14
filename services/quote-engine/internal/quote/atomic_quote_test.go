@@ -1,11 +1,13 @@
 package quote
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"math/big"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/contractabi"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -32,6 +35,7 @@ type atomicCandidateFixture struct {
 	Router            string   `json:"router"`
 	Pools             []string `json:"pools"`
 	Fees              []uint32 `json:"fees"`
+	TickSpacings      []int32  `json:"tickSpacings"`
 	OperationOutputs  []string `json:"operationOutputs"`
 	QuoteBlockNumber  string   `json:"quoteBlockNumber"`
 	QuoteBlockHash    string   `json:"quoteBlockHash"`
@@ -47,6 +51,19 @@ type atomicCandidateFixture struct {
 	ExecutorPlanHash  string   `json:"executorPlanHash"`
 	Fingerprint       string   `json:"transactionFingerprint"`
 	CalldataHash      string   `json:"executorCalldataHash"`
+}
+
+func loadSlipstreamAtomicFixture(t *testing.T) atomicCandidateFixture {
+	t.Helper()
+	data, err := os.ReadFile("../../../../contracts/fixtures/atomic-v1-slipstream.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result atomicCandidateFixture
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func loadPancakeAtomicFixture(t *testing.T) atomicCandidateFixture {
@@ -135,6 +152,66 @@ func TestPancakeAtomicIdentitiesMatchIndependentCastVector(t *testing.T) {
 	fingerprint, fingerprintErr := atomicV1TransactionFingerprint(planID, tx)
 	if err != nil || hashErr != nil || packErr != nil || fingerprintErr != nil || planID.Hex() != f.PlanID || executorHash.Hex() != f.ExecutorPlanHash || crypto.Keccak256Hash(data).Hex() != f.CalldataHash || fingerprint.Hex() != f.Fingerprint {
 		t.Fatalf("Pancake identities differ: plan=%s executor=%s calldata=%s fingerprint=%s", planID.Hex(), executorHash.Hex(), crypto.Keccak256Hash(data).Hex(), fingerprint.Hex())
+	}
+}
+
+func TestSlipstreamAtomicIdentitiesMatchIndependentCastVector(t *testing.T) {
+	f := loadSlipstreamAtomicFixture(t)
+	chainID, _ := new(big.Int).SetString(f.ChainID, 10)
+	amount, _ := new(big.Int).SetString(f.AmountIn, 10)
+	minimum, _ := new(big.Int).SetString(f.Minimum, 10)
+	blockNumber, _ := new(big.Int).SetString(f.QuoteBlockNumber, 10)
+	expires, _ := new(big.Int).SetString(f.ExpiresAtUnix, 10)
+	deadline, _ := new(big.Int).SetString(f.DeadlineUnix, 10)
+	outputs := make([]*big.Int, len(f.OperationOutputs))
+	for i, value := range f.OperationOutputs {
+		outputs[i], _ = new(big.Int).SetString(value, 10)
+	}
+	item := candidate{tokens: []common.Address{common.HexToAddress(f.TokenIn), common.HexToAddress(f.IntermediateToken), common.HexToAddress(f.TokenOut)}, spacings: f.TickSpacings}
+	block := &atomicv1.PinnedBlock{Number: uint256Bytes(blockNumber), Hash: common.HexToHash(f.QuoteBlockHash).Bytes()}
+	candidate, err := atomicPlanCandidate(chainID, amount, common.HexToAddress(f.TokenIn), common.HexToAddress(f.TokenOut), config.Deployment{Kind: "aerodrome-slipstream", Factory: f.Factory, Router: f.Router}, item, block, outputs, []common.Address{common.HexToAddress(f.Pools[0]), common.HexToAddress(f.Pools[1])})
+	if err != nil || common.BytesToHash(candidate.CandidateId).Hex() != f.CandidateID || candidate.Program.Branches[0].Operations[0].GetSlipstreamInitial() == nil {
+		t.Fatalf("Slipstream candidate mismatch: %+v %v", candidate, err)
+	}
+	terms := &atomicv1.AcceptedPlanTerms{
+		Program: candidate.Program, Executor: &atomicv1.ExecutorIdentity{Address: common.HexToAddress(f.Executor).Bytes(), Version: proto.Uint32(2), RuntimeCodeHash: common.HexToHash(f.RuntimeCodeHash).Bytes()}, Signer: common.HexToAddress(f.Signer).Bytes(), Recipient: common.HexToAddress(f.Signer).Bytes(), BranchMinima: [][]byte{uint256Bytes(minimum)}, AmountOutMinimum: uint256Bytes(minimum), QuoteBlock: block, ExpiresAtUnix: uint256Bytes(expires), DeadlineUnix: uint256Bytes(deadline),
+	}
+	planID, err := atomicV1PlanID(terms)
+	operations := []atomicV1Operation{{Kind: 3, TokenOut: common.HexToAddress(f.IntermediateToken), Fee: new(big.Int), TickSpacing: big.NewInt(int64(f.TickSpacings[0]))}, {Kind: 3, TokenOut: common.HexToAddress(f.TokenOut), Fee: new(big.Int), TickSpacing: big.NewInt(int64(f.TickSpacings[1]))}}
+	plan := atomicV1ExecutorPlan{TokenIn: common.HexToAddress(f.TokenIn), TokenOut: common.HexToAddress(f.TokenOut), AmountIn: amount, MinAmountOut: minimum, Deadline: deadline, Branches: []atomicV1Branch{{AmountIn: amount, MinAmountOut: minimum, Operations: operations}}}
+	executorHash, hashErr := atomicV1ExecutorPlanHash(f.ChainID, common.HexToAddress(f.Executor), common.HexToAddress(f.Signer), plan)
+	data, packErr := contractabi.ExecutorV2.Pack("execute", plan)
+	gas, _ := new(big.Int).SetString(f.GasLimit, 10)
+	tx := &quotev1.UnsignedTransaction{ChainId: f.ChainID, From: f.Signer, To: f.Executor, ValueAtomic: "0", Data: hexutil.Encode(data), GasLimit: gas.String()}
+	fingerprint, fingerprintErr := atomicV1TransactionFingerprint(planID, tx)
+	if err != nil || hashErr != nil || packErr != nil || fingerprintErr != nil || planID.Hex() != f.PlanID || executorHash.Hex() != f.ExecutorPlanHash || crypto.Keccak256Hash(data).Hex() != f.CalldataHash || fingerprint.Hex() != f.Fingerprint {
+		t.Fatalf("Slipstream identities differ: plan=%s executor=%s calldata=%s fingerprint=%s", planID.Hex(), executorHash.Hex(), crypto.Keccak256Hash(data).Hex(), fingerprint.Hex())
+	}
+
+	negative := proto.CloneOf(candidate)
+	negative.Program.Branches[0].Operations[0].GetSlipstreamInitial().TickSpacing = proto.Int32(-f.TickSpacings[0])
+	negativeHash, hashErr := atomicCandidateHash(negative.Program, negative.QuoteBlock, negative.BranchQuotes)
+	if hashErr != nil || negativeHash == common.BytesToHash(candidate.CandidateId) {
+		t.Fatal("negative signed spacing did not produce a distinct candidate identity")
+	}
+}
+
+func TestAtomicPoolKeyIncludesProviderAndItsExactSelector(t *testing.T) {
+	tokenA := common.HexToAddress("0x0000000000000000000000000000000000000011")
+	tokenB := common.HexToAddress("0x0000000000000000000000000000000000000022")
+	uniswap := atomicV1PoolKeyFromValues(1, tokenA, tokenB, 100, 0)
+	if uniswap != atomicV1PoolKeyFromValues(1, tokenB, tokenA, 100, 0) {
+		t.Fatal("reverse direction changed one physical pool key")
+	}
+	for name, key := range map[string]string{
+		"other fee":           atomicV1PoolKeyFromValues(1, tokenA, tokenB, 200, 0),
+		"other provider":      atomicV1PoolKeyFromValues(2, tokenA, tokenB, 100, 0),
+		"Slipstream selector": atomicV1PoolKeyFromValues(3, tokenA, tokenB, 0, 100),
+		"other tick spacing":  atomicV1PoolKeyFromValues(3, tokenA, tokenB, 0, 200),
+	} {
+		if key == uniswap {
+			t.Fatalf("%s did not change physical pool key", name)
+		}
 	}
 }
 
@@ -236,6 +313,63 @@ func TestAtomicPlanQuoteKeepsCanonicalCrossProviderOrder(t *testing.T) {
 		}
 		if i%2 == 0 && len(candidate.Program.Branches[0].Operations) != 1 || i%2 == 1 && len(candidate.Program.Branches[0].Operations) != 2 {
 			t.Fatalf("candidate %d escaped canonical path order", i)
+		}
+	}
+}
+
+func TestAtomicPlanQuoteReturnsCanonicalHomogeneousSlipstreamCandidates(t *testing.T) {
+	middle := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	factory := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	quoter := common.HexToAddress("0x8888888888888888888888888888888888888888")
+	module := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	cfg := atomicQuoteConfig(middle)
+	cfg.Deployments = map[string]config.Deployment{"slip": {
+		Kind: "aerodrome-slipstream", Factory: factory.Hex(), Quoter: quoter.Hex(), Router: common.HexToAddress("0xaaaa").Hex(),
+		ProviderConfig: slipstream.Options{TickSpacings: []int32{200, 100}},
+	}}
+	cfg.AtomicExecutor.UniswapDeployment = ""
+	cfg.AtomicExecutor.SlipstreamDeployment = "slip"
+	var originChecks atomic.Int32
+	reader := readerFake{
+		snapshot: func(context.Context) (rpc.Snapshot, error) { return snapshot(), nil },
+		call: func(_ context.Context, to common.Address, data []byte, _ common.Hash) ([]byte, error) {
+			signature := func(method []byte) bool { return bytes.Equal(data[:4], method) }
+			if to == factory && signature(contractabi.AerodromeSlipstreamFactory.Methods["swapFeeModule"].ID) {
+				originChecks.Add(1)
+				return poolResponse(module), nil
+			}
+			if to == module && signature(contractabi.AerodromeSlipstreamDynamicFeeModule.Methods["discounted"].ID) {
+				return uintWord(0), nil
+			}
+			if to == factory {
+				return poolResponse(common.BytesToAddress(crypto.Keccak256(data)[12:])), nil
+			}
+			if to == quoter {
+				input := new(big.Int).SetBytes(data[68:100]).Uint64()
+				spacing := new(big.Int).SetBytes(data[100:132]).Uint64()
+				if spacing == 200 {
+					time.Sleep(3 * time.Millisecond)
+				}
+				return quoteResponse(input + spacing), nil
+			}
+			return nil, errors.New("unexpected Atomic Slipstream quote call")
+		},
+	}
+	response, err := (Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: cfg}}, QuoteConcurrency: 4}).GetPlanQuote(context.Background(), connect.NewRequest(atomicQuoteRequest("8453", testWETH, testUSDC, "37")))
+	if err != nil || len(response.Msg.Candidates) != 6 || originChecks.Load() != 1 {
+		t.Fatalf("unexpected Slipstream candidates: %+v checks=%d error=%v", response, originChecks.Load(), err)
+	}
+	want := [][]int32{{100}, {200}, {100, 100}, {100, 200}, {200, 100}, {200, 200}}
+	for i, value := range response.Msg.Candidates {
+		operations := value.Program.Branches[0].Operations
+		if len(operations) != len(want[i]) || len(value.BranchQuotes[0].OperationOutputs) != len(want[i]) {
+			t.Fatalf("candidate %d has wrong cardinality", i)
+		}
+		for j, spacing := range want[i] {
+			pool := operations[j].GetSlipstreamInitial()
+			if pool == nil || pool.GetTickSpacing() != spacing || new(big.Int).SetBytes(value.BranchQuotes[0].OperationOutputs[j]).Sign() <= 0 {
+				t.Fatalf("candidate %d operation %d escaped canonical Slipstream order", i, j)
+			}
 		}
 	}
 }

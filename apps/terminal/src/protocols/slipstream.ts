@@ -17,6 +17,7 @@ import { directV3Terms } from "./v3";
 
 type Deployment = {
   kind: string;
+  factory?: string;
   router: string;
   tickSpacings: number[];
 };
@@ -70,15 +71,19 @@ export function slipstreamData(p: PrepareExecutionResponse) {
 }
 
 export function slipstream(raw: {
+  factory?: string;
   router?: string;
   fees?: number[];
   options?: unknown;
 }) {
   const router = `0x${raw.router?.replace(/^0x/i, "") ?? ""}`.toLowerCase();
+  const factory = `0x${raw.factory?.replace(/^0x/i, "") ?? ""}`.toLowerCase();
   const options = raw.options as Record<string, unknown> | undefined;
   const tickSpacings = options?.tick_spacings;
   if (
     !isAddress(router, { strict: false }) ||
+    (raw.factory !== undefined &&
+      (!isAddress(factory, { strict: false }) || factory === zeroAddress)) ||
     router === zeroAddress ||
     raw.fees !== undefined ||
     !options ||
@@ -97,6 +102,7 @@ export function slipstream(raw: {
     throw new Error("Local execution deployment is invalid.");
   const deployment: Deployment = {
     kind: "aerodrome-slipstream",
+    ...(raw.factory ? { factory } : {}),
     router,
     tickSpacings: [...tickSpacings],
   };

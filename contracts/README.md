@@ -165,16 +165,17 @@ proof. Other deployments and production token admission require separate review.
 `ExecutorV2` is a separate immutable contract. It does not change `Executor` or
 its ABI. This local slice accepts one branch containing one or two V3 operations,
 or exactly two branches containing one direct V3 operation each. The generic
-dispatcher recognizes Uniswap V3 kind 1 and Pancake V3 kind 2. The constructor
+dispatcher recognizes Uniswap V3 kind 1, Pancake V3 kind 2, and Aerodrome
+Slipstream Initial kind 3. The constructor
 fixes independently optional exact router endpoints, and at least one must be
 enabled. Disabled kinds fail before funding. Pool identity is the provider kind,
-unordered token pair, and fee, so reverse reuse within one provider is rejected
-without treating equal pair/fee pools across providers as the same pool.
+unordered token pair, and provider selector, so reverse reuse within one provider
+is rejected without treating equal selectors across providers as the same pool.
 
 `execute(Plan)` uses selector `0x661983c5`. It rejects noncanonical ABI bodies
 and emits the V2 on-chain commitment
 `keccak256(abi.encode(2, chainId, executor, caller, plan))`. This executor plan
-hash is not the broader quote-plan ID, which will also commit quote and runtime
+hash is not the broader accepted `plan_id`, which also commits quote and runtime
 identity. Ordered operation, branch, and final events report measured amounts.
 Branch and aggregate minimum equality and deadline equality pass. Exact input
 spend, temporary allowance cleanup, entry-dust restoration, caller credit, and
@@ -183,11 +184,15 @@ two operations, the complete positive first output above entry dust becomes the
 second input. For two branches, input is pulled once, each literal allocation is
 spent, and each branch output is its positive delta above the running output
 balance. Quoted amounts and pre-existing balances are never consumed as output.
+Slipstream uses its positive signed `int24` tick spacing and deadline-bearing
+Initial tuple. Native refunds are accepted only during its router call; only the
+new native balance delta is returned to the outer caller before `PlanExecuted`.
+The call reverts if that refund cannot be delivered or entry balances change.
 
 Every deployment configuration must pin the exact deployed runtime code hash in
 addition to the executor address and each enabled immutable router deployment. Both
 the engine and terminal compare the configured hash with on-chain runtime code;
-the engine also verifies both router and version getters at the execution block,
+the engine also verifies all three router getters and the version getter at the execution block,
 then independently verifies the selected route's pool through the configured
 factory.
 
@@ -196,13 +201,16 @@ one-operation, two-operation, and two-branch commitment and calldata values:
 [`fixtures/atomic-v1-plan.json`](fixtures/atomic-v1-plan.json) and
 [`fixtures/atomic-v1-two-hop-plan.json`](fixtures/atomic-v1-two-hop-plan.json),
 [`fixtures/atomic-v1-split-plan.json`](fixtures/atomic-v1-split-plan.json), and
-[`fixtures/atomic-v1-pancake.json`](fixtures/atomic-v1-pancake.json).
+[`fixtures/atomic-v1-pancake.json`](fixtures/atomic-v1-pancake.json), and
+[`fixtures/atomic-v1-slipstream.json`](fixtures/atomic-v1-slipstream.json).
 No deployed address is supplied or enabled by this repository.
 
 Focused local verification:
 
 ```sh
 forge test --root contracts --match-contract ExecutorV2Test
+forge test --root contracts --match-contract SlipstreamExecutorV2ForkTest \
+  --fork-url http://127.0.0.1:18545 --fork-block-number 51180007 -vv
 forge fmt --check contracts/src/ExecutorV2.sol contracts/test/ExecutorV2.t.sol
 forge inspect --root contracts ExecutorV2 abi --json
 ```

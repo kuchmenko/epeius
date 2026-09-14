@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {ExecutorV2, IPancakeRouterV2, IUniswapRouter02V2} from "../src/ExecutorV2.sol";
+import {ExecutorV2, IPancakeRouterV2, ISlipstreamRouterV2, IUniswapRouter02V2} from "../src/ExecutorV2.sol";
 import {TestToken} from "../src/TestToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -17,6 +17,7 @@ interface ExecutorV2Vm {
     function warp(uint256 timestamp) external;
     function recordLogs() external;
     function getRecordedLogs() external returns (Log[] memory);
+    function deal(address account, uint256 balance) external;
 }
 
 contract ExecutorV2TaxToken is TestToken {
@@ -48,6 +49,7 @@ contract ExecutorV2Router {
     bool public reentryRejected;
     bool public sequential;
     uint256 public calls;
+    int24 public lastTickSpacing;
 
     constructor() {
         outputAmounts[0] = 137;
@@ -104,6 +106,26 @@ contract ExecutorV2Router {
         );
     }
 
+    function exactInputSingle(ISlipstreamRouterV2.ExactInputSingleParams calldata params)
+        external
+        payable
+        returns (uint256)
+    {
+        require(params.deadline == 1_000, "deadline");
+        lastTickSpacing = params.tickSpacing;
+        uint256 refund = address(this).balance;
+        (bool ok,) = msg.sender.call{value: refund}(hex"");
+        require(ok, "refund");
+        return swap(
+            params.tokenIn,
+            params.tokenOut,
+            params.recipient,
+            params.amountIn,
+            params.amountOutMinimum,
+            params.sqrtPriceLimitX96
+        );
+    }
+
     function swap(
         address tokenIn,
         address tokenOut,
@@ -139,7 +161,12 @@ contract ExecutorV2Test {
     TestToken private tokenOut;
     ExecutorV2Router private router;
     ExecutorV2Router private pancakeRouter;
+    ExecutorV2Router private slipstreamRouter;
     ExecutorV2 private executor;
+    bool private rejectNative;
+    bool private mutateAfterRefund;
+    bool private refundReentryRejected;
+    bytes private refundReentry;
 
     function setUp() public {
         tokenIn = new TestToken("Input", 18);
@@ -147,14 +174,27 @@ contract ExecutorV2Test {
         tokenOut = new TestToken("Output", 6);
         router = new ExecutorV2Router();
         pancakeRouter = new ExecutorV2Router();
-        executor = new ExecutorV2(address(router), address(pancakeRouter));
+        slipstreamRouter = new ExecutorV2Router();
+        executor = new ExecutorV2(address(router), address(pancakeRouter), address(slipstreamRouter));
         tokenIn.mint(address(this), 10_000);
         tokenIn.approve(address(executor), type(uint256).max);
         intermediate.mint(address(router), 10_000);
         tokenOut.mint(address(router), 10_000);
         intermediate.mint(address(pancakeRouter), 10_000);
         tokenOut.mint(address(pancakeRouter), 10_000);
+        intermediate.mint(address(slipstreamRouter), 10_000);
+        tokenOut.mint(address(slipstreamRouter), 10_000);
         vm.warp(1_000);
+    }
+
+    receive() external payable {
+        if (rejectNative) revert("reject native");
+        if (mutateAfterRefund) tokenOut.transfer(address(0xCAFE), 1);
+        if (refundReentry.length != 0) {
+            (bool ok, bytes memory reason) = address(executor).call(refundReentry);
+            require(!ok && bytes4(reason) == ExecutorV2.ReentrantCall.selector, "refund reentry");
+            refundReentryRejected = true;
+        }
     }
 
     function plan(uint256 amount, uint256 branchMinimum, uint256 planMinimum, uint24 fee)
@@ -192,6 +232,16 @@ contract ExecutorV2Test {
     {
         result = plan(amount, branchMinimum, planMinimum, 500);
         result.branches[0].operations[0].kind = 2;
+    }
+
+    function slipstreamPlan(uint256 amount, uint256 branchMinimum, uint256 planMinimum)
+        private
+        view
+        returns (ExecutorV2.Plan memory result)
+    {
+        result = plan(amount, branchMinimum, planMinimum, 0);
+        result.branches[0].operations[0].kind = 3;
+        result.branches[0].operations[0].tickSpacing = 100;
     }
 
     function splitPlan(uint256 firstMinimum, uint256 secondMinimum, uint256 planMinimum)
@@ -334,6 +384,43 @@ contract ExecutorV2Test {
         );
     }
 
+    function testPublishedSlipstreamTwoHopPlanAndRouterVectors() public pure {
+        ExecutorV2.Plan memory value;
+        value.tokenIn = address(0x11);
+        value.tokenOut = address(0x33);
+        value.amountIn = 37;
+        value.minAmountOut = 60;
+        value.deadline = 2_000_000_200;
+        value.branches = new ExecutorV2.Branch[](1);
+        value.branches[0].amountIn = 37;
+        value.branches[0].minAmountOut = 60;
+        value.branches[0].operations = new ExecutorV2.Operation[](2);
+        value.branches[0].operations[0] = ExecutorV2.Operation(3, address(0x22), 0, 100, bytes32(0));
+        value.branches[0].operations[1] = ExecutorV2.Operation(3, address(0x33), 0, 200, bytes32(0));
+        bytes memory data = abi.encodeWithSelector(ExecutorV2.execute.selector, value);
+        require(keccak256(data) == 0xb8fa4bc40a31c17e153f6c03746e89e79176c3339a5cd0eae720deef96984873, "calldata");
+        require(
+            keccak256(abi.encode(uint256(2), uint256(8453), address(0x44), address(0x55), value))
+                == 0x6d3616d40dbc835b8f9c724a3cf0c4b1b7fdd32676fa0f88359c6a8b89695223,
+            "plan hash"
+        );
+
+        bytes memory firstHop = abi.encodeWithSelector(
+            ISlipstreamRouterV2.exactInputSingle.selector,
+            ISlipstreamRouterV2.ExactInputSingleParams(
+                address(0x11), address(0x22), 100, address(0x44), 2_000_000_200, 37, 1, 0
+            )
+        );
+        require(bytes4(firstHop) == 0xa026383e, "Slipstream selector");
+        require(
+            keccak256(firstHop)
+                == keccak256(
+                    hex"a026383e000000000000000000000000000000000000000000000000000000000000001100000000000000000000000000000000000000000000000000000000000000220000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000004400000000000000000000000000000000000000000000000000000000773594c8000000000000000000000000000000000000000000000000000000000000002500000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000"
+                ),
+            "Slipstream calldata"
+        );
+    }
+
     function testPublishedSplitPlanVector() public pure {
         ExecutorV2.Plan memory value;
         value.tokenIn = address(0x11);
@@ -453,7 +540,7 @@ contract ExecutorV2Test {
         vm.expectPartialRevert(ExecutorV2.AmountOutOfRange.selector);
         execute(pancakePlan(tooLarge, 1, 1));
 
-        ExecutorV2 pancakeOnly = new ExecutorV2(address(0), address(pancakeRouter));
+        ExecutorV2 pancakeOnly = new ExecutorV2(address(0), address(pancakeRouter), address(0));
         tokenIn.approve(address(pancakeOnly), 41);
         uint256 before = tokenIn.balanceOf(address(this));
         vm.expectPartialRevert(ExecutorV2.UnsupportedKind.selector);
@@ -472,6 +559,96 @@ contract ExecutorV2Test {
         value.branches[0].operations[1] = ExecutorV2.Operation(1, address(tokenIn), 321, 0, bytes32(0));
         vm.expectRevert(ExecutorV2.InvalidPlan.selector);
         execute(value);
+    }
+
+    function testSlipstreamUsesSignedSpacingMeasuredOutputAllowanceAndNativeRefund() public {
+        ExecutorV2.Plan memory value = slipstreamPlan(41, 136, 135);
+        slipstreamRouter.configure(137, 0);
+        vm.deal(address(slipstreamRouter), 1);
+        uint256 nativeBefore = address(this).balance;
+
+        vm.recordLogs();
+        require(execute(value) == 137, "output");
+        require(slipstreamRouter.lastTickSpacing() == 100, "spacing");
+        require(slipstreamRouter.amountIns(0) == 41 && slipstreamRouter.minimums(0) == 136, "call");
+        require(tokenIn.allowance(address(executor), address(slipstreamRouter)) == 0, "allowance");
+        require(address(executor).balance == 0 && address(this).balance == nativeBefore + 1, "native refund");
+
+        ExecutorV2Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32[4] memory topics = [
+            keccak256("OperationExecuted(bytes32,uint256,uint256,uint8,address,address,uint256,uint256)"),
+            keccak256("BranchExecuted(bytes32,uint256,uint256,uint256)"),
+            keccak256("NativeRefunded(bytes32,address,uint256)"),
+            keccak256("PlanExecuted(bytes32,address,address,address,uint256,uint256)")
+        ];
+        uint256 found;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(executor)) continue;
+            require(logs[i].topics[0] == topics[found], "event order");
+            ++found;
+        }
+        require(found == 4, "events");
+    }
+
+    function testSlipstreamRejectsInactiveFieldsReversePoolAndUnauthorizedNative() public {
+        ExecutorV2.Plan memory value = slipstreamPlan(41, 1, 1);
+        value.branches[0].operations[0].fee = 1;
+        vm.expectPartialRevert(ExecutorV2.InvalidOperation.selector);
+        execute(value);
+
+        value = slipstreamPlan(41, 1, 1);
+        value.branches[0].operations[0].tickSpacing = -100;
+        vm.expectPartialRevert(ExecutorV2.InvalidOperation.selector);
+        execute(value);
+
+        (bool ok, bytes memory reason) = address(executor).call{value: 0}(hex"");
+        require(!ok && bytes4(reason) == ExecutorV2.UnexpectedNativeSender.selector, "zero receive");
+    }
+
+    function testSlipstreamNativeRefundPreservesForcedEntryBalanceAndHandlesRouterStates() public {
+        vm.deal(address(executor), 7);
+        uint256 callerBefore = address(this).balance;
+        uint256[4] memory refunds = [uint256(0), 1, 40, 41];
+        for (uint256 i; i < refunds.length; ++i) {
+            vm.deal(address(slipstreamRouter), refunds[i]);
+            require(execute(slipstreamPlan(41, 1, 1)) == 137, "output");
+            require(address(executor).balance == 7, "entry native");
+        }
+        require(address(this).balance == callerBefore + 82, "refund totals");
+        require(tokenIn.allowance(address(executor), address(slipstreamRouter)) == 0, "allowance");
+    }
+
+    function testSlipstreamRejectedRefundAndPostRefundMutationRollBack() public {
+        uint256 inputBefore = tokenIn.balanceOf(address(this));
+        vm.deal(address(slipstreamRouter), 1);
+        rejectNative = true;
+        vm.expectPartialRevert(ExecutorV2.NativeRefundFailed.selector);
+        execute(slipstreamPlan(41, 1, 1));
+        rejectNative = false;
+        require(
+            tokenIn.balanceOf(address(this)) == inputBefore && address(slipstreamRouter).balance == 1, "reject rollback"
+        );
+
+        vm.deal(address(slipstreamRouter), 1);
+        mutateAfterRefund = true;
+        vm.expectPartialRevert(ExecutorV2.BalanceMismatch.selector);
+        execute(slipstreamPlan(41, 1, 1));
+        mutateAfterRefund = false;
+        require(
+            tokenIn.balanceOf(address(this)) == inputBefore && tokenOut.balanceOf(address(executor)) == 0,
+            "mutation rollback"
+        );
+    }
+
+    function testSlipstreamRefundKeepsGuardHeldAndFlagCleared() public {
+        ExecutorV2.Plan memory value = slipstreamPlan(41, 1, 1);
+        refundReentry = abi.encodeCall(executor.execute, (value));
+        vm.deal(address(slipstreamRouter), 1);
+        execute(value);
+        require(refundReentryRejected, "refund guard");
+
+        (bool ok, bytes memory reason) = address(executor).call{value: 0}(hex"");
+        require(!ok && bytes4(reason) == ExecutorV2.UnexpectedNativeSender.selector, "flag cleared");
     }
 
     function testTwoHopZeroIntermediateAndPartialFinalSpendRollBack() public {
@@ -643,7 +820,7 @@ contract ExecutorV2Test {
 
     function testRejectsUnsupportedAndNonzeroInactiveFields() public {
         ExecutorV2.Plan memory value = plan(41, 1, 1, 321);
-        value.branches[0].operations[0].kind = 3;
+        value.branches[0].operations[0].kind = 4;
         vm.expectPartialRevert(ExecutorV2.UnsupportedKind.selector);
         execute(value);
 
@@ -708,16 +885,19 @@ contract ExecutorV2Test {
 
     function testConstructorRejectsAddressWithoutCode() public {
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0xBEEF), address(0));
+        new ExecutorV2(address(0xBEEF), address(0), address(0));
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(router), address(0xBEEF));
+        new ExecutorV2(address(router), address(0xBEEF), address(0));
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(0), address(0));
+        new ExecutorV2(address(0), address(0), address(0));
 
         vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
-        new ExecutorV2(address(router), address(router));
+        new ExecutorV2(address(router), address(router), address(0));
+
+        vm.expectRevert(ExecutorV2.InvalidDeployment.selector);
+        new ExecutorV2(address(router), address(pancakeRouter), address(router));
     }
 
     function testReentrancyRejected() public {

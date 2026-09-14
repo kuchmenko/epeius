@@ -14,7 +14,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	atomicv1 "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1"
+	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/slipstream"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -40,12 +42,31 @@ func atomicV3Pool(operation *atomicv1.PoolOperation) (*atomicv1.V3Pool, uint8) {
 	return nil, 0
 }
 
+type atomicPoolIdentity struct {
+	factory, router, pool []byte
+	selector              *big.Int
+	kind                  uint8
+	slipstream            bool
+}
+
+func atomicPool(operation *atomicv1.PoolOperation) (atomicPoolIdentity, bool) {
+	if pool, kind := atomicV3Pool(operation); pool != nil {
+		return atomicPoolIdentity{pool.Factory, pool.Router, pool.Pool, new(big.Int).SetUint64(uint64(pool.GetFeePips())), kind, false}, true
+	}
+	if operation != nil {
+		if pool := operation.GetSlipstreamInitial(); pool != nil && pool.TickSpacing != nil {
+			return atomicPoolIdentity{pool.Factory, pool.Router, pool.Pool, big.NewInt(int64(pool.GetTickSpacing())), 3, true}, true
+		}
+	}
+	return atomicPoolIdentity{}, false
+}
+
 func uint256Bytes(value *big.Int) []byte {
 	return common.LeftPadBytes(value.Bytes(), 32)
 }
 
 func atomicCandidateHash(program *atomicv1.PlanProgram, block *atomicv1.PinnedBlock, quotes []*atomicv1.BranchQuote) (common.Hash, error) {
-	uint8Type, uint24Type := atomicABIType("uint8"), atomicABIType("uint24")
+	uint8Type, uint24Type, int24Type := atomicABIType("uint8"), atomicABIType("uint24"), atomicABIType("int24")
 	uint32Type, uint256Type := atomicABIType("uint32"), atomicABIType("uint256")
 	addressType, bytes32Type := atomicABIType("address"), atomicABIType("bytes32")
 	bytes32ArrayType := atomicABIType("bytes32[]")
@@ -61,20 +82,24 @@ func atomicCandidateHash(program *atomicv1.PlanProgram, block *atomicv1.PinnedBl
 			return common.Hash{}, errors.New("operation output count does not match program")
 		}
 		for j, operation := range branch.Operations {
-			pool, kind := atomicV3Pool(operation)
-			if pool == nil {
+			pool, ok := atomicPool(operation)
+			if !ok {
 				return common.Hash{}, errors.New("unsupported operation")
 			}
+			selectorType := uint24Type
+			if pool.slipstream {
+				selectorType = int24Type
+			}
 			providerHash, err := atomicHash(
-				abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: addressType}, {Type: uint24Type}},
-				atomicCandidateProviderDomain, kind, common.BytesToAddress(pool.Factory), common.BytesToAddress(pool.Router), common.BytesToAddress(pool.Pool), new(big.Int).SetUint64(uint64(pool.GetFeePips())),
+				abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: addressType}, {Type: selectorType}},
+				atomicCandidateProviderDomain, pool.kind, common.BytesToAddress(pool.factory), common.BytesToAddress(pool.router), common.BytesToAddress(pool.pool), pool.selector,
 			)
 			if err != nil {
 				return common.Hash{}, err
 			}
 			operationHashes[j], err = atomicHash(
 				abi.Arguments{{Type: bytes32Type}, {Type: uint8Type}, {Type: addressType}, {Type: addressType}, {Type: bytes32Type}},
-				atomicCandidateOperationDomain, kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
+				atomicCandidateOperationDomain, pool.kind, common.BytesToAddress(operation.TokenIn), common.BytesToAddress(operation.TokenOut), providerHash,
 			)
 			if err != nil {
 				return common.Hash{}, err
@@ -112,12 +137,29 @@ func atomicCandidateHash(program *atomicv1.PlanProgram, block *atomicv1.PinnedBl
 }
 
 func atomicPlanCandidate(chainID, amount *big.Int, tokenIn, tokenOut common.Address, deployment config.Deployment, item candidate, block *atomicv1.PinnedBlock, outputs []*big.Int, legsPools []common.Address) (*atomicv1.PlanCandidate, error) {
-	operations := make([]*atomicv1.PoolOperation, len(item.fees))
+	operationCount := len(item.fees)
+	if deployment.Kind == "aerodrome-slipstream" {
+		operationCount = len(item.spacings)
+	}
+	operations := make([]*atomicv1.PoolOperation, operationCount)
 	seenPools := map[common.Address]bool{}
 	seenKeys := map[string]bool{}
-	for i, fee := range item.fees {
+	for i := range operations {
 		pool := legsPools[i]
-		key := atomicV1PoolKeyFromValues(item.tokens[i], item.tokens[i+1], fee)
+		fee := uint32(0)
+		spacing := int32(0)
+		if deployment.Kind == "aerodrome-slipstream" {
+			spacing = item.spacings[i]
+		} else {
+			fee = item.fees[i]
+		}
+		kind := uint8(1)
+		if deployment.Kind == "pancake-v3" {
+			kind = 2
+		} else if deployment.Kind == "aerodrome-slipstream" {
+			kind = 3
+		}
+		key := atomicV1PoolKeyFromValues(kind, item.tokens[i], item.tokens[i+1], fee, spacing)
 		if seenPools[pool] || seenKeys[key] {
 			return nil, nil
 		}
@@ -125,10 +167,13 @@ func atomicPlanCandidate(chainID, amount *big.Int, tokenIn, tokenOut common.Addr
 		operation := &atomicv1.PoolOperation{
 			TokenIn: item.tokens[i].Bytes(), TokenOut: item.tokens[i+1].Bytes(),
 		}
-		poolValue := &atomicv1.V3Pool{Factory: common.HexToAddress(deployment.Factory).Bytes(), Router: common.HexToAddress(deployment.Router).Bytes(), Pool: pool.Bytes(), FeePips: proto.Uint32(fee)}
-		if deployment.Kind == "pancake-v3" {
+		if deployment.Kind == "aerodrome-slipstream" {
+			operation.Pool = &atomicv1.PoolOperation_SlipstreamInitial{SlipstreamInitial: &atomicv1.SlipstreamPool{Factory: common.HexToAddress(deployment.Factory).Bytes(), Router: common.HexToAddress(deployment.Router).Bytes(), Pool: pool.Bytes(), TickSpacing: proto.Int32(spacing)}}
+		} else if deployment.Kind == "pancake-v3" {
+			poolValue := &atomicv1.V3Pool{Factory: common.HexToAddress(deployment.Factory).Bytes(), Router: common.HexToAddress(deployment.Router).Bytes(), Pool: pool.Bytes(), FeePips: proto.Uint32(fee)}
 			operation.Pool = &atomicv1.PoolOperation_PancakeV3{PancakeV3: poolValue}
 		} else {
+			poolValue := &atomicv1.V3Pool{Factory: common.HexToAddress(deployment.Factory).Bytes(), Router: common.HexToAddress(deployment.Router).Bytes(), Pool: pool.Bytes(), FeePips: proto.Uint32(fee)}
 			operation.Pool = &atomicv1.PoolOperation_UniswapV3{UniswapV3: poolValue}
 		}
 		operations[i] = operation
@@ -152,11 +197,15 @@ func atomicPlanCandidate(chainID, amount *big.Int, tokenIn, tokenOut common.Addr
 	return &atomicv1.PlanCandidate{CandidateId: hash.Bytes(), Program: program, QuoteBlock: proto.CloneOf(block), BranchQuotes: branchQuotes}, nil
 }
 
-func atomicV1PoolKeyFromValues(in, out common.Address, fee uint32) string {
+func atomicV1PoolKeyFromValues(kind uint8, in, out common.Address, fee uint32, spacing int32) string {
 	if string(in[:]) > string(out[:]) {
 		in, out = out, in
 	}
-	return string(in[:]) + string(out[:]) + string(new(big.Int).SetUint64(uint64(fee)).Bytes())
+	selector := new(big.Int).SetUint64(uint64(fee))
+	if kind == 3 {
+		selector.SetInt64(int64(spacing))
+	}
+	return string([]byte{kind}) + string(in[:]) + string(out[:]) + selector.String()
 }
 
 func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1.PlanQuoteRequest]) (*connect.Response[atomicv1.PlanQuoteResponse], error) {
@@ -201,7 +250,7 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("Atomic V1 executor is not configured"))
 	}
 	deployments := map[string]config.Deployment{}
-	for id, kind := range map[string]string{executor.UniswapDeployment: "uniswap-v3", executor.PancakeDeployment: "pancake-v3"} {
+	for id, kind := range map[string]string{executor.UniswapDeployment: "uniswap-v3", executor.PancakeDeployment: "pancake-v3", executor.SlipstreamDeployment: "aerodrome-slipstream"} {
 		deployment, ok := chain.Config.Deployments[id]
 		if id != "" && ok && deployment.Kind == kind && chain.DeploymentErrors[id] == "" {
 			deployments[id] = deployment
@@ -229,6 +278,16 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 	}
 	block := &atomicv1.PinnedBlock{Number: uint256Bytes(blockNumber), Hash: common.HexToHash(snapshot.BlockHash).Bytes()}
 	iterator := newCandidates(config.Chain{Tokens: chain.Config.Tokens, Deployments: deployments}, tokenIn, tokenOut)
+	type originCheck struct {
+		once sync.Once
+		err  error
+	}
+	originChecks := map[string]*originCheck{}
+	for id, deployment := range deployments {
+		if deployment.Kind == "aerodrome-slipstream" {
+			originChecks[id] = &originCheck{}
+		}
+	}
 	type result struct {
 		index int
 		value *atomicv1.PlanCandidate
@@ -245,9 +304,28 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 			defer workers.Done()
 			for {
 				deployment := deployments[item.deployment]
-				legs, outputs, quoteErr := quotePathOutputs(searchCtx, chain.Client, deployment, item.tokens, item.fees, amount, common.HexToHash(snapshot.BlockHash))
+				var legs []*quotev1.RouteLeg
+				var outputs []*big.Int
+				var quoteErr error
+				if deployment.Kind == "aerodrome-slipstream" {
+					check := originChecks[item.deployment]
+					check.once.Do(func() {
+						check.err = verifySlipstreamQuoteOrigin(searchCtx, chain.Client, common.HexToHash(snapshot.BlockHash), common.HexToAddress(deployment.Factory))
+					})
+					quoteErr = check.err
+					if quoteErr == nil {
+						options, _ := deployment.ProviderConfig.(slipstream.Options)
+						legs, outputs, quoteErr = (slipstreamQuoter{reader: chain.Client, deployment: deployment, options: options}).quoteOutputs(searchCtx, item.tokens, item.spacings, amount, common.HexToHash(snapshot.BlockHash))
+					}
+				} else {
+					legs, outputs, quoteErr = quotePathOutputs(searchCtx, chain.Client, deployment, item.tokens, item.fees, amount, common.HexToHash(snapshot.BlockHash))
+				}
 				var value *atomicv1.PlanCandidate
-				if quoteErr == nil && len(legs) == len(item.fees) {
+				expectedLegs := len(item.fees)
+				if deployment.Kind == "aerodrome-slipstream" {
+					expectedLegs = len(item.spacings)
+				}
+				if quoteErr == nil && len(legs) == expectedLegs {
 					pools := make([]common.Address, len(legs))
 					for i, leg := range legs {
 						pools[i] = common.HexToAddress(leg.Pool)

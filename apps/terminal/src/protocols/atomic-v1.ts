@@ -83,11 +83,28 @@ const requiredBytes = (
 const requiredUint = (value: Uint8Array | undefined, label: string) =>
   BigInt(requiredBytes(value, 32, label));
 
-const atomicV3Pool = (operation: PoolOperation) => {
+const atomicPool = (operation: PoolOperation) => {
   if (operation.pool.case === "uniswapV3")
-    return { pool: operation.pool.value, kind: 1 };
+    return {
+      pool: operation.pool.value,
+      kind: 1,
+      selector: operation.pool.value.feePips,
+      selectorType: "uint24" as const,
+    };
   if (operation.pool.case === "pancakeV3")
-    return { pool: operation.pool.value, kind: 2 };
+    return {
+      pool: operation.pool.value,
+      kind: 2,
+      selector: operation.pool.value.feePips,
+      selectorType: "uint24" as const,
+    };
+  if (operation.pool.case === "slipstreamInitial")
+    return {
+      pool: operation.pool.value,
+      kind: 3,
+      selector: operation.pool.value.tickSpacing,
+      selectorType: "int24" as const,
+    };
   throw new Error("Atomic V1 accepted operation is unsupported.");
 };
 
@@ -231,9 +248,8 @@ export function atomicV1AcceptedBranchHashes(
     throw new Error("Atomic V1 accepted branch cardinality is invalid.");
   return program.branches.map((branch, branchIndex) => {
     const operationHashes = branch.operations.map((operation) => {
-      const { pool, kind } = atomicV3Pool(operation);
-      const fee = pool.feePips;
-      if (fee === undefined)
+      const { pool, kind, selector, selectorType } = atomicPool(operation);
+      if (selector === undefined)
         throw new Error("Atomic V1 accepted operation is unsupported.");
       const providerHash = keccak256(
         encodeAbiParameters(
@@ -243,7 +259,7 @@ export function atomicV1AcceptedBranchHashes(
             { type: "address" },
             { type: "address" },
             { type: "address" },
-            { type: "uint24" },
+            { type: selectorType },
           ],
           [
             domain("Epeius.AtomicProvider.v1"),
@@ -251,7 +267,7 @@ export function atomicV1AcceptedBranchHashes(
             getAddress(requiredBytes(pool.factory, 20, "factory")),
             getAddress(requiredBytes(pool.router, 20, "router")),
             getAddress(requiredBytes(pool.pool, 20, "pool")),
-            fee,
+            selector,
           ],
         ),
       );
@@ -301,6 +317,7 @@ export function atomicExecutorV1(
     runtimeCodeHash?: string;
     uniswapDeployment?: string;
     pancakeDeployment?: string;
+    slipstreamDeployment?: string;
   },
   deployments: Record<string, { kind: string }>,
 ) {
@@ -319,17 +336,32 @@ export function atomicExecutorV1(
   const pancake = raw.pancakeDeployment
     ? (deployments[raw.pancakeDeployment] as V3Deployment | undefined)
     : undefined;
+  const slipstream = raw.slipstreamDeployment
+    ? (deployments[raw.slipstreamDeployment] as
+        | {
+            kind: string;
+            factory?: string;
+            router: string;
+            tickSpacings: number[];
+          }
+        | undefined)
+    : undefined;
   if (
     (raw.uniswapDeployment && uniswap?.kind !== "uniswap-v3") ||
     (raw.pancakeDeployment && pancake?.kind !== "pancake-v3") ||
-    (!uniswap && !pancake) ||
-    !(uniswap ?? pancake)?.factory ||
-    (uniswap && pancake && same(uniswap.router, pancake.router))
+    (raw.slipstreamDeployment && slipstream?.kind !== "aerodrome-slipstream") ||
+    (!uniswap && !pancake && !slipstream) ||
+    [uniswap, pancake, slipstream].some((value) => value && !value.factory) ||
+    new Set(
+      [uniswap, pancake, slipstream]
+        .filter(Boolean)
+        .map((value) => value?.router.toLowerCase()),
+    ).size !== [uniswap, pancake, slipstream].filter(Boolean).length
   )
     throw new Error(
-      "Local Atomic V1 executor needs at least one valid distinct Uniswap or Pancake V3 deployment.",
+      "Local Atomic V1 executor needs at least one valid deployment with distinct routers.",
     );
-  const deployment = uniswap ?? pancake;
+  const deployment = uniswap ?? pancake ?? slipstream;
   if (!deployment?.factory) throw new Error("Invalid Atomic V1 deployment.");
   const factory = deployment.factory;
 
@@ -340,6 +372,8 @@ export function atomicExecutorV1(
     router: deployment.router,
     pancakeFactory: pancake?.factory,
     pancakeRouter: pancake?.router,
+    slipstreamFactory: slipstream?.factory,
+    slipstreamRouter: slipstream?.router,
     plan(
       p: PrepareExecutionResponse,
       tokens: string[],
@@ -363,8 +397,9 @@ export function atomicExecutorV1(
       if (!wirePlan || (!single && !split))
         throw new Error("Invalid Atomic V1 plan.");
       const routes = selected.map((selection) => {
-        if (!selection.route) throw new Error("Invalid Atomic V1 plan.");
-        admitV3Route(selection.route, p, deployment, tokens);
+        if (!selection.route || !uniswap)
+          throw new Error("Invalid Atomic V1 plan.");
+        admitV3Route(selection.route, p, uniswap, tokens);
         return selection.route;
       });
       const block = routes[0].block;
