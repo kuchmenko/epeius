@@ -84,6 +84,40 @@ pancake_deployment = "pan"
 	}
 }
 
+func TestAtomicExecutorNamesOneUniswapDeployment(t *testing.T) {
+	text := validConfig + `
+[chains.test-net.deployments.uni]
+kind = "uniswap-v3"
+factory = "0x1111111111111111111111111111111111111111"
+quoter = "0x2222222222222222222222222222222222222222"
+router = "0x3333333333333333333333333333333333333333"
+fees = [500]
+[chains.test-net.atomic_executor]
+address = "0x4444444444444444444444444444444444444444"
+runtime_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+uniswap_deployment = "uni"
+`
+	got, err := loadText(t, text)
+	if err != nil || got.Chains["test-net"].AtomicExecutor.UniswapDeployment != "uni" {
+		t.Fatalf("Atomic V1 config rejected: %v", err)
+	}
+	for _, replacement := range []string{"missing", "0x0000000000000000000000000000000000000000", "0xaaaa"} {
+		old := "uni"
+		if strings.HasPrefix(replacement, "0x") {
+			old = "0x4444444444444444444444444444444444444444"
+			if replacement == "0xaaaa" {
+				old = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}
+		}
+		if _, err := loadText(t, strings.Replace(text, old, replacement, 1)); err == nil {
+			t.Fatalf("invalid Atomic V1 config accepted: %s", replacement)
+		}
+	}
+	if _, err := loadText(t, strings.Replace(text, "uniswap_deployment = \"uni\"", "uniswap_deployment = \"uni\"\nunknown = true", 1)); err == nil {
+		t.Fatal("unknown Atomic V1 config field accepted")
+	}
+}
+
 func TestLoadRejectsInvalidConfig(t *testing.T) {
 	tests := []struct{ name, old, replacement string }{
 		{"unknown field", "search_budget_ms = 2500", "search_budget_ms = 2500\nunknown = true"},

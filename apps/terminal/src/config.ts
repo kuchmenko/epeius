@@ -128,6 +128,12 @@ export async function readSettings(path: string) {
           uniswap_deployment?: string;
           pancake_deployment?: string;
         };
+        atomic_executor?: {
+          address?: string;
+          runtime_code_hash?: string;
+          uniswap_deployment?: string;
+          [key: string]: unknown;
+        };
         tokens?: Array<{
           address?: string;
           symbol?: string;
@@ -157,7 +163,9 @@ export async function readExecutionConfig(
       Awaited<ReturnType<typeof readSettings>>["chains"]
     >[string],
     allocations: boolean,
+    atomic: boolean,
   ) => TrustedExecution,
+  atomic = false,
 ) {
   const config = await readSettings(configPath);
   const localChain = config.chains?.[chain];
@@ -183,6 +191,6 @@ export async function readExecutionConfig(
       throw new Error("Local execution tokens must have valid addresses.");
     }
   }
-  const trusted = configure(tokens, localChain, allocations);
+  const trusted = configure(tokens, localChain, allocations, atomic);
   return { expectedChainId, rpcUrlEnv: localChain.rpc_url_env, trusted };
 }

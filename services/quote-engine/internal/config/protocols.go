@@ -71,6 +71,12 @@ func ValidateChain(chain Chain) error {
 			return errors.New("executor needs a nonzero address and distinct configured Uniswap and Pancake routers")
 		}
 	}
+	if e := chain.AtomicExecutor; e != nil {
+		deployment, ok := chain.Deployments[e.UniswapDeployment]
+		if !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || !ok || deployment.Kind != "uniswap-v3" {
+			return errors.New("atomic executor needs a nonzero address, runtime code hash, and configured Uniswap V3 deployment")
+		}
+	}
 	for id, d := range chain.Deployments {
 		validate, ok := deploymentValidators[d.Kind]
 		if !ok {

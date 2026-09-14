@@ -1,0 +1,464 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "uniswapRouter_",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "execute",
+    "inputs": [
+      {
+        "name": "plan",
+        "type": "tuple",
+        "internalType": "struct ExecutorV2.Plan",
+        "components": [
+          {
+            "name": "tokenIn",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "tokenOut",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "minAmountOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "branches",
+            "type": "tuple[]",
+            "internalType": "struct ExecutorV2.Branch[]",
+            "components": [
+              {
+                "name": "amountIn",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "minAmountOut",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "operations",
+                "type": "tuple[]",
+                "internalType": "struct ExecutorV2.Operation[]",
+                "components": [
+                  {
+                    "name": "kind",
+                    "type": "uint8",
+                    "internalType": "uint8"
+                  },
+                  {
+                    "name": "tokenOut",
+                    "type": "address",
+                    "internalType": "address"
+                  },
+                  {
+                    "name": "fee",
+                    "type": "uint24",
+                    "internalType": "uint24"
+                  },
+                  {
+                    "name": "tickSpacing",
+                    "type": "int24",
+                    "internalType": "int24"
+                  },
+                  {
+                    "name": "poolId",
+                    "type": "bytes32",
+                    "internalType": "bytes32"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "uniswapRouter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "version",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "event",
+    "name": "BranchExecuted",
+    "inputs": [
+      {
+        "name": "planHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "branchIndex",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amountIn",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amountOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OperationExecuted",
+    "inputs": [
+      {
+        "name": "planHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "branchIndex",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "operationIndex",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "kind",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "tokenIn",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "tokenOut",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "amountIn",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amountOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PlanExecuted",
+    "inputs": [
+      {
+        "name": "planHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "caller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "tokenOut",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "tokenIn",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "amountIn",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amountOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AddressEmptyCode",
+    "inputs": [
+      {
+        "name": "target",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AddressInsufficientBalance",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BalanceMismatch",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expected",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "actual",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BranchMinimumNotMet",
+    "inputs": [
+      {
+        "name": "branchIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minimum",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "actual",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Expired",
+    "inputs": [
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "timestamp",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "FailedInnerCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidDeployment",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidOperation",
+    "inputs": [
+      {
+        "name": "branchIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "operationIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidPlan",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NonCanonicalEncoding",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OutputNotIncreased",
+    "inputs": [
+      {
+        "name": "branchIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "operationIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PlanMinimumNotMet",
+    "inputs": [
+      {
+        "name": "minimum",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "actual",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ProtocolCallFailed",
+    "inputs": [
+      {
+        "name": "branchIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "operationIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "reason",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SafeERC20FailedOperation",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "UnsupportedKind",
+    "inputs": [
+      {
+        "name": "kind",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ]
+  }
+]

@@ -1,8 +1,37 @@
 import { expect, test } from "bun:test";
+import { keccak256 } from "viem";
 import { readChain } from "./chain";
 
 const hash = `0x${"ab".repeat(32)}`;
 const blockHash = `0x${"cd".repeat(32)}`;
+
+test("RPC derives configured contract runtime code hash without batching", async () => {
+  const requests: Array<{ method: string; params: unknown[] }> = [];
+  const code = "0x6001600055";
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const body = await request.json();
+      requests.push(body);
+      return Response.json({ jsonrpc: "2.0", id: body.id, result: code });
+    },
+  });
+  try {
+    expect(
+      await readChain(server.url.href, new AbortController().signal).codeHash(
+        `0x${"1".repeat(40)}`,
+      ),
+    ).toBe(keccak256(code));
+    expect(requests).toMatchObject([
+      {
+        method: "eth_getCode",
+        params: [`0x${"1".repeat(40)}`, "latest"],
+      },
+    ]);
+  } finally {
+    server.stop(true);
+  }
+});
 
 test("RPC preserves raw receipt, null polling and canonical block identity without batching", async () => {
   const requests: Array<{ method: string; params: unknown[] }> = [];

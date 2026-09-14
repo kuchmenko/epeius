@@ -1,9 +1,11 @@
 import {
   createPublicClient,
+  type Hex,
   hexToBigInt,
   http,
   isHash,
   isHex,
+  keccak256,
   zeroHash,
 } from "viem";
 import type { Receipt } from "./receipt";
@@ -43,6 +45,12 @@ export function readChain(rpcUrl: string, signal: AbortSignal) {
   };
   return {
     chainId: async () => String(await rpc("eth_chainId")).toLowerCase(),
+    codeHash: async (address: string) => {
+      const code = String(await rpc("eth_getCode", [address, "latest"]));
+      if (!isHex(code, { strict: true }) || code === "0x")
+        throw new Error("Configured contract code is unavailable.");
+      return keccak256(code as Hex);
+    },
     waitCanonicalReceipt: async (hash: string): Promise<Receipt> => {
       for (let attempt = 0; attempt < 60; attempt++) {
         const receipt = (await rpc("eth_getTransactionReceipt", [

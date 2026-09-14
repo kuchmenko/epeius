@@ -5,6 +5,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	atomicv1 "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 )
 
@@ -23,6 +24,7 @@ type executionSelection struct {
 
 type executionPlan struct {
 	transaction *quotev1.UnsignedTransaction
+	atomicPlan  *atomicv1.Plan
 	spender     string
 	permission  *permissionPlan
 	checks      SimulationChecks

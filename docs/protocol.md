@@ -41,9 +41,11 @@ All calls at quote time use one canonical EIP-1898 block hash. There is no fallb
 
 ## Execution preparation
 
-Initial `PrepareExecutionRequest` supplies quote ID, sender, slippage basis points, and either `routeId` for direct execution or `allocations` for the configured executor. Each `RouteAllocation` names a stored `routeId` and positive `amountInAtomic`; one or two entries must sum exactly to the original quote input, with distinct venues when there are two. A recheck supplies only `preparationId`. Current sender and recipient are the same wallet.
+Initial `PrepareExecutionRequest` supplies quote ID, sender, slippage basis points, and either `routeId` for direct execution or `allocations` for the configured executor. `execution_mode = ATOMIC_V1` changes a selected `routeId` from direct execution to the additive Atomic V1 path. Atomic V1 currently accepts only one single-pool Uniswap V3 route. Each `RouteAllocation` names a stored `routeId` and positive `amountInAtomic`; one or two entries must sum exactly to the original quote input, with distinct venues when there are two. A recheck supplies only `preparationId`. Current sender and recipient are the same wallet.
 
 Executor responses use `allocations` of `QuotedAllocation`, each containing its exact input and freshly re-quoted route at the original shared block; legacy `route` is absent. Outputs are never scaled. Sum the allocation outputs before calculating the single slippage floor. Allocation order, amounts, full routes, and transaction bytes are immutable preparation terms. Old clients must not treat an executor response as a direct-router response.
+
+Atomic V1 responses contain the selected pinned `route` and an `epeius.atomic.v1.Plan`. The plan has one branch and one generic tagged operation; policy currently admits only Uniswap V3 kind 1. Its `executor_plan_hash` is the contract event commitment over version 2, chain ID, ExecutorV2 address, sender, and the canonical `Plan` tuple. It is not the broader Wave 5 quote-plan ID, which also includes quote-block and runtime identity. The terminal independently recomputes the executor hash and calldata. Older terminals ignore the additive plan field but reject the unfamiliar ExecutorV2 target/calldata as a direct route, so they fail closed.
 
 Statuses:
 

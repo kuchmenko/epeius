@@ -6,6 +6,7 @@ import {
   type Hex,
   isAddress,
 } from "viem";
+import { executorV2Abi } from "../../../generated/abi";
 
 export const VerificationOutcome = {
   Pending: "pending",
@@ -39,10 +40,33 @@ export type ReceiptObligations = {
   amountOutMinimumAtomic: string;
   intermediate: Array<{ token: string; owner: string }>;
   touched?: Array<{ token: string; owner: string }>;
+  atomicPlan?: {
+    executor: string;
+    planHash: string;
+    operation: {
+      kind: number;
+      tokenIn: string;
+      tokenOut: string;
+      amountInAtomic: string;
+      branchMinimumAtomic: string;
+    };
+  };
 };
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const transfer = encodeEventTopics({ abi: erc20Abi, eventName: "Transfer" })[0];
+const operationExecuted = encodeEventTopics({
+  abi: executorV2Abi,
+  eventName: "OperationExecuted",
+})[0];
+const branchExecuted = encodeEventTopics({
+  abi: executorV2Abi,
+  eventName: "BranchExecuted",
+})[0];
+const planExecuted = encodeEventTopics({
+  abi: executorV2Abi,
+  eventName: "PlanExecuted",
+})[0];
 
 export type SwapVerification =
   | {
@@ -132,19 +156,82 @@ export function verifyReceipt(
       ...obligations.intermediate,
       ...(obligations.touched ?? []),
     ].some(({ token, owner }) => delta(token, owner) !== 0n);
+    let atomicEventValid = true;
+    if (obligations.atomicPlan) {
+      const events = receipt.logs.filter(
+        (log) =>
+          same(log.address, obligations.atomicPlan?.executor ?? "") &&
+          [operationExecuted, branchExecuted, planExecuted].some((topic) =>
+            same(log.topics[0] ?? "", topic),
+          ),
+      );
+      if (
+        events.length !== 3 ||
+        !same(events[0].topics[0] ?? "", operationExecuted) ||
+        !same(events[1].topics[0] ?? "", branchExecuted) ||
+        !same(events[2].topics[0] ?? "", planExecuted)
+      )
+        atomicEventValid = false;
+      else {
+        const operation = decodeEventLog({
+          abi: executorV2Abi,
+          eventName: "OperationExecuted",
+          strict: true,
+          topics: events[0].topics as [Hex, ...Hex[]],
+          data: events[0].data as Hex,
+        });
+        const branch = decodeEventLog({
+          abi: executorV2Abi,
+          eventName: "BranchExecuted",
+          strict: true,
+          topics: events[1].topics as [Hex, ...Hex[]],
+          data: events[1].data as Hex,
+        });
+        const plan = decodeEventLog({
+          abi: executorV2Abi,
+          eventName: "PlanExecuted",
+          strict: true,
+          topics: events[2].topics as [Hex, ...Hex[]],
+          data: events[2].data as Hex,
+        });
+        const expected = obligations.atomicPlan.operation;
+        atomicEventValid =
+          same(operation.args.planHash, obligations.atomicPlan.planHash) &&
+          operation.args.branchIndex === 0n &&
+          operation.args.operationIndex === 0n &&
+          operation.args.kind === expected.kind &&
+          same(operation.args.tokenIn, expected.tokenIn) &&
+          same(operation.args.tokenOut, expected.tokenOut) &&
+          operation.args.amountIn === BigInt(expected.amountInAtomic) &&
+          operation.args.amountOut === output &&
+          same(branch.args.planHash, obligations.atomicPlan.planHash) &&
+          branch.args.branchIndex === 0n &&
+          branch.args.amountIn === BigInt(expected.amountInAtomic) &&
+          branch.args.amountOut === output &&
+          branch.args.amountOut >= BigInt(expected.branchMinimumAtomic) &&
+          same(plan.args.planHash, obligations.atomicPlan.planHash) &&
+          same(plan.args.caller, obligations.recipient) &&
+          same(plan.args.tokenIn, obligations.tokenIn) &&
+          same(plan.args.tokenOut, obligations.tokenOut) &&
+          plan.args.amountIn === BigInt(obligations.amountInAtomic) &&
+          plan.args.amountOut === output;
+      }
+    }
     return {
       outcome:
         input === BigInt(obligations.amountInAtomic) &&
         output >= BigInt(obligations.amountOutMinimumAtomic) &&
-        !residue
+        !residue &&
+        atomicEventValid
           ? VerificationOutcome.Passed
           : VerificationOutcome.Failed,
       inputSpentAtomic: input.toString(),
       outputReceivedAtomic: output.toString(),
       routerIntermediateDeltas: intermediate,
       ...(obligations.touched ? { touchedTokenOwnerDeltas: touched } : {}),
-      reason:
-        "Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted.",
+      reason: obligations.atomicPlan
+        ? "Ordered Atomic V1 executor events and standard ERC20 Transfer net deltas; no pre-existing balances counted."
+        : "Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted.",
     };
   } catch {
     return {

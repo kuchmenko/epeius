@@ -39,12 +39,19 @@ type Chain struct {
 	Tokens           []Token               `toml:"tokens"`
 	Deployments      map[string]Deployment `toml:"deployments"`
 	Executor         *Executor             `toml:"executor"`
+	AtomicExecutor   *AtomicExecutor       `toml:"atomic_executor"`
 }
 
 type Executor struct {
 	Address           string `toml:"address"`
 	UniswapDeployment string `toml:"uniswap_deployment"`
 	PancakeDeployment string `toml:"pancake_deployment"`
+}
+
+type AtomicExecutor struct {
+	Address           string `toml:"address"`
+	RuntimeCodeHash   string `toml:"runtime_code_hash"`
+	UniswapDeployment string `toml:"uniswap_deployment"`
 }
 
 type Token struct {

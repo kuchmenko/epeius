@@ -48,8 +48,8 @@ Usage:
   bun run terminal -- status [--engine-url URL] [--json]
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--search-budget-ms N] [--engine-url URL] [--json]
-  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH [--route-id ID] [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
-  bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID | --allocations JSON) [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH [--route-id ID] [--execution-mode atomic-v1] [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID [--execution-mode atomic-v1] | --allocations JSON) [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
 prepare previews without sending. execute displays terms and asks approval or swap confirmation.
@@ -205,12 +205,18 @@ export async function main(rawArgs: string[]) {
         "route-id",
         "preparation-id",
         "allocations",
+        "execution-mode",
         "keystore",
         "password-file",
         "slippage-bps",
         "confirm-approval",
         "confirm-swap",
       ]);
+      if (
+        values["execution-mode"] !== undefined &&
+        values["execution-mode"] !== "atomic-v1"
+      )
+        throw new Error("--execution-mode must be atomic-v1 when provided.");
       if (values["preparation-id"] && values["slippage-bps"] === undefined)
         throw new Error("--slippage-bps is required with --preparation-id.");
       if (
@@ -219,7 +225,9 @@ export async function main(rawArgs: string[]) {
         (!values["quote-id"] && !values["preparation-id"]) ||
         (!!values["quote-id"] && !!values["preparation-id"]) ||
         (values["preparation-id"]
-          ? !!values["route-id"] || !!values.allocations
+          ? !!values["route-id"] ||
+            !!values.allocations ||
+            !!values["execution-mode"]
           : !!values["route-id"] === !!values.allocations)
       )
         throw new Error(
@@ -294,6 +302,7 @@ export async function main(rawArgs: string[]) {
                     "keystore",
                     "password-file",
                     "slippage-bps",
+                    "execution-mode",
                     "confirm-approval",
                     "confirm-swap",
                   ]
@@ -372,6 +381,13 @@ export async function main(rawArgs: string[]) {
     if (command === "trade") {
       if (!values.keystore || !values["password-file"])
         throw new Error("Provide --keystore and --password-file.");
+      if (
+        values["execution-mode"] !== undefined &&
+        values["execution-mode"] !== "atomic-v1"
+      )
+        throw new Error("--execution-mode must be atomic-v1 when provided.");
+      if (values["execution-mode"] === "atomic-v1" && !values["route-id"])
+        throw new Error("Atomic V1 trade requires an explicit --route-id.");
       if (!chain.executionEnabled)
         throw new Error("Engine must enable execution on the connected chain.");
       // Establish executable account/network before asking for the first trade quote.
@@ -382,6 +398,8 @@ export async function main(rawArgs: string[]) {
         chain.key,
         chain.chainId,
         abort.signal,
+        false,
+        values["execution-mode"] === "atomic-v1",
       );
       const rpcChainId = await context.rpc.chainId();
       if (

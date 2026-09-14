@@ -1,5 +1,6 @@
 import type { readExecutionConfig } from "../config";
 import type { TrustedExecution } from "../execution-policy";
+import { atomicExecutorV1 } from "./atomic-v1";
 import { balancer } from "./balancer-v2";
 import { fixedExecutor } from "./fixed-executor";
 import { pancake } from "./pancake-v3";
@@ -46,8 +47,19 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
   tokens,
   settings,
   allocations,
-) =>
-  configureExecution({
+  atomic,
+) => {
+  const atomicExecutor = settings.atomic_executor;
+  if (
+    atomic &&
+    (!atomicExecutor ||
+      Object.keys(atomicExecutor).length !== 3 ||
+      !["address", "runtime_code_hash", "uniswap_deployment"].every((field) =>
+        Object.hasOwn(atomicExecutor, field),
+      ))
+  )
+    throw new Error("Local Atomic V1 executor configuration is invalid.");
+  return configureExecution({
     tokens,
     chainId: settings.chain_id,
     deployments: settings.deployments ?? {},
@@ -60,7 +72,17 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
           },
         }
       : {}),
+    ...(atomic
+      ? {
+          atomicExecutor: {
+            address: atomicExecutor?.address,
+            runtimeCodeHash: atomicExecutor?.runtime_code_hash,
+            uniswapDeployment: atomicExecutor?.uniswap_deployment,
+          },
+        }
+      : {}),
   });
+};
 
 export function configureExecution(config: {
   tokens: string[];
@@ -70,6 +92,11 @@ export function configureExecution(config: {
     address?: string;
     uniswapDeployment?: string;
     pancakeDeployment?: string;
+  };
+  atomicExecutor?: {
+    address?: string;
+    runtimeCodeHash?: string;
+    uniswapDeployment?: string;
   };
 }): TrustedExecution {
   const deployments = Object.fromEntries(
@@ -91,6 +118,11 @@ export function configureExecution(config: {
     ...(config.executor
       ? {
           executor: fixedExecutor(config.executor, deployments),
+        }
+      : {}),
+    ...(config.atomicExecutor
+      ? {
+          atomicExecutor: atomicExecutorV1(config.atomicExecutor, deployments),
         }
       : {}),
   };

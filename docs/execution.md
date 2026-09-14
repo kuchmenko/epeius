@@ -99,6 +99,25 @@ A revert rolls back that transaction's swaps and token transfers. Gas is still p
 
 Local proofs cover independent Go/TypeScript/cast encoding vectors, exact-size quote and rounding fixtures, CLI request/recheck/refusal paths, Tenderly token-owner/allowance mutations, and authentic-router Foundry tests. [Dated Base Sepolia evidence](base-sepolia-acceptance.md) separately records four live executor scenarios with exact Tenderly simulation and canonical receipts. Live direct-route coverage and selected-route commands in [testnet checks](testnet.md) do not by themselves establish executor acceptance.
 
+## Atomic V1 first slice
+
+Atomic V1 is additive and does not replace direct routes or the configured `Executor`. It prepares one returned single-pool Uniswap V3 route as one branch containing one generic tagged operation. The engine keeps the route's original EIP-1898 quote block, builds one exact plan, verifies the configured ExecutorV2 runtime, version, and router plus the route's factory-derived pool identity at the execution block, and simulates the exact unsigned transaction. Recheck does not rebuild the plan.
+
+ExecutorV2 admits only that one-branch, one-operation shape and kind 1 in this slice. Its operation tuple is already the final `(kind, tokenOut, fee, tickSpacing, poolId)` form; inactive fields must be zero. The immutable SwapRouter02 derives the Uniswap V3 pool from its factory, the current token pair, and fee. ExecutorV2 pulls the exact input, grants an exact temporary allowance, measures spend and output from balance changes, clears the allowance, checks both branch and aggregate minima, transfers only new output, and restores its entry balances. It rejects noncanonical ABI bodies and emits ordered operation, branch, and final events.
+
+After separately verifying and deploying the exact artifact, configure it with the same Uniswap V3 deployment used by the route:
+
+```toml
+[chains.base.atomic_executor]
+address = "DEPLOYED_EXECUTOR_V2_ADDRESS"
+runtime_code_hash = "0xDEPLOYED_RUNTIME_CODE_HASH"
+uniswap_deployment = "uniswap-v3"
+```
+
+Use `--route-id ROUTE_ID --execution-mode atomic-v1`. The route must have exactly one leg and belong to the configured deployment. The terminal independently reads the configured executor runtime, checks its hash and every generic plan field, reconstructs `execute(Plan)` calldata, and recalculates `keccak256(abi.encode(2, chainId, executor, caller, plan))`. This executor event hash is intentionally distinct from the future broader quote-plan ID. Canonical receipt success additionally requires matching `OperationExecuted`, `BranchExecuted`, and `PlanExecuted` events in order, exact wallet input, minimum output, and zero net executor/router residue.
+
+The cross-language fixture is [`contracts/fixtures/atomic-v1-plan.json`](../contracts/fixtures/atomic-v1-plan.json). Its final-interface calldata and executor plan hash were built directly from ABI words and compared with Foundry `cast` and viem, separately from the Go and TypeScript production encoders. Local Solidity, Go, TypeScript, and simulation-fake tests are not deployment evidence. The checked-in TOML has no ExecutorV2 address and keeps execution disabled.
+
 ## Public testnet checks
 
 Use separate harness and terminal wallets, with small testnet-only balances. Keep encrypted keystores and password files outside Git. Local file permissions and encryption do not protect against compromise of the same OS account when the password is stored on that machine.

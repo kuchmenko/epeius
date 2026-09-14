@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline/promises";
 import { toJsonString } from "@bufbuild/protobuf";
 import {
+  ExecutionMode,
   PreparationStatus,
   type RouteQuote,
   RouteQuoteSchema,
@@ -24,6 +25,7 @@ export async function connectExecution(
   remoteChainId: string,
   signal: AbortSignal,
   allocations = false,
+  atomic = false,
 ) {
   if (!values.keystore || !values["password-file"])
     throw new Error("Provide --keystore and --password-file.");
@@ -32,6 +34,7 @@ export async function connectExecution(
     chain,
     allocations,
     configureChain,
+    atomic,
   );
   if (remoteChainId !== expectedChainId)
     throw new Error(
@@ -41,6 +44,15 @@ export async function connectExecution(
   if (!rpcUrl)
     throw new Error("Configured RPC environment variable is missing.");
   const rpc = readChain(rpcUrl, signal);
+  if (
+    atomic &&
+    (!trusted.atomicExecutor ||
+      !same(
+        await rpc.codeHash(trusted.atomicExecutor.address),
+        trusted.atomicExecutor.runtimeCodeHash,
+      ))
+  )
+    throw new Error("Local Atomic V1 executor runtime code does not match.");
   const wallet = castWallet(
     values.keystore,
     values["password-file"],
@@ -108,8 +120,11 @@ export async function executionCommand(
     (!values["quote-id"] && !values["preparation-id"]) ||
     (!!values["quote-id"] && !!values["preparation-id"]) ||
     (values["preparation-id"]
-      ? !!values["route-id"] || !!values.allocations
-      : !!values["route-id"] === !!values.allocations)
+      ? !!values["route-id"] ||
+        !!values.allocations ||
+        !!values["execution-mode"]
+      : !!values["route-id"] === !!values.allocations ||
+        (!!values["execution-mode"] && !values["route-id"]))
   )
     throw new Error(
       "Provide --keystore, --password-file, and either --preparation-id alone or --quote-id with --route-id or --allocations.",
@@ -117,6 +132,9 @@ export async function executionCommand(
   const allocations = values.allocations
     ? parseAllocations(values.allocations)
     : [];
+  const atomic = values["execution-mode"] === "atomic-v1";
+  if (values["execution-mode"] !== undefined && !atomic)
+    throw new Error("--execution-mode must be atomic-v1 when provided.");
   const slippage = values["slippage-bps"] ?? "50";
   if (!/^\d+$/.test(slippage) || Number(slippage) >= 10000)
     throw new Error("--slippage-bps must be 0 through 9999.");
@@ -139,6 +157,7 @@ export async function executionCommand(
       remoteChainId,
       signal,
       (initialPreparation?.allocations.length ?? allocations.length) > 0,
+      initialPreparation?.atomicPlan !== undefined || atomic,
     );
   if (trade && !same(signer, trade.signer))
     throw new Error(
@@ -171,6 +190,9 @@ export async function executionCommand(
                       allocations,
                       sender: signer,
                       slippageBps: Number(slippage),
+                      executionMode: atomic
+                        ? ExecutionMode.ATOMIC_V1
+                        : ExecutionMode.UNSPECIFIED,
                     },
                 { signal, timeoutMs: 25000 },
               );

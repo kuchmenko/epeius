@@ -16,6 +16,7 @@ const goNames = new Set([
   "BalancerVault",
   "ERC20",
   "Executor",
+  "ExecutorV2",
   "UniswapRouter02",
   "UniswapV3Factory",
   "UniswapQuoterV2",

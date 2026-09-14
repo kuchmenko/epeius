@@ -31,7 +31,7 @@ export type SwapTerms = {
   data: string;
   quotedOutput: string;
   routeDetails: string[][];
-  receipt: Pick<ReceiptObligations, "intermediate" | "touched">;
+  receipt: Pick<ReceiptObligations, "atomicPlan" | "intermediate" | "touched">;
   permission?: { target: string; spender: string };
 };
 
@@ -43,6 +43,10 @@ export type TrustedExecution = {
   tokens: string[];
   deployments: Record<string, ExecutionImplementation>;
   executor?: ExecutionImplementation;
+  atomicExecutor?: ExecutionImplementation & {
+    address: string;
+    runtimeCodeHash: string;
+  };
 };
 
 export type ExecutionPlan = {
@@ -160,11 +164,18 @@ export function validatePreparation(
   )
     throw new Error("Invalid swap amount or token terms.");
   const allocated = p.allocations.length > 0;
-  if (allocated === !!p.route || p.allocations.length > 2)
+  const atomic = p.atomicPlan !== undefined;
+  if (
+    (atomic && (!p.route || allocated)) ||
+    (!atomic && allocated === !!p.route) ||
+    p.allocations.length > 2
+  )
     throw new Error("Provide either a direct route or executor allocations.");
-  const implementation = p.route
-    ? trusted.deployments[p.route.deploymentId]
-    : trusted.executor;
+  const implementation = atomic
+    ? trusted.atomicExecutor
+    : p.route
+      ? trusted.deployments[p.route.deploymentId]
+      : trusted.executor;
   if (!implementation)
     throw new Error(
       "Route is not allowed by local token and deployment config.",

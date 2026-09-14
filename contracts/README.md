@@ -159,3 +159,41 @@ Tenderly fixtures implement these checks; see [execution configuration](../docs/
 The explicitly authorized [Base Sepolia acceptance](../docs/base-sepolia-acceptance.md)
 records one deployment's exact runtime correspondence and live Tenderly/execution
 proof. Other deployments and production token admission require separate review.
+
+## ExecutorV2 Atomic V1 slice
+
+`ExecutorV2` is a separate immutable contract. It does not change `Executor` or
+its ABI. This first slice accepts exactly one branch containing one Uniswap V3
+single-pool operation. Its public plan uses the final generic tagged operation
+tuple; the current policy admits only kind 1 and requires the other provider
+fields to be zero. The constructor fixes the exact SwapRouter02. Pool identity
+is derived from that router's factory, the current token pair, and the fee; it
+is not caller-supplied calldata.
+
+`execute(Plan)` uses selector `0x661983c5`. It rejects noncanonical ABI bodies
+and emits the V2 on-chain commitment
+`keccak256(abi.encode(2, chainId, executor, caller, plan))`. This executor plan
+hash is not the broader quote-plan ID, which will also commit quote and runtime
+identity. Ordered operation, branch, and final events report measured amounts.
+Branch and aggregate minimum equality and deadline equality pass. Exact input
+spend, temporary allowance cleanup, entry-dust restoration, caller credit, and
+atomic rollback use measured token balances rather than router return values.
+
+Every deployment configuration must pin the exact deployed runtime code hash in
+addition to the executor address and immutable router deployment. Both
+the engine and terminal compare the configured hash with on-chain runtime code;
+the engine also verifies the router and version getters at the execution block,
+then independently verifies the selected route's pool through the configured
+factory.
+
+Machine-readable ABI: [`abi/ExecutorV2.json`](abi/ExecutorV2.json). Independent
+commitment and calldata values: [`fixtures/atomic-v1-plan.json`](fixtures/atomic-v1-plan.json).
+No deployed address is supplied or enabled by this repository.
+
+Focused local verification:
+
+```sh
+forge test --root contracts --match-contract ExecutorV2Test
+forge fmt --check contracts/src/ExecutorV2.sol contracts/test/ExecutorV2.t.sol
+forge inspect --root contracts ExecutorV2 abi --json
+```

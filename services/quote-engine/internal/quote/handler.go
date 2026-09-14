@@ -63,6 +63,7 @@ type Chain struct {
 	DeploymentVerifiers map[string]deploymentVerifier
 	Preparers           map[string]PreparationStrategy
 	AllocationPreparer  PreparationStrategy
+	AtomicPreparer      PreparationStrategy
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)

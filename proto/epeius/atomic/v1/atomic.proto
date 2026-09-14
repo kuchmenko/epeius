@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package epeius.atomic.v1;
+
+option go_package = "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1;atomicv1";
+
+// Plan carries the exact ExecutorV2 call and the context needed to reconstruct
+// its on-chain event commitment. It is not the broader quote-plan commitment.
+message Plan {
+  string executor_plan_hash = 1;
+  string chain_id = 2;
+  string executor = 3;
+  string sender = 4;
+  string token_in = 5;
+  string token_out = 6;
+  string amount_in_atomic = 7;
+  string amount_out_minimum_atomic = 8;
+  string deadline_unix = 9;
+  repeated Branch branches = 10;
+}
+
+message Branch {
+  string amount_in_atomic = 1;
+  string amount_out_minimum_atomic = 2;
+  repeated Operation operations = 3;
+}
+
+message Operation {
+  // ExecutorV2's closed operation tag. Atomic V1 currently admits only kind 1.
+  uint32 kind = 1;
+  string token_out = 2;
+  // Static pool fee in millionths, not basis points.
+  uint32 fee_pips = 3;
+  sint32 tick_spacing = 4;
+  string pool_id = 5;
+}

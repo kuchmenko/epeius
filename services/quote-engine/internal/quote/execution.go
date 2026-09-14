@@ -36,10 +36,10 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		return connect.NewResponse(&quotev1.PrepareExecutionResponse{Status: status, Message: message}), nil
 	}
 	if r.PreparationId != "" {
-		if r.QuoteId != "" || r.RouteId != "" || r.Sender != "" || r.SlippageBps != 0 || len(r.Allocations) != 0 {
+		if r.QuoteId != "" || r.RouteId != "" || r.Sender != "" || r.SlippageBps != 0 || len(r.Allocations) != 0 || r.ExecutionMode != quotev1.ExecutionMode_EXECUTION_MODE_UNSPECIFIED {
 			return invalid()
 		}
-	} else if r.QuoteId == "" || (r.RouteId == "") == (len(r.Allocations) == 0) || len(r.Allocations) > 2 || !validAddress(r.Sender) || common.HexToAddress(r.Sender) == (common.Address{}) || r.SlippageBps >= 10000 {
+	} else if r.QuoteId == "" || (r.RouteId == "") == (len(r.Allocations) == 0) || len(r.Allocations) > 2 || !validAddress(r.Sender) || common.HexToAddress(r.Sender) == (common.Address{}) || r.SlippageBps >= 10000 || (r.ExecutionMode != quotev1.ExecutionMode_EXECUTION_MODE_UNSPECIFIED && r.ExecutionMode != quotev1.ExecutionMode_EXECUTION_MODE_ATOMIC_V1) || (r.ExecutionMode == quotev1.ExecutionMode_EXECUTION_MODE_ATOMIC_V1 && r.RouteId == "") {
 		return invalid()
 	}
 	if h.Store == nil {
@@ -85,6 +85,9 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 				return invalid()
 			}
 			strategy = chain.Preparers[route.DeploymentId]
+			if r.ExecutionMode == quotev1.ExecutionMode_EXECUTION_MODE_ATOMIC_V1 {
+				strategy = chain.AtomicPreparer
+			}
 		}
 		if strategy == nil {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "deployment unavailable")
@@ -245,6 +248,7 @@ func buildPreparation(ctx context.Context, strategy PreparationStrategy, saved s
 		return preparation{}, message
 	}
 	plan.transaction = proto.CloneOf(plan.transaction)
+	response.AtomicPlan = proto.CloneOf(plan.atomicPlan)
 	plan.permission = plan.permission.clone()
 	plan.checks = plan.checks.clone()
 	return preparation{chain: saved.request.Chain, expires: now.Add(retention), response: response, executionPlan: plan}, ""
