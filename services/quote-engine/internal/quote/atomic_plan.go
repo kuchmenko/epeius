@@ -19,6 +19,7 @@ import (
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/balancer"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/providers/uniswapv4"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -63,7 +64,53 @@ func atomicStatus(status atomicv1.PlanPreparationStatus, message string) *connec
 	return connect.NewResponse(&atomicv1.PreparePlanResponse{Status: &status, Message: proto.String(message)})
 }
 
+func (h Handler) checkAtomicRequest(message proto.Message) error {
+	actual := proto.Size(message)
+	if h.AtomicLimits.MaxRequestBytes > 0 && actual > h.AtomicLimits.MaxRequestBytes {
+		return connect.NewError(connect.CodeResourceExhausted, resourceLimitError{"Atomic request", uint64(actual), uint64(h.AtomicLimits.MaxRequestBytes)})
+	}
+	return nil
+}
+
+func (h Handler) checkAtomicResponse(message proto.Message) error {
+	if h.AtomicLimits.MaxResponseBytes <= 0 {
+		return nil
+	}
+	actual := proto.Size(message)
+	json, err := protojson.Marshal(message)
+	if err != nil {
+		return connect.NewError(connect.CodeInternal, errors.New("Atomic response could not be encoded"))
+	}
+	if len(json) > actual {
+		actual = len(json)
+	}
+	if actual > h.AtomicLimits.MaxResponseBytes {
+		return connect.NewError(connect.CodeResourceExhausted, resourceLimitError{"Atomic response", uint64(actual), uint64(h.AtomicLimits.MaxResponseBytes)})
+	}
+	return nil
+}
+
+func (h Handler) limitedAtomicPreparation(response *connect.Response[atomicv1.PreparePlanResponse], err error) (*connect.Response[atomicv1.PreparePlanResponse], error) {
+	if err != nil || response == nil {
+		return response, err
+	}
+	if err := h.checkAtomicResponse(response.Msg); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
 func (h Handler) PreparePlan(ctx context.Context, request *connect.Request[atomicv1.PreparePlanRequest]) (*connect.Response[atomicv1.PreparePlanResponse], error) {
+	if request == nil || request.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid Atomic V1 preparation request"))
+	}
+	if err := h.checkAtomicRequest(request.Msg); err != nil {
+		return nil, err
+	}
+	return h.limitedAtomicPreparation(h.preparePlan(ctx, request))
+}
+
+func (h Handler) preparePlan(ctx context.Context, request *connect.Request[atomicv1.PreparePlanRequest]) (*connect.Response[atomicv1.PreparePlanResponse], error) {
 	r := request.Msg
 	if r == nil || hasUnknown(r.ProtoReflect()) || len(r.QuoteId) != 32 || len(r.CandidateId) != 32 || r.Terms == nil || len(r.PlanId) != 32 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid Atomic V1 preparation request"))
@@ -102,6 +149,16 @@ func (h Handler) PreparePlan(ctx context.Context, request *connect.Request[atomi
 }
 
 func (h Handler) RecheckPlan(ctx context.Context, request *connect.Request[atomicv1.RecheckPlanRequest]) (*connect.Response[atomicv1.PreparePlanResponse], error) {
+	if request == nil || request.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid Atomic V1 recheck request"))
+	}
+	if err := h.checkAtomicRequest(request.Msg); err != nil {
+		return nil, err
+	}
+	return h.limitedAtomicPreparation(h.recheckPlan(ctx, request))
+}
+
+func (h Handler) recheckPlan(ctx context.Context, request *connect.Request[atomicv1.RecheckPlanRequest]) (*connect.Response[atomicv1.PreparePlanResponse], error) {
 	r := request.Msg
 	if r == nil || hasUnknown(r.ProtoReflect()) || len(r.PreparationId) != 32 || len(r.PlanId) != 32 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid Atomic V1 recheck request"))
@@ -306,7 +363,7 @@ func (h Handler) finishAtomicPreparation(ctx context.Context, chain Chain, chain
 		return atomicStatus(atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_REJECTED, "allowance check failed"), nil
 	}
 	if allowanceValues[0].(*big.Int).Cmp(value.amount) < 0 {
-		if frozen != nil || !h.Store.markAtomicApproval(quoteID, time.Now()) {
+		if frozen != nil {
 			return atomicStatus(atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_REQUOTE_REQUIRED, "approval state changed; request a fresh quote"), nil
 		}
 		data, _ := erc20ABI.Pack("approve", common.BytesToAddress(value.terms.Executor.Address), value.amount)
@@ -315,10 +372,17 @@ func (h Handler) finishAtomicPreparation(ctx context.Context, chain Chain, chain
 			Token: append([]byte(nil), value.program.TokenIn...), Spender: append([]byte(nil), value.terms.Executor.Address...), Amount: uint256Bytes(value.amount),
 			Transaction: planTransaction(&quotev1.UnsignedTransaction{ChainId: chain.ChainID, From: common.BytesToAddress(value.terms.Signer).Hex(), To: common.BytesToAddress(value.program.TokenIn).Hex(), Data: hexutil.Encode(data), ValueAtomic: "0", GasLimit: "100000"}),
 		}
+		response := &atomicv1.PreparePlanResponse{Status: &status, Approval: approval, Message: proto.String("Approve the exact input amount, then request a fresh quote.")}
+		if err := h.checkAtomicResponse(response); err != nil {
+			return nil, err
+		}
+		if !h.Store.markAtomicApproval(quoteID, time.Now()) {
+			return atomicStatus(atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_REQUOTE_REQUIRED, "approval state changed; request a fresh quote"), nil
+		}
 		if err := reader.Canonical(ctx, snapshot); err != nil || new(big.Int).SetInt64(time.Now().Unix()).Cmp(value.expires) >= 0 {
 			return atomicStatus(atomicv1.PlanPreparationStatus_PLAN_PREPARATION_STATUS_REQUOTE_REQUIRED, "approval block could not be confirmed; request a fresh quote"), nil
 		}
-		return connect.NewResponse(&atomicv1.PreparePlanResponse{Status: &status, Approval: approval, Message: proto.String("Approve the exact input amount, then request a fresh quote.")}), nil
+		return connect.NewResponse(response), nil
 	}
 	preparationID := make([]byte, 32)
 	if frozen == nil {
@@ -361,10 +425,15 @@ func (h Handler) finishAtomicPreparation(ctx context.Context, chain Chain, chain
 			Status: &passed, BranchResults: []*atomicv1.BranchQuote{{OperationOutputs: outputs}}, ObservedAtUnix: uint256Bytes(new(big.Int).SetInt64(time.Now().Unix())),
 		},
 	}
+	if err := h.checkAtomicResponse(response); err != nil {
+		return nil, err
+	}
 	if frozen != nil && len(quoteID) == 0 {
 		return connect.NewResponse(response), nil
 	}
-	h.Store.saveAtomicPreparation(atomicPreparation{response: response, chain: chainKey, expires: time.Unix(value.expires.Int64(), 0), executorPlanHash: value.executorPlanHash.Bytes(), checks: value.checks}, now)
+	if err := h.Store.saveAtomicPreparation(atomicPreparation{response: response, chain: chainKey, expires: time.Unix(value.expires.Int64(), 0), executorPlanHash: value.executorPlanHash.Bytes(), checks: value.checks}, now); err != nil {
+		return nil, connect.NewError(connect.CodeResourceExhausted, err)
+	}
 	return connect.NewResponse(response), nil
 }
 

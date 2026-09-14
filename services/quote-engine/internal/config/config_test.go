@@ -30,6 +30,16 @@ chain_id = 84532
 rpc_url_env = "TEST_RPC_URL"
 `
 
+const atomicResourceConfig = `
+[engine.atomic]
+max_request_bytes = 16384
+max_response_bytes = 65536
+max_retained_quotes = 64
+max_retained_quote_bytes = 1048576
+max_retained_preparations = 64
+max_retained_preparation_bytes = 1048576
+`
+
 func loadText(t *testing.T, text string) (Config, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "epeius.toml")
@@ -85,7 +95,7 @@ pancake_deployment = "pan"
 }
 
 func TestAtomicExecutorNamesOneOrBothV3Deployments(t *testing.T) {
-	text := validConfig + `
+	text := validConfig + atomicResourceConfig + `
 [chains.test-net.deployments.uni]
 kind = "uniswap-v3"
 factory = "0x1111111111111111111111111111111111111111"
@@ -152,6 +162,17 @@ slipstream_deployment = "slip"
 	if _, err := loadText(t, strings.Replace(text, "uniswap_deployment = \"uni\"", "uniswap_deployment = \"uni\"\nunknown = true", 1)); err == nil {
 		t.Fatal("unknown Atomic V1 config field accepted")
 	}
+	if _, err := loadText(t, strings.Replace(text, atomicResourceConfig, "", 1)); err == nil {
+		t.Fatal("Atomic executor without resource limits accepted")
+	}
+	for _, field := range []string{"max_request_bytes", "max_response_bytes", "max_retained_quotes", "max_retained_quote_bytes", "max_retained_preparations", "max_retained_preparation_bytes"} {
+		if _, err := loadText(t, strings.Replace(text, field+" = ", field+" = 0 # ", 1)); err == nil {
+			t.Fatalf("zero %s accepted", field)
+		}
+	}
+	if _, err := loadText(t, strings.Replace(text, "max_request_bytes = 16384", "max_request_bytes = 16384\nunknown_limit = 1", 1)); err == nil {
+		t.Fatal("unknown Atomic resource limit accepted")
+	}
 	for _, changed := range []string{
 		strings.Replace(text, "max_branches = 4", "max_branches = 0", 1),
 		strings.Replace(text, "max_operations_per_branch = 12", "max_operations_per_branch = 13", 1),
@@ -161,6 +182,12 @@ slipstream_deployment = "slip"
 		if _, err := loadText(t, changed); err == nil {
 			t.Fatal("invalid Atomic V1 limits accepted")
 		}
+	}
+}
+
+func TestAtomicResourceLimitsRejectedWithoutAtomicExecutor(t *testing.T) {
+	if _, err := loadText(t, validConfig+atomicResourceConfig); err == nil {
+		t.Fatal("inapplicable Atomic resource limits accepted")
 	}
 }
 
@@ -324,7 +351,7 @@ pools = ["` + pool + `"]
 func TestAtomicExecutorAcceptsCanonicalBalancerPoolsAndRejectsInvalidSelection(t *testing.T) {
 	const first = "0x1111111111111111111111111111111111111111000000000000000000000001"
 	const second = "0x2222222222222222222222222222222222222222000000000000000000000002"
-	text := validConfig + `
+	text := validConfig + atomicResourceConfig + `
 [chains.test-net.deployments.balancer]
 kind = "balancer-v2"
 [chains.test-net.deployments.balancer.options]

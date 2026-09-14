@@ -113,6 +113,9 @@ After separately verifying and deploying the exact artifact, configure it with a
 [chains.base.atomic_executor]
 address = "DEPLOYED_EXECUTOR_V2_ADDRESS"
 runtime_code_hash = "0xDEPLOYED_RUNTIME_CODE_HASH"
+max_branches = 4 # deployment value; example only
+max_operations_per_branch = 12 # deployment value; example only
+max_total_operations = 12 # deployment value; example only
 uniswap_deployment = "uniswap-v3"
 # pancake_deployment = "pancake-v3"
 # slipstream_deployment = "aerodrome-slipstream"

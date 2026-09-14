@@ -272,6 +272,12 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 	invalid := func(message string) (*connect.Response[atomicv1.PlanQuoteResponse], error) {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(message))
 	}
+	if req == nil || req.Msg == nil {
+		return invalid("invalid Atomic V1 quote request")
+	}
+	if err := h.checkAtomicRequest(req.Msg); err != nil {
+		return nil, err
+	}
 	if h.QuoteConcurrency < 1 {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("quote concurrency is not configured"))
 	}
@@ -517,8 +523,13 @@ func (h Handler) GetPlanQuote(ctx context.Context, req *connect.Request[atomicv1
 			response.Candidates = append(response.Candidates, item.value)
 		}
 	}
+	if err := h.checkAtomicResponse(response); err != nil {
+		return nil, err
+	}
 	if h.Store != nil {
-		h.Store.saveAtomicQuote(chainKey, response, time.Now())
+		if err := h.Store.saveAtomicQuote(chainKey, response, time.Now()); err != nil {
+			return nil, connect.NewError(connect.CodeResourceExhausted, err)
+		}
 	}
 	return connect.NewResponse(response), nil
 }

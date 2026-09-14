@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1/atomicv1connect"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/generated/go/epeius/quote/v1/quotev1connect"
@@ -174,11 +175,23 @@ func serve(ctx context.Context, settings config.Config, getenv func(string) stri
 		}
 	}
 	mux := http.NewServeMux()
-	service := quote.Handler{Chains: chains, Store: quote.NewStore(), Simulator: simulator, QuoteConcurrency: settings.Engine.QuoteConcurrency}
+	var atomicLimits quote.AtomicLimits
+	if limits := settings.Engine.Atomic; limits != nil {
+		atomicLimits = quote.AtomicLimits{
+			MaxRequestBytes: int(limits.MaxRequestBytes), MaxResponseBytes: int(limits.MaxResponseBytes),
+			Store: quote.AtomicStoreLimits{
+				MaxQuotes: limits.MaxRetainedQuotes, MaxQuoteBytes: limits.MaxRetainedQuoteBytes,
+				MaxPreparations: limits.MaxRetainedPreparations, MaxPreparationBytes: limits.MaxRetainedPreparationBytes,
+			},
+		}
+	}
+	service := quote.Handler{Chains: chains, Store: quote.NewStore(atomicLimits.Store), Simulator: simulator, QuoteConcurrency: settings.Engine.QuoteConcurrency, AtomicLimits: atomicLimits}
 	path, handler := quotev1connect.NewQuoteServiceHandler(service)
 	mux.Handle(path, handler)
-	path, handler = atomicv1connect.NewAtomicPlanServiceHandler(service)
-	mux.Handle(path, handler)
+	if settings.Engine.Atomic != nil {
+		path, handler = atomicv1connect.NewAtomicPlanServiceHandler(service, connect.WithReadMaxBytes(atomicLimits.MaxRequestBytes), connect.WithSendMaxBytes(atomicLimits.MaxResponseBytes))
+		mux.Handle(path, handler)
+	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()

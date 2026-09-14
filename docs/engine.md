@@ -82,11 +82,25 @@ Configured token and deployment addresses are normalized to prefixed EVM address
 
 RPCs must support EIP-1898 block-hash calls. There is no fallback to latest state. For Slipstream, each first-hop output becomes the next hop's exact input, and quotes reaching the relevant end-price extreme are rejected because full input may not have been consumed. `bestRouteId` recommends the greatest gross atomic output among returned routes, with stable candidate-order ties; it is neither gas-adjusted nor globally optimal on partial searches. Explicit executor preparation re-quotes one or two caller-chosen Uniswap/Pancake allocations at exact inputs and the original block; see [executor configuration](execution.md#configured-executor). Slipstream uses direct-router preparation only, with no allocation re-quote or executor capability. Gas pricing, allocation optimization, databases, and indexing remain outside the current engine.
 
-The separate Atomic V1 plan service reuses only the canonical direct and configured-base-token two-hop iterator for each enabled Uniswap V3, Pancake V3, or Aerodrome Slipstream deployment named by `atomic_executor`. It records every sequential hop output and emits one full-input homogeneous branch per candidate in stable configured-deployment and path order, including partial results. Candidate IDs use the final typed provider, operation, program, and quote commitments; Slipstream hashes its signed `int24` tick spacing. Detached candidates are stored under their random quote ID for exact `PreparePlan` selection. The service does not select a winner, estimate network cost, discover splits, emit mixed-provider paths, or alter the legacy quote service.
+The separate Atomic V1 plan service reuses only its current canonical candidate iterators. It records every sequential hop output and emits candidates in stable configured-deployment and path order, including partial results. Candidate IDs use the final typed provider, operation, program, and quote commitments. Detached candidates are stored under their random quote ID for exact `PreparePlan` selection. The service does not select a winner, estimate network cost, broaden route search, or alter the legacy quote service.
+
+When any chain configures `atomic_executor`, `[engine.atomic]` is required. All six values are explicit positive deployment settings; there are no defaults. `max_request_bytes` limits each decompressed Connect request before decoding reaches the service. `max_response_bytes` is checked against both binary protobuf and protobuf JSON encodings before Atomic storage and return; Connect also enforces the selected transport encoding. Quotes and preparations each have independent count and measured retained-byte limits. Retained bytes are reproducible logical bytes: canonical binary protobuf plus non-protobuf UTF-8 strings, byte slices, booleans, and expiry encoded as an int64 Unix timestamp. Allocator-specific object overhead is measured separately rather than hidden in this limit. Expired entries are pruned first; admission then evicts earliest expiry, breaking ties by binary ID. An entry larger than its own byte limit is rejected without evicting existing entries.
+
+These values are an example, not product defaults or deployment guidance:
+
+```toml
+[engine.atomic]
+max_request_bytes = 16384
+max_response_bytes = 65536
+max_retained_quotes = 64
+max_retained_quote_bytes = 1048576
+max_retained_preparations = 64
+max_retained_preparation_bytes = 1048576
+```
 
 ## Preparation internals
 
-The in-memory store owns quote/preparation lookup, cloning, expiry, eviction, and approval bookkeeping. Its mutex does not cover network calls. Both stores retain their 30-second lifetime and 1024-entry limits; a process restart invalidates stored IDs. Recheck reads immutable prepared terms rather than rebuilding route, deadline, minimum, allocations, or calldata.
+The in-memory store owns quote/preparation lookup, cloning, expiry, eviction, and approval bookkeeping. Its mutex does not cover network calls. Legacy records retain their 30-second lifetime and existing count limit. Atomic quote and preparation count/byte limits come only from `[engine.atomic]`; a process restart invalidates stored IDs. Recheck reads immutable prepared terms rather than rebuilding route, deadline, minimum, allocations, or calldata.
 
 Search and allocation re-quotes share a path quote operation that feeds each hop's fresh output into the next hop. Search skips a missing pool path; executor preparation rejects it and compares every pool identity with the stored route. The path operation does not select routes, calculate slippage, or manage approval.
 

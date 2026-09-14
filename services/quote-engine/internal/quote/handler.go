@@ -51,6 +51,7 @@ type Handler struct {
 	Store            *Store
 	Simulator        Simulator
 	QuoteConcurrency int
+	AtomicLimits     AtomicLimits
 }
 
 type Chain struct {
