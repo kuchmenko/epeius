@@ -1,0 +1,327 @@
+syntax = "proto3";
+
+package epeius.atomic.v1;
+
+option go_package = "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1;atomicv1";
+
+service AtomicPlanService {
+  rpc GetPlanQuote(PlanQuoteRequest) returns (PlanQuoteResponse);
+  rpc PreparePlan(PreparePlanRequest) returns (PreparePlanResponse);
+  rpc RecheckPlan(RecheckPlanRequest) returns (PreparePlanResponse);
+  rpc EvaluatePlanFees(EvaluatePlanFeesRequest) returns (EvaluatePlanFeesResponse);
+}
+
+message PlanQuoteRequest {
+  optional uint32 format_version = 1;
+  optional bytes chain_id = 2;
+  optional bytes token_in = 3;
+  optional bytes token_out = 4;
+  optional bytes amount_in = 5;
+  optional uint32 search_budget_ms = 6;
+}
+
+// Plan carries the accepted terms and transaction identities alongside the
+// exact ExecutorV2 call and its narrower on-chain event commitment.
+message Plan {
+  string executor_plan_hash = 1;
+  string chain_id = 2;
+  string executor = 3;
+  string sender = 4;
+  string token_in = 5;
+  string token_out = 6;
+  string amount_in_atomic = 7;
+  string amount_out_minimum_atomic = 8;
+  string deadline_unix = 9;
+  repeated Branch branches = 10;
+  // Consent and unsigned-transaction identities. Both are raw 32-byte hashes.
+  optional bytes plan_id = 11;
+  optional bytes transaction_fingerprint = 12;
+  AcceptedPlanTerms accepted_terms = 13;
+}
+
+message Branch {
+  string amount_in_atomic = 1;
+  string amount_out_minimum_atomic = 2;
+  repeated Operation operations = 3;
+}
+
+message Operation {
+  // ExecutorV2's closed operation tag. Atomic V1 currently admits kinds 1 through 5.
+  uint32 kind = 1;
+  string token_out = 2;
+  // Static pool fee in millionths, not basis points.
+  uint32 fee_pips = 3;
+  sint32 tick_spacing = 4;
+  string pool_id = 5;
+}
+
+// The accepted economic program uses the final Wave 5 typed provider identity.
+// Unknown future cases must be rejected rather than treated as a current operation.
+message PlanProgram {
+  optional uint32 format_version = 1;
+  optional bytes chain_id = 2;
+  optional bytes token_in = 3;
+  optional bytes token_out = 4;
+  optional bytes amount_in = 5;
+  repeated PlanBranch branches = 6;
+}
+
+message BranchQuote {
+  repeated bytes operation_outputs = 1;
+}
+
+message PlanCandidate {
+  optional bytes candidate_id = 1;
+  PlanProgram program = 2;
+  PinnedBlock quote_block = 3;
+  repeated BranchQuote branch_quotes = 4;
+  optional bytes network_cost_out = 5;
+}
+
+message PlanQuoteResponse {
+  optional bytes quote_id = 1;
+  repeated PlanCandidate candidates = 2;
+  optional bool search_complete = 3;
+}
+
+message PlanBranch {
+  optional bytes amount_in = 1;
+  repeated PoolOperation operations = 2;
+}
+
+message PoolOperation {
+  optional bytes token_in = 1;
+  optional bytes token_out = 2;
+  reserved 3 to 9;
+  reserved "calldata", "target", "amount_in", "input_index", "dependencies";
+  oneof pool {
+    V3Pool uniswap_v3 = 10;
+    V3Pool pancake_v3 = 11;
+    SlipstreamPool slipstream_initial = 12;
+    BalancerPool balancer_v2 = 13;
+    V4Pool uniswap_v4 = 14;
+  }
+}
+
+message V3Pool {
+  optional bytes factory = 1;
+  optional bytes router = 2;
+  optional bytes pool = 3;
+  optional uint32 fee_pips = 4;
+}
+
+message SlipstreamPool {
+  optional bytes factory = 1;
+  optional bytes router = 2;
+  optional bytes pool = 3;
+  optional sint32 tick_spacing = 4;
+}
+
+message BalancerPool {
+  optional bytes vault = 1;
+  optional bytes pool_id = 2;
+  reserved 3 to 6;
+  reserved "user_data", "from_internal_balance", "to_internal_balance", "kind";
+}
+
+message V4Pool {
+  optional bytes pool_manager = 1;
+  V4PoolKey key = 2;
+  reserved 3 to 6;
+  reserved "hook_data", "commands", "inputs", "amount_specified";
+}
+
+message V4PoolKey {
+  optional bytes currency0 = 1;
+  optional bytes currency1 = 2;
+  optional uint32 fee_pips = 3;
+  optional sint32 tick_spacing = 4;
+  optional bytes hooks = 5;
+}
+
+message PinnedBlock {
+  optional bytes number = 1;
+  optional bytes hash = 2;
+}
+
+message ExecutorIdentity {
+  optional bytes address = 1;
+  optional uint32 version = 2;
+  optional bytes runtime_code_hash = 3;
+}
+
+message AcceptedPlanTerms {
+  PlanProgram program = 1;
+  ExecutorIdentity executor = 2;
+  optional bytes signer = 3;
+  optional bytes recipient = 4;
+  repeated bytes branch_minima = 5;
+  optional bytes amount_out_minimum = 6;
+  PinnedBlock quote_block = 7;
+  optional bytes expires_at_unix = 8;
+  optional bytes deadline_unix = 9;
+  reserved 10 to 15;
+  reserved "slippage_bps", "simulation_block", "transaction_hash", "signature";
+}
+
+message PreparePlanRequest {
+  optional bytes quote_id = 1;
+  optional bytes candidate_id = 2;
+  AcceptedPlanTerms terms = 3;
+  optional bytes plan_id = 4;
+}
+
+message RecheckPlanRequest {
+  optional bytes preparation_id = 1;
+  optional bytes plan_id = 2;
+}
+
+message PlanTransaction {
+  optional bytes chain_id = 1;
+  optional bytes from = 2;
+  optional bytes to = 3;
+  optional bytes data = 4;
+  optional bytes value = 5;
+  optional bytes gas_limit = 6;
+}
+
+message UnsignedPreparation {
+  optional bytes preparation_id = 1;
+  optional bytes plan_id = 2;
+  AcceptedPlanTerms terms = 3;
+  PlanTransaction transaction = 4;
+}
+
+enum SimulationStatus {
+  SIMULATION_STATUS_UNSPECIFIED = 0;
+  SIMULATION_STATUS_PASSED = 1;
+  SIMULATION_STATUS_REVERTED = 2;
+  SIMULATION_STATUS_UNAVAILABLE = 3;
+}
+
+message SimulationEvidence {
+  optional bytes plan_id = 1;
+  optional bytes preparation_id = 2;
+  optional bytes transaction_fingerprint = 3;
+  PinnedBlock block = 4;
+  optional SimulationStatus status = 5;
+  repeated BranchQuote branch_results = 6;
+  optional bytes observed_at_unix = 7;
+  optional string message = 8;
+}
+
+enum PlanPreparationStatus {
+  PLAN_PREPARATION_STATUS_UNSPECIFIED = 0;
+  PLAN_PREPARATION_STATUS_READY = 1;
+  PLAN_PREPARATION_STATUS_APPROVAL_REQUIRED = 2;
+  PLAN_PREPARATION_STATUS_REQUOTE_REQUIRED = 3;
+  PLAN_PREPARATION_STATUS_REJECTED = 4;
+}
+
+message Erc20Approval {
+  optional bytes token = 1;
+  optional bytes spender = 2;
+  optional bytes amount = 3;
+  PlanTransaction transaction = 4;
+}
+
+message PreparePlanResponse {
+  optional PlanPreparationStatus status = 1;
+  UnsignedPreparation preparation = 2;
+  SimulationEvidence simulation = 3;
+  Erc20Approval approval = 4;
+  optional string message = 5;
+}
+
+message EvaluatePlanFeesRequest {
+  optional uint32 format_version = 1;
+  optional bytes quote_id = 2;
+  FeeExecutionSnapshotProposal fee_snapshot = 3;
+  AccountSnapshotProposal account_snapshot = 4;
+  PendingAccountProposal pending_account = 5;
+  repeated FeeCandidateProposal candidates = 6;
+  optional bytes policy_config_sha256 = 7;
+}
+
+message FeeExecutionSnapshotProposal {
+  optional bytes chain_id = 1;
+  optional bytes signer = 2;
+  PinnedBlock quote_block = 3;
+  optional bytes quote_block_timestamp = 4;
+  optional bytes observed_at_unix = 5;
+  optional bytes historical_nonce_at_block = 6;
+  optional bytes historical_native_balance_at_block = 7;
+  repeated SetupStateEntry setup_state_at_block = 8;
+  optional bytes setup_state_at_block_sha256 = 9;
+  optional bytes forecast_target_block_number = 10;
+}
+
+message AccountSnapshotProposal {
+  optional bytes chain_id = 1;
+  optional bytes signer = 2;
+  PinnedBlock account_block = 3;
+  optional bytes account_block_timestamp = 4;
+  optional bytes observed_at_unix = 5;
+  optional bytes native_balance_at_block = 6;
+  repeated SetupStateEntry setup_state_at_block = 7;
+  optional bytes setup_state_at_block_sha256 = 8;
+}
+
+message PendingAccountProposal {
+  optional bytes chain_id = 1;
+  optional bytes signer = 2;
+  optional bytes pending_nonce = 3;
+  optional bytes observed_at_unix = 4;
+  optional string method_profile = 5;
+  optional bytes terminal_pending_reservations = 6;
+  optional string block_context = 7;
+}
+
+message SetupStateEntry {
+  optional uint32 kind = 1;
+  optional bytes token = 2;
+  optional bytes owner = 3;
+  optional bytes spender = 4;
+  optional bytes value = 5;
+}
+
+message FeeCandidateProposal {
+  optional bytes candidate_id = 1;
+  optional bytes plan_id = 2;
+  optional bytes preparation_id = 3;
+  optional bytes executor_plan_hash = 4;
+  optional bytes transaction_fingerprint = 5;
+  UnsignedType2EnvelopeProposal envelope = 6;
+}
+
+message UnsignedType2EnvelopeProposal {
+  optional uint32 transaction_type = 1;
+  optional bytes chain_id = 2;
+  optional bytes nonce = 3;
+  optional bytes sender = 4;
+  optional bytes target = 5;
+  optional bytes value = 6;
+  optional bytes calldata = 7;
+  optional bytes gas_limit = 8;
+  optional bytes max_priority_fee_per_gas = 9;
+  optional bytes max_fee_per_gas = 10;
+  optional bytes access_list_rlp = 11;
+  optional bytes serialized = 12;
+}
+
+enum FeeEvidenceStatus {
+  FEE_EVIDENCE_STATUS_UNSPECIFIED = 0;
+  FEE_EVIDENCE_STATUS_COMPLETE = 1;
+  FEE_EVIDENCE_STATUS_PARTIAL = 2;
+  FEE_EVIDENCE_STATUS_UNKNOWN = 3;
+  FEE_EVIDENCE_STATUS_STALE = 4;
+  FEE_EVIDENCE_STATUS_REJECTED = 5;
+}
+
+message EvaluatePlanFeesResponse {
+  optional uint32 format_version = 1;
+  optional FeeEvidenceStatus status = 2;
+  optional bytes fee_evidence_id = 3;
+  optional bytes canonical_evidence_json = 4;
+  optional string message = 5;
+}

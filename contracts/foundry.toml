@@ -6,6 +6,7 @@ solc_version = "0.8.24"
 evm_version = "paris"
 optimizer = true
 optimizer_runs = 200
+via_ir = true
 allow_paths = ["../scripts/testnet/node_modules"]
 fs_permissions = [{ access = "read", path = "../.testnet" }, { access = "read", path = "../scripts/testnet/node_modules" }]
 remappings = ["@openzeppelin/contracts/=../scripts/testnet/node_modules/@openzeppelin/contracts/"]

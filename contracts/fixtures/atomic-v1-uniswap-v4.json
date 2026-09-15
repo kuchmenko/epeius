@@ -1,0 +1,40 @@
+{
+  "formatVersion": 1,
+  "chainId": "8453",
+  "tokenIn": "0x1111111111111111111111111111111111111111",
+  "tokenOut": "0x9999999999999999999999999999999999999999",
+  "amountIn": "1234567",
+  "executor": "0x2222222222222222222222222222222222222222",
+  "signer": "0x3333333333333333333333333333333333333333",
+  "poolManager": "0x6666666666666666666666666666666666666666",
+  "currency0": "0x1111111111111111111111111111111111111111",
+  "currency1": "0x9999999999999999999999999999999999999999",
+  "hooks": "0x0000000000000000000000000000000000000000",
+  "feePips": 1000000,
+  "tickSpacing": 32767,
+  "poolId": "0x9f4a0d8a2b781dcb932a2044b79fbd8c6bb1f4fd0e905f71a648d879b0cf6b84",
+  "operationOutputs": ["1111111"],
+  "minimum": "1000000",
+  "quoteBlockNumber": "19876543",
+  "quoteBlockHash": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "runtimeCodeHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expiresAtUnix": "2000000000",
+  "deadlineUnix": "2000000100",
+  "gasLimit": "1000000",
+  "providerHashes": [
+    "0xc57657ca7195ff4e9db177d33dabe251e81a7e9c2f686039d31e4c81940f9235"
+  ],
+  "operationHashes": [
+    "0x27e232e79c2f278e1e3e55c0a5de055e39ee8e5b893eb5bed713b462df480e7b"
+  ],
+  "programBranchHash": "0x7d30e7b43fb726093dd30a4cbeb168ceba9e39b7c1bfd9f927f1bf71624b0373",
+  "programHash": "0xe02957212191df67f8d72e0e55b2d48e56e2dbc68a9b2ac4e82fb949f9b5b7c5",
+  "candidateBranchHash": "0x8e4c6e46d31a41ce10487849f6ca64f4930314cd422e43c9e785e0b906a8edb3",
+  "candidateId": "0xc0e8f25f763eed9e422ddf5403bcc0293149ec55dd75d01995e51a9b78c57979",
+  "acceptedBranchHash": "0x6a284b4e2286505e5fefd2fb62179dbfbde7e373f2e69068edb42e7e306f91b6",
+  "planId": "0xed8709fcf18eca01de420a50568e64ca084640e74c65458e28aa23a15a1278f8",
+  "executorPlanHash": "0x2dd9e8420f9bc11740a847cc8dbf41fb2acaad6c52afc3815ef1fcb5316215fa",
+  "executorCalldataHash": "0xa0368dcf4abd1e4e5cbdec98ecd730cd4140423f31d9d47679cc967639d0301e",
+  "transactionFingerprint": "0x44e1ecddb4adb945abf48ba15087a004471ffcbbb4ad4c11454c62bffd427021",
+  "universalRouterCalldataHash": "0x3e0bfdac8d8fa6cf6d17cfe5c73cdb96effac84d7d7f8d6ec963ddfccd6fa929"
+}

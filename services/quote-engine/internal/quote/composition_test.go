@@ -59,7 +59,7 @@ func (s *alternatePreparer) Select(_ context.Context, _ storedQuote, _ *quotev1.
 	}
 	return executionSelection{route: r, output: big.NewInt(203)}, ""
 }
-func (s *alternatePreparer) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
+func (s *alternatePreparer) Build(p *quotev1.PrepareExecutionResponse, _ uint32) (executionPlan, string) {
 	s.builds++
 	if p.AmountInAtomic != "37" || p.AmountOutMinimumAtomic != "201" || p.DeadlineUnix != "1120" {
 		s.t.Fatal("economic terms changed", p)

@@ -12,7 +12,7 @@ import type {
 } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type SwapTerms, uint256Decimal } from "../execution-policy";
 
-type Pool = {
+export type UniswapV4Pool = {
   currency0: string;
   currency1: string;
   feePips: number;
@@ -20,11 +20,12 @@ type Pool = {
   hooks: string;
 };
 
-type Deployment = {
+export type UniswapV4Deployment = {
   kind: "uniswap-v4";
   router: string;
   permit2: string;
-  pools: Pool[];
+  poolManager: string;
+  pools: UniswapV4Pool[];
 };
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -73,7 +74,7 @@ const poolTuple = {
   ],
 } as const;
 
-function key(pool: Pool) {
+function key(pool: UniswapV4Pool) {
   return {
     currency0: pool.currency0 as Address,
     currency1: pool.currency1 as Address,
@@ -86,7 +87,7 @@ function key(pool: Pool) {
 function admit(
   route: RouteQuote,
   p: PrepareExecutionResponse,
-  deployment: Deployment,
+  deployment: UniswapV4Deployment,
 ) {
   const leg = route.legs[0];
   const routeKey = leg?.uniswapV4PoolKey;
@@ -120,7 +121,10 @@ function admit(
   return pool;
 }
 
-export function uniswapV4Data(p: PrepareExecutionResponse, pool: Pool) {
+export function uniswapV4Data(
+  p: PrepareExecutionResponse,
+  pool: UniswapV4Pool,
+) {
   const amount = uint256Decimal(p.amountInAtomic, "Input amount");
   const minimum = uint256Decimal(
     p.amountOutMinimumAtomic,
@@ -230,12 +234,13 @@ export function uniswapV4(
   )
     throw new Error("Local execution deployment is invalid.");
   address(raw.quoter);
-  address(options.pool_manager);
+  const poolManager = address(options.pool_manager);
   address(options.state_view);
-  const deployment: Deployment = {
+  const deployment: UniswapV4Deployment = {
     kind: "uniswap-v4",
     router: address(raw.router),
     permit2,
+    poolManager,
     pools: (options.pools ?? []).map((pool) => {
       if (
         Object.keys(pool).length !== 5 ||

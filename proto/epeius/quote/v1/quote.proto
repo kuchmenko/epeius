@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package epeius.quote.v1;
 
+import "epeius/atomic/v1/atomic.proto";
+
 option go_package = "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1;quotev1";
 
 // QuoteService builds and simulates transactions, but never signs or sends them.
@@ -122,6 +124,15 @@ message PrepareExecutionRequest {
   // Executor plan, mutually exclusive with route_id. Inputs must sum to the
   // original quote input. Each selected path is quoted at its exact input.
   repeated RouteAllocation allocations = 6;
+  // Additive execution path. Atomic V1 accepts one returned Uniswap V3 route
+  // with one or two legs, or two returned direct Uniswap V3 allocations.
+  // Unspecified preserves existing direct/executor behavior.
+  ExecutionMode execution_mode = 7;
+}
+
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED = 0;
+  EXECUTION_MODE_ATOMIC_V1 = 1;
 }
 
 message RouteAllocation {
@@ -187,4 +198,7 @@ message PrepareExecutionResponse {
   // Separate typed permission transaction. Its success never makes this
   // preparation executable and never replaces the legacy ERC-20 approval.
   OnChainPermission on_chain_permission = 18;
+  // Present only for an Atomic V1 preparation. Route or allocations contain the
+  // pinned quotes that produced the exact ordered plan.
+  epeius.atomic.v1.Plan atomic_plan = 19;
 }

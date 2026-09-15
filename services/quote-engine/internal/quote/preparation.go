@@ -5,6 +5,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	atomicv1 "github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 )
 
@@ -12,7 +13,7 @@ import (
 // Build owns transaction fields and the checks needed to prove its execution.
 type PreparationStrategy interface {
 	Select(context.Context, storedQuote, *quotev1.PrepareExecutionRequest, *quotev1.RouteQuote) (executionSelection, string)
-	Build(*quotev1.PrepareExecutionResponse) (executionPlan, string)
+	Build(*quotev1.PrepareExecutionResponse, uint32) (executionPlan, string)
 }
 
 type executionSelection struct {
@@ -23,6 +24,7 @@ type executionSelection struct {
 
 type executionPlan struct {
 	transaction *quotev1.UnsignedTransaction
+	atomicPlan  *atomicv1.Plan
 	spender     string
 	permission  *permissionPlan
 	checks      SimulationChecks
@@ -53,6 +55,22 @@ type SimulationChecks struct {
 	Input, Output   BalanceProbe
 	Preserve        []BalanceProbe
 	ClearAllowances []AllowanceProbe
+}
+
+type SimulationLog struct {
+	Address common.Address
+	Topics  []common.Hash
+	Data    []byte
+}
+
+type AtomicSimulationResult struct {
+	OperationOutputs []*big.Int
+	BranchOutput     *big.Int
+}
+
+type SimulationResult struct {
+	Output string
+	Logs   []SimulationLog
 }
 
 func (s SimulationChecks) clone() SimulationChecks {

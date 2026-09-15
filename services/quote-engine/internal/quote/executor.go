@@ -42,7 +42,7 @@ func (s fixedExecutorPreparation) Select(ctx context.Context, saved storedQuote,
 	return executionSelection{allocations: allocations, output: output}, ""
 }
 
-func (s fixedExecutorPreparation) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
+func (s fixedExecutorPreparation) Build(p *quotev1.PrepareExecutionResponse, _ uint32) (executionPlan, string) {
 	if p.AmountOutMinimumAtomic == "0" {
 		return executionPlan{}, "invalid aggregate output"
 	}

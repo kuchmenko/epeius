@@ -22,6 +22,10 @@ type Simulator interface {
 	Simulate(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (string, error)
 }
 
+type atomicSimulator interface {
+	SimulateAtomic(context.Context, *quotev1.UnsignedTransaction, SimulationChecks, rpc.Snapshot, *big.Int, *big.Int) (SimulationResult, error)
+}
+
 type executionReader interface {
 	Reader
 	Canonical(context.Context, rpc.Snapshot) error
@@ -36,10 +40,10 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 		return connect.NewResponse(&quotev1.PrepareExecutionResponse{Status: status, Message: message}), nil
 	}
 	if r.PreparationId != "" {
-		if r.QuoteId != "" || r.RouteId != "" || r.Sender != "" || r.SlippageBps != 0 || len(r.Allocations) != 0 {
+		if r.QuoteId != "" || r.RouteId != "" || r.Sender != "" || r.SlippageBps != 0 || len(r.Allocations) != 0 || r.ExecutionMode != quotev1.ExecutionMode_EXECUTION_MODE_UNSPECIFIED {
 			return invalid()
 		}
-	} else if r.QuoteId == "" || (r.RouteId == "") == (len(r.Allocations) == 0) || len(r.Allocations) > 2 || !validAddress(r.Sender) || common.HexToAddress(r.Sender) == (common.Address{}) || r.SlippageBps >= 10000 {
+	} else if r.QuoteId == "" || (r.RouteId == "") == (len(r.Allocations) == 0) || len(r.Allocations) > 2 || !validAddress(r.Sender) || common.HexToAddress(r.Sender) == (common.Address{}) || r.SlippageBps >= 10000 || (r.ExecutionMode != quotev1.ExecutionMode_EXECUTION_MODE_UNSPECIFIED && r.ExecutionMode != quotev1.ExecutionMode_EXECUTION_MODE_ATOMIC_V1) || (r.ExecutionMode == quotev1.ExecutionMode_EXECUTION_MODE_ATOMIC_V1 && r.RouteId == "" && len(r.Allocations) != 2) {
 		return invalid()
 	}
 	if h.Store == nil {
@@ -73,6 +77,9 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REQUOTE_REQUIRED, "The quote block could not be confirmed; request a fresh quote.")
 		}
 		strategy := chain.AllocationPreparer
+		if r.ExecutionMode == quotev1.ExecutionMode_EXECUTION_MODE_ATOMIC_V1 {
+			strategy = chain.AtomicPreparer
+		}
 		var route *quotev1.RouteQuote
 		if r.RouteId != "" {
 			for _, candidate := range saved.final.Routes {
@@ -84,7 +91,9 @@ func (h Handler) PrepareExecution(ctx context.Context, request *connect.Request[
 			if route == nil {
 				return invalid()
 			}
-			strategy = chain.Preparers[route.DeploymentId]
+			if r.ExecutionMode != quotev1.ExecutionMode_EXECUTION_MODE_ATOMIC_V1 {
+				strategy = chain.Preparers[route.DeploymentId]
+			}
 		}
 		if strategy == nil {
 			return result(quotev1.PreparationStatus_PREPARATION_STATUS_REJECTED, "deployment unavailable")
@@ -240,11 +249,12 @@ func buildPreparation(ctx context.Context, strategy PreparationStrategy, saved s
 	deadline := timestamp + 120
 	sender := common.HexToAddress(r.Sender).Hex()
 	response := &quotev1.PrepareExecutionResponse{PreparationId: rand.Text(), ExpiresAtUnix: strconv.FormatInt(now.Add(retention).Unix(), 10), AmountOutMinimumAtomic: minimum.String(), AmountInAtomic: saved.request.AmountInAtomic, TokenIn: saved.request.TokenIn, TokenOut: saved.request.TokenOut, Recipient: sender, DeadlineUnix: strconv.FormatUint(deadline, 10), Route: selection.route, Allocations: selection.allocations}
-	plan, message := strategy.Build(proto.CloneOf(response))
+	plan, message := strategy.Build(proto.CloneOf(response), r.SlippageBps)
 	if message != "" {
 		return preparation{}, message
 	}
 	plan.transaction = proto.CloneOf(plan.transaction)
+	response.AtomicPlan = proto.CloneOf(plan.atomicPlan)
 	plan.permission = plan.permission.clone()
 	plan.checks = plan.checks.clone()
 	return preparation{chain: saved.request.Chain, expires: now.Add(retention), response: response, executionPlan: plan}, ""

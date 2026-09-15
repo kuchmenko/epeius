@@ -64,6 +64,8 @@ Routes stay in deterministic search order, not best-to-worst order. `bestRouteId
 
 `status` exits 1 if any configured chain is unavailable. `chain check` exits 1 for a failed check. Machine consumers should read both the JSON and exit code.
 
+For the Atomic V1 candidate contract, add `--execution-mode atomic-v1` to `quote`. The terminal calls the separate `AtomicPlanService`, rejects unknown or incomplete response fields, independently recomputes every typed provider/operation/program/candidate hash, and verifies token continuity, pool uniqueness, exact output cardinality, positive hop outputs, and canonical candidate order. Human output shows quote and candidate IDs, pinned block, every hop output, final output, and explicit completion state. Candidates are crossings, not a best, net-output, or execution approval. `trade --execution-mode atomic-v1 --candidate-index N` explicitly selects one fresh candidate; it never picks a best candidate.
+
 ## Configured-chain execution
 
 Read [Execution contract](execution.md) before sending. Requires Foundry `cast`, an encrypted keystore, a password file, Tenderly credentials, native gas, funded configured tokens, a positive `chain_id`, and `execution_enabled = true`. The local TOML chain ID must match engine status, the terminal RPC, and the prepared transaction. Tokens, deployment contracts, and pool fees are accepted only from TOML; addresses supplied as token input do not bypass that allowlist.
@@ -92,6 +94,17 @@ Aerodrome Slipstream routes display `tick spacing`, not a fee. Their configured 
 Uniswap V4 routes display the complete configured pool key. The terminal separately validates ERC-20 approval to Permit2, Permit2 permission for the configured Universal Router, and the final V4 action bytes. Each permission requires a fresh quote before the next action. See the [Uniswap V4 provider guide](providers/uniswap-v4.md).
 
 For a verified, TOML-configured executor, replace `--route-id` with `--allocations '[{"routeId":"UNI_ROUTE","amountInAtomic":"37"},{"routeId":"PANCAKE_ROUTE","amountInAtomic":"64"}]'`. This example requires an original quote of 101 atomic units. One or two explicit allocations are supported; two must use different venues. Slipstream is direct-router only and cannot be an executor allocation. See [executor preparation and evidence](execution.md#configured-executor) for admission, exact re-quotes, aggregate slippage, approval spender, and remaining live checks. `trade` remains a single direct-router route; it does not choose allocations or use the executor.
+
+Atomic V1 uses either one explicit returned homogeneous one- or two-pool Uniswap V3, Pancake V3, or Slipstream Initial route, one direct configured Balancer V2 pool, or two explicit returned direct Uniswap V3 routes through the legacy preparation path, with a separately configured ExecutorV2. Balancer configuration names `balancer_deployment`; its full lowercase pool IDs must be unique and sorted, and its Vault must differ from every enabled router.
+
+```bash
+bun run terminal -- prepare --chain CHAIN --config PATH \
+  --quote-id QUOTE_ID --route-id ROUTE_ID \
+  --execution-mode atomic-v1 --slippage-bps 50 \
+  --keystore "$TERMINAL_KEYSTORE" --password-file "$TERMINAL_PASSWORD_FILE"
+```
+
+For two direct branches, replace `--route-id` with `--allocations '[{"routeId":"ROUTE_A","amountInAtomic":"13"},{"routeId":"ROUTE_B","amountInAtomic":"24"}]'`. `trade --execution-mode atomic-v1` requires `--candidate-index`; it never chooses allocations. Human review shows accepted plan ID, executor plan hash, transaction fingerprint, transaction gas limit, and each branch minimum. Terminal checks local executor and deployment, independently reconstructs all three identities and final generic `Plan` calldata, and requires exact ordered operation, branch, and plan events plus token deltas in canonical receipt. For two operations, second event input must equal first event measured output. For two branches, each event must match its branch allocation and measured output, and totals must match the plan. For Slipstream, an optional exact `NativeRefunded` event must appear immediately before `PlanExecuted`. Because the receipt schema has no transaction-specific native trace or state diff, a native refund keeps verification `unavailable` even when the event is valid; delivery is never inferred from the event or adjacent balances. No ExecutorV2 deployment is enabled by checked-in configuration.
 
 For swaps, `verification.outcome: "passed"` means the canonical successful receipt's exact-transaction ERC20 Transfer logs show full wallet input consumption, output at least the configured minimum, and no net intermediate-token residue in the router. `receipt_success` is used for approval receipts; it does not make the old quote executable. Obtain a fresh quote after approval.
 

@@ -90,5 +90,8 @@ func ConfigureChain(chain Chain) Chain {
 		}
 	}
 	chain.AllocationPreparer = fixedExecutorPreparation{chain: chain}
+	if chain.Config.AtomicExecutor != nil {
+		chain.AtomicPreparer = atomicV1Preparation{chain: chain}
+	}
 	return chain
 }

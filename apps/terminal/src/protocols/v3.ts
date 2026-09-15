@@ -5,15 +5,29 @@ import type {
 } from "../../../../generated/ts/epeius/quote/v1/quote_pb";
 import { type SwapTerms, uint256Decimal } from "../execution-policy";
 
-export type V3Deployment = { kind: string; router: string; fees: number[] };
+export type V3Deployment = {
+  kind: string;
+  router: string;
+  factory?: string;
+  fees: number[];
+};
 
 export function v3Deployment(
-  raw: { router?: string; fees?: number[]; options?: unknown },
+  raw: {
+    factory?: string;
+    router?: string;
+    fees?: number[];
+    options?: unknown;
+  },
   kind: string,
 ): V3Deployment {
   const router = `0x${raw.router?.replace(/^0x/i, "") ?? ""}`;
+  const factory = raw.factory
+    ? `0x${raw.factory.replace(/^0x/i, "")}`
+    : undefined;
   if (
     !isAddress(router, { strict: false }) ||
+    (factory !== undefined && !isAddress(factory, { strict: false })) ||
     !Array.isArray(raw.fees) ||
     !raw.fees.length ||
     new Set(raw.fees).size !== raw.fees.length ||
@@ -23,7 +37,12 @@ export function v3Deployment(
     )
   )
     throw new Error("Local execution deployment is invalid.");
-  return { kind, router: router.toLowerCase(), fees: [...raw.fees] };
+  return {
+    kind,
+    router: router.toLowerCase(),
+    ...(factory ? { factory: factory.toLowerCase() } : {}),
+    fees: [...raw.fees],
+  };
 }
 
 export function admitV3Route(

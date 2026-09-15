@@ -1,0 +1,35 @@
+{
+  "formatVersion": 1,
+  "chainId": "8453",
+  "tokenIn": "0x1111111111111111111111111111111111111111",
+  "tokenOut": "0x9999999999999999999999999999999999999999",
+  "amountIn": "1234567",
+  "executor": "0x2222222222222222222222222222222222222222",
+  "signer": "0x3333333333333333333333333333333333333333",
+  "vault": "0x1234567890abcdef1234567890abcdef12345678",
+  "poolId": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd000200000000000000000789",
+  "operationOutputs": ["1111111"],
+  "minimum": "1000000",
+  "quoteBlockNumber": "19876543",
+  "quoteBlockHash": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "runtimeCodeHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expiresAtUnix": "2000000000",
+  "deadlineUnix": "2000000100",
+  "gasLimit": "1000000",
+  "providerHashes": [
+    "0x5907cff1ad83ab9cfd7eaa55c091c69894e703dd39657a167e1d194dca770728"
+  ],
+  "operationHashes": [
+    "0xa96280e6839386c7e4cee678b3ec6b006060867fef0992ca39e2f57b2281b3bd"
+  ],
+  "programBranchHash": "0x41d19afaab4b31ceb9d6f38ae09df9c3c62214af8b03dcc98d5619f8a5b10a7d",
+  "programHash": "0x402d07e92fdc57c7ae9ba8db4933864f0368a5352aa9f4063e0116a248450734",
+  "candidateBranchHash": "0x8e4c6e46d31a41ce10487849f6ca64f4930314cd422e43c9e785e0b906a8edb3",
+  "candidateId": "0x20a339d633891d4ed802955511513439ab51f4f2a56811230f010f99ed307fa9",
+  "acceptedBranchHash": "0x4aed916fb7d5aecd51390607b6b776deb552bcc4abd5a06e5a54a717dc36fe1a",
+  "planId": "0x672b31924cd614d5d29b9823d9b1517842c30113863262409ba94aa425ee95e5",
+  "executorPlanHash": "0x2a3530180b01c8da9fe258e939c7c32a3dd581e376df0f9700f9f73fbfa08b1b",
+  "executorCalldataHash": "0xd4515ac7f3110178b1b8f3a2f60ad51ddb4e32378b421673982eee94274db870",
+  "transactionFingerprint": "0x04fb6576eb7c22aea5ce0a49a53448e3cba5ff853ceefcc0c617c6adf031c5b1",
+  "balancerSwapCalldataHash": "0x68d9f21910fb658ab53037b19a0b23447ac3747853c36a9e7b896f8e37f3def0"
+}

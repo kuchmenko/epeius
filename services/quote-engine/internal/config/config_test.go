@@ -30,6 +30,16 @@ chain_id = 84532
 rpc_url_env = "TEST_RPC_URL"
 `
 
+const atomicResourceConfig = `
+[engine.atomic]
+max_request_bytes = 16384
+max_response_bytes = 65536
+max_retained_quotes = 64
+max_retained_quote_bytes = 1048576
+max_retained_preparations = 64
+max_retained_preparation_bytes = 1048576
+`
+
 func loadText(t *testing.T, text string) (Config, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "epeius.toml")
@@ -81,6 +91,103 @@ pancake_deployment = "pan"
 		if _, err := loadText(t, strings.Replace(text, change[0], change[1], 1)); err == nil {
 			t.Fatalf("invalid executor accepted: %s", change[1])
 		}
+	}
+}
+
+func TestAtomicExecutorNamesOneOrBothV3Deployments(t *testing.T) {
+	text := validConfig + atomicResourceConfig + `
+[chains.test-net.deployments.uni]
+kind = "uniswap-v3"
+factory = "0x1111111111111111111111111111111111111111"
+quoter = "0x2222222222222222222222222222222222222222"
+router = "0x3333333333333333333333333333333333333333"
+fees = [500]
+[chains.test-net.deployments.pan]
+kind = "pancake-v3"
+factory = "0x5555555555555555555555555555555555555555"
+quoter = "0x6666666666666666666666666666666666666666"
+router = "0x7777777777777777777777777777777777777777"
+fees = [2500]
+[chains.test-net.deployments.slip]
+kind = "aerodrome-slipstream"
+factory = "0x8888888888888888888888888888888888888888"
+quoter = "0x9999999999999999999999999999999999999999"
+router = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+[chains.test-net.deployments.slip.options]
+tick_spacings = [100, 200]
+[chains.test-net.atomic_executor]
+address = "0x4444444444444444444444444444444444444444"
+runtime_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+max_branches = 4
+max_operations_per_branch = 12
+max_total_operations = 12
+uniswap_deployment = "uni"
+pancake_deployment = "pan"
+slipstream_deployment = "slip"
+`
+	got, err := loadText(t, text)
+	if err != nil || got.Chains["test-net"].AtomicExecutor.UniswapDeployment != "uni" || got.Chains["test-net"].AtomicExecutor.PancakeDeployment != "pan" || got.Chains["test-net"].AtomicExecutor.SlipstreamDeployment != "slip" {
+		t.Fatalf("Atomic V1 config rejected: %v", err)
+	}
+	for _, only := range []string{
+		strings.Replace(text, "uniswap_deployment = \"uni\"\n", "", 1),
+		strings.Replace(text, "pancake_deployment = \"pan\"\n", "", 1),
+	} {
+		if _, err := loadText(t, only); err != nil {
+			t.Fatalf("single Atomic V1 deployment rejected: %v", err)
+		}
+	}
+	for _, replacement := range []string{"missing", "0x0000000000000000000000000000000000000000", "0xaaaa"} {
+		old := "uni"
+		if strings.HasPrefix(replacement, "0x") {
+			old = "0x4444444444444444444444444444444444444444"
+			if replacement == "0xaaaa" {
+				old = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}
+		}
+		if _, err := loadText(t, strings.Replace(text, old, replacement, 1)); err == nil {
+			t.Fatalf("invalid Atomic V1 config accepted: %s", replacement)
+		}
+	}
+	for _, changed := range []string{
+		strings.Replace(text, "pancake_deployment = \"pan\"", "pancake_deployment = \"uni\"", 1),
+		strings.Replace(text, "router = \"0x7777777777777777777777777777777777777777\"", "router = \"0x3333333333333333333333333333333333333333\"", 1),
+		strings.Replace(text, "router = \"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", "router = \"0x3333333333333333333333333333333333333333\"", 1),
+		strings.Replace(strings.Replace(strings.Replace(text, "uniswap_deployment = \"uni\"\n", "", 1), "pancake_deployment = \"pan\"\n", "", 1), "slipstream_deployment = \"slip\"\n", "", 1),
+	} {
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatal("invalid Atomic V1 provider selection accepted")
+		}
+	}
+	if _, err := loadText(t, strings.Replace(text, "uniswap_deployment = \"uni\"", "uniswap_deployment = \"uni\"\nunknown = true", 1)); err == nil {
+		t.Fatal("unknown Atomic V1 config field accepted")
+	}
+	if _, err := loadText(t, strings.Replace(text, atomicResourceConfig, "", 1)); err == nil {
+		t.Fatal("Atomic executor without resource limits accepted")
+	}
+	for _, field := range []string{"max_request_bytes", "max_response_bytes", "max_retained_quotes", "max_retained_quote_bytes", "max_retained_preparations", "max_retained_preparation_bytes"} {
+		if _, err := loadText(t, strings.Replace(text, field+" = ", field+" = 0 # ", 1)); err == nil {
+			t.Fatalf("zero %s accepted", field)
+		}
+	}
+	if _, err := loadText(t, strings.Replace(text, "max_request_bytes = 16384", "max_request_bytes = 16384\nunknown_limit = 1", 1)); err == nil {
+		t.Fatal("unknown Atomic resource limit accepted")
+	}
+	for _, changed := range []string{
+		strings.Replace(text, "max_branches = 4", "max_branches = 0", 1),
+		strings.Replace(text, "max_operations_per_branch = 12", "max_operations_per_branch = 13", 1),
+		strings.Replace(text, "max_total_operations = 12", "max_total_operations = 3", 1),
+		strings.Replace(text, "max_total_operations = 12", "max_total_operations = 49", 1),
+	} {
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatal("invalid Atomic V1 limits accepted")
+		}
+	}
+}
+
+func TestAtomicResourceLimitsRejectedWithoutAtomicExecutor(t *testing.T) {
+	if _, err := loadText(t, validConfig+atomicResourceConfig); err == nil {
+		t.Fatal("inapplicable Atomic resource limits accepted")
 	}
 }
 
@@ -238,6 +345,53 @@ pools = ["` + pool + `"]
 		if _, err := loadText(t, changed); err == nil {
 			t.Fatalf("accepted inapplicable Balancer field %s", field)
 		}
+	}
+}
+
+func TestAtomicExecutorAcceptsCanonicalBalancerPoolsAndRejectsInvalidSelection(t *testing.T) {
+	const first = "0x1111111111111111111111111111111111111111000000000000000000000001"
+	const second = "0x2222222222222222222222222222222222222222000000000000000000000002"
+	text := validConfig + atomicResourceConfig + `
+[chains.test-net.deployments.balancer]
+kind = "balancer-v2"
+[chains.test-net.deployments.balancer.options]
+vault = "0x3333333333333333333333333333333333333333"
+pools = ["` + first + `", "` + second + `"]
+[chains.test-net.atomic_executor]
+address = "0x4444444444444444444444444444444444444444"
+runtime_code_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+max_branches = 4
+max_operations_per_branch = 12
+max_total_operations = 12
+balancer_deployment = "balancer"
+`
+	if got, err := loadText(t, text); err != nil || got.Chains["test-net"].AtomicExecutor.BalancerDeployment != "balancer" {
+		t.Fatalf("Balancer-only Atomic executor rejected: %v", err)
+	}
+	for _, changed := range []string{
+		strings.Replace(text, `pools = ["`+first+`", "`+second+`"]`, `pools = []`, 1),
+		strings.Replace(text, `pools = ["`+first+`", "`+second+`"]`, `pools = ["`+second+`", "`+first+`"]`, 1),
+		strings.Replace(text, `pools = ["`+first+`", "`+second+`"]`, `pools = ["`+first+`", "`+first+`"]`, 1),
+		strings.Replace(text, `kind = "balancer-v2"`, `kind = "uniswap-v3"`, 1),
+	} {
+		if _, err := loadText(t, changed); err == nil {
+			t.Fatal("invalid Atomic Balancer config accepted")
+		}
+	}
+	mixed := strings.Replace(text, `[chains.test-net.atomic_executor]`, `[chains.test-net.deployments.uni]
+kind = "uniswap-v3"
+factory = "0x5555555555555555555555555555555555555555"
+quoter = "0x6666666666666666666666666666666666666666"
+router = "0x7777777777777777777777777777777777777777"
+fees = [500]
+[chains.test-net.atomic_executor]`, 1)
+	mixed = strings.Replace(mixed, `balancer_deployment = "balancer"`, "balancer_deployment = \"balancer\"\nuniswap_deployment = \"uni\"", 1)
+	if _, err := loadText(t, mixed); err != nil {
+		t.Fatalf("mixed Atomic providers rejected: %v", err)
+	}
+	collision := strings.Replace(mixed, "0x3333333333333333333333333333333333333333", "0x7777777777777777777777777777777777777777", 1)
+	if _, err := loadText(t, collision); err == nil {
+		t.Fatal("Vault/router collision accepted")
 	}
 }
 

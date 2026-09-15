@@ -9,13 +9,18 @@ import {
   type QuoteRequest,
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
-import { readConfig, readExecutionConfig, validateEngineUrl } from "./config";
+import {
+  readAtomicNonceLockConfig,
+  readConfig,
+  readExecutionConfig,
+  validateEngineUrl,
+} from "./config";
 import type {
   ExecutionOutcome,
   ExecutionResult,
   Verification,
 } from "./execution";
-import { executionExitCode } from "./main";
+import { atomicConsentDetails, executionExitCode } from "./main";
 import { configureChain } from "./protocols";
 import { decimalToAtomic, parseAtomic, resolveToken } from "./tokens";
 
@@ -32,6 +37,7 @@ test("CLI exit mapping covers every execution outcome; verification is action-sp
     canceled: 1,
     "approval-confirmed": 0,
     "swap-verified": 0,
+    "swap-complete": 0,
     failed: 1,
     unknown: 1,
   };
@@ -48,6 +54,47 @@ test("CLI exit mapping covers every execution outcome; verification is action-sp
     evidence: { outcome: "receipt_success" },
   };
   void invalid;
+});
+
+test("Atomic consent shows every exact type-2 authority field and bounded exposure", () => {
+  expect(
+    atomicConsentDetails(
+      "swap",
+      {
+        $typeName: "epeius.quote.v1.UnsignedTransaction",
+        chainId: "8453",
+        from: `0x${"1".repeat(40)}`,
+        to: `0x${"2".repeat(40)}`,
+        valueAtomic: "7",
+        data: "0x661983c5",
+        gasLimit: "1000000",
+      },
+      {
+        type: 2,
+        nonce: "9",
+        maxFeePerGasAtomic: "30",
+        maxPriorityFeePerGasAtomic: "2",
+        accessList: [],
+      },
+    ),
+  ).toEqual({
+    action: "swap",
+    transactionType: 2,
+    chainId: "8453",
+    nonce: "9",
+    sender: `0x${"1".repeat(40)}`,
+    target: `0x${"2".repeat(40)}`,
+    valueAtomic: "7",
+    gasLimit: "1000000",
+    calldataHash:
+      "0x32cc32aa3c800c56504f35be253f8c3d8b6efca21e2f6cf6f1d8030387756e13",
+    maxFeePerGasAtomic: "30",
+    maxPriorityFeePerGasAtomic: "2",
+    maxExecutionGasExposureAtomic: "30000000",
+    totalMaximumAtomic: null,
+    feeNotice:
+      "OP/Base L1-data and operator charges are not capped by these execution-gas fee caps; total maximum is unknown.",
+  });
 });
 
 test("decimal amounts convert exactly at 0, 6, and 18 decimals", () => {
@@ -135,6 +182,64 @@ test("execution config rereads independently and validates executor only for all
     await expect(
       readExecutionConfig(path, "test", true, configureChain),
     ).rejects.toThrow("Local executor address is invalid.");
+    const atomic = `${header}execution_enabled=true\n[chains.test.deployments.uni]\nkind='uniswap-v3'\nfactory='0x${"b".repeat(40)}'\nrouter='0x${"a".repeat(40)}'\nfees=[500]\n[chains.test.atomic_executor]\naddress='0x${"c".repeat(40)}'\nruntime_code_hash='0x${"d".repeat(64)}'\nmax_branches=4\nmax_operations_per_branch=12\nmax_total_operations=12\nuniswap_deployment='uni'\n`;
+    await Bun.write(path, atomic);
+    expect(
+      await readExecutionConfig(path, "test", false, configureChain, true),
+    ).toMatchObject({
+      trusted: {
+        atomicExecutor: {
+          address: `0x${"c".repeat(40)}`,
+          runtimeCodeHash: `0x${"d".repeat(64)}`,
+        },
+      },
+    });
+    await Bun.write(
+      path,
+      atomic.replace(
+        "uniswap_deployment='uni'",
+        "uniswap_deployment='uni'\nunknown=true",
+      ),
+    );
+    await expect(
+      readExecutionConfig(path, "test", false, configureChain, true),
+    ).rejects.toThrow("configuration is invalid");
+  } finally {
+    await rm(directory, { recursive: true });
+  }
+});
+
+test("Atomic nonce lock config is explicit, strict, absolute and chain-bound", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "epeius-nonce-config-"));
+  const path = join(directory, "config.toml");
+  const config = (atomic: string, chainId = "1") =>
+    `[terminal]\ndefault_chain='test'\nengine_url='http://127.0.0.1:1'\nsearch_budget_ms=1\n${atomic}\n[chains.test]\nchain_id=${chainId}\n`;
+  try {
+    await Bun.write(
+      path,
+      config(`[terminal.atomic]\nnonce_lock_root='${directory}'`),
+    );
+    expect(await readAtomicNonceLockConfig(path, "test")).toEqual({
+      root: directory,
+      chainId: "1",
+    });
+    for (const atomic of [
+      "",
+      "[terminal.atomic]",
+      "[terminal.atomic]\nnonce_lock_root=''",
+      "[terminal.atomic]\nnonce_lock_root='relative'",
+      `[terminal.atomic]\nnonce_lock_root='${directory}'\nunknown=true`,
+    ]) {
+      await Bun.write(path, config(atomic));
+      await expect(readAtomicNonceLockConfig(path, "test")).rejects.toThrow();
+    }
+    await Bun.write(
+      path,
+      config(`[terminal.atomic]\nnonce_lock_root='${directory}'`, "0"),
+    );
+    await expect(readAtomicNonceLockConfig(path, "test")).rejects.toThrow(
+      "positive local chain ID",
+    );
   } finally {
     await rm(directory, { recursive: true });
   }
@@ -160,6 +265,11 @@ test("help needs no config and removed flags give migration errors", async () =>
     [["quote", "--sender", "x"], 1, "--sender was removed"],
     [["quote", "--slippage-bps", "50"], 1, "--slippage-bps was removed"],
     [["execute"], 1, "Provide --keystore"],
+    [
+      ["recover-atomic"],
+      1,
+      "requires explicit --config, --chain, --atomic-journal, and --attempt-id",
+    ],
   ] as const) {
     const child = Bun.spawn(["bun", "apps/terminal/src/main.ts", ...args], {
       cwd: join(import.meta.dir, "../../.."),
@@ -414,6 +524,144 @@ test("CLI resolves symbols and addresses, sends exact amounts, and handles compl
       ).toBe(1);
       expect(requests.length).toBe(before);
     }
+    const misplacedCandidate = await run([
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--candidate-index",
+      "1",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(misplacedCandidate.code).toBe(1);
+    expect(misplacedCandidate.err).toContain(
+      "--candidate-index requires --execution-mode atomic-v1.",
+    );
+    const requestsBeforeJournalAdmission = requests.length;
+    const missingJournal = await run([
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--execution-mode",
+      "atomic-v1",
+      "--candidate-index",
+      "1",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(missingJournal.code).toBe(1);
+    expect(missingJournal.err).toContain("explicit --atomic-journal path");
+    expect(requests).toHaveLength(requestsBeforeJournalAdmission);
+    const atomicPrefix = [
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--execution-mode",
+      "atomic-v1",
+      "--candidate-index",
+      "1",
+      "--atomic-journal",
+      "intent.jsonl",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ];
+    for (const feeArgs of [
+      [],
+      ["--max-fee-per-gas-atomic", "1"],
+      ["--max-priority-fee-per-gas-atomic", "0"],
+      [
+        "--max-fee-per-gas-atomic",
+        "0",
+        "--max-priority-fee-per-gas-atomic",
+        "0",
+      ],
+      [
+        "--max-fee-per-gas-atomic",
+        "01",
+        "--max-priority-fee-per-gas-atomic",
+        "0",
+      ],
+      [
+        "--max-fee-per-gas-atomic",
+        "1",
+        "--max-priority-fee-per-gas-atomic",
+        "2",
+      ],
+      [
+        "--max-fee-per-gas-atomic",
+        (1n << 256n).toString(),
+        "--max-priority-fee-per-gas-atomic",
+        "0",
+      ],
+    ]) {
+      const before = requests.length;
+      const invalidFee = await run([...atomicPrefix, ...feeArgs]);
+      expect(invalidFee.code).toBe(1);
+      expect(invalidFee.err).toContain("Atomic V1");
+      expect(requests).toHaveLength(before);
+    }
+    const misplacedJournal = await run([
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--route-id",
+      "r1",
+      "--atomic-journal",
+      "intent.jsonl",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(misplacedJournal.code).toBe(1);
+    expect(misplacedJournal.err).toContain(
+      "only valid with trade --execution-mode atomic-v1",
+    );
+    expect(requests).toHaveLength(requestsBeforeJournalAdmission);
+    const misplacedFees = await run([
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--route-id",
+      "r1",
+      "--max-fee-per-gas-atomic",
+      "1",
+      "--max-priority-fee-per-gas-atomic",
+      "0",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(misplacedFees.code).toBe(1);
+    expect(misplacedFees.err).toContain("only valid with trade");
+    expect(requests).toHaveLength(requestsBeforeJournalAdmission);
     const unavailableUrl = server.url.toString();
     await server.stop(true);
     const failure = await run([

@@ -28,7 +28,11 @@ export function uniswapData(p: PrepareExecutionResponse) {
   });
 }
 
-export function uniswap(raw: { router?: string; fees?: number[] }) {
+export function uniswap(raw: {
+  factory?: string;
+  router?: string;
+  fees?: number[];
+}) {
   const deployment = v3Deployment(raw, "uniswap-v3");
   return {
     ...deployment,

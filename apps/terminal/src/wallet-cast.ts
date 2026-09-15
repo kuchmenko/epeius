@@ -1,5 +1,6 @@
 import { isAddress } from "viem";
 import type { UnsignedTransaction } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import type { AtomicEnvelope } from "./atomic-signed-envelope";
 
 export function castWallet(
   keystore: string,
@@ -56,6 +57,27 @@ export function castWallet(
         tx.from,
         "--async",
         ...wallet,
+      ]),
+    signAtomic: (tx: UnsignedTransaction, envelope: AtomicEnvelope) =>
+      cast([
+        "mktx",
+        "--chain",
+        tx.chainId,
+        "--nonce",
+        envelope.nonce,
+        "--gas-limit",
+        tx.gasLimit,
+        "--gas-price",
+        envelope.maxFeePerGasAtomic,
+        "--priority-gas-price",
+        envelope.maxPriorityFeePerGasAtomic,
+        "--value",
+        tx.valueAtomic,
+        "--from",
+        tx.from,
+        ...wallet,
+        tx.to,
+        tx.data,
       ]),
   };
 }

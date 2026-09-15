@@ -84,7 +84,11 @@ func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 			if checkOriginErr != nil {
 				return nil, checkOriginErr
 			}
-			legs, out, err := q.quote(ctx, p.tokens, p.spacings, amount, hash)
+			legs, outputs, err := q.quoteOutputs(ctx, p.tokens, p.spacings, amount, hash)
+			var out *big.Int
+			if len(outputs) != 0 {
+				out = outputs[len(outputs)-1]
+			}
 			if err != nil || out == nil {
 				return nil, err
 			}
@@ -94,10 +98,19 @@ func (q slipstreamQuoter) Candidates(r *quotev1.QuoteRequest, block *quotev1.Blo
 }
 
 func (q slipstreamQuoter) quote(ctx context.Context, tokens []common.Address, spacings []int32, amount *big.Int, hash common.Hash) ([]*quotev1.RouteLeg, *big.Int, error) {
+	legs, outputs, err := q.quoteOutputs(ctx, tokens, spacings, amount, hash)
+	if err != nil || len(outputs) == 0 {
+		return nil, nil, err
+	}
+	return legs, outputs[len(outputs)-1], nil
+}
+
+func (q slipstreamQuoter) quoteOutputs(ctx context.Context, tokens []common.Address, spacings []int32, amount *big.Int, hash common.Hash) ([]*quotev1.RouteLeg, []*big.Int, error) {
 	factory := common.HexToAddress(q.deployment.Factory)
 	p := slipstream.Provider{Client: q.reader, FactoryAddress: factory, QuoterAddress: common.HexToAddress(q.deployment.Quoter)}
 	out := new(big.Int).Set(amount)
 	legs := []*quotev1.RouteLeg{}
+	outputs := []*big.Int{}
 	for i, s := range spacings {
 		// Slipstream exact-input routing feeds each hop's actual quoted output into
 		// the next hop, matching SwapRouter's forward path execution.
@@ -108,8 +121,9 @@ func (q slipstreamQuoter) quote(ctx context.Context, tokens []common.Address, sp
 		}
 		out = next
 		legs = append(legs, &quotev1.RouteLeg{Pool: pool.Hex(), TokenIn: tokens[i].Hex(), TokenOut: tokens[i+1].Hex(), Selector: &quotev1.RouteLeg_TickSpacing{TickSpacing: s}})
+		outputs = append(outputs, new(big.Int).Set(out))
 	}
-	return legs, out, nil
+	return legs, outputs, nil
 }
 func (q slipstreamQuoter) Verify(ctx context.Context, h common.Hash) error {
 	r, ok := q.reader.(codeReader)

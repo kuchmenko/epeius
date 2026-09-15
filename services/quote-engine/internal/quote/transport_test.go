@@ -12,8 +12,10 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1/atomicv1connect"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/generated/go/epeius/quote/v1/quotev1connect"
+	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/rpc"
 )
 
@@ -50,7 +52,15 @@ func TestBunConnectTransport(t *testing.T) {
 		},
 	}
 	mux := http.NewServeMux()
-	path, actual := quotev1connect.NewQuoteServiceHandler(configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: testChainConfig()}}, QuoteConcurrency: 4}))
+	chainConfig := testChainConfig()
+	deployment := chainConfig.Deployments["uniswap-v3"]
+	deployment.Router = common.HexToAddress("0x5678").Hex()
+	chainConfig.Deployments["uniswap-v3"] = deployment
+	chainConfig.AtomicExecutor = &config.AtomicExecutor{Address: common.HexToAddress("0x9abc").Hex(), RuntimeCodeHash: common.HexToHash("0x11").Hex(), UniswapDeployment: "uniswap-v3"}
+	service := configuredHandler(Handler{Chains: map[string]Chain{"base": {ChainID: "8453", Client: reader, Config: chainConfig}}, QuoteConcurrency: 4})
+	path, actual := quotev1connect.NewQuoteServiceHandler(service)
+	mux.Handle(path, actual)
+	path, actual = atomicv1connect.NewAtomicPlanServiceHandler(service)
 	mux.Handle(path, actual)
 	reader.call = func(ctx context.Context, _ common.Address, _ []byte, _ common.Hash) ([]byte, error) {
 		<-ctx.Done()

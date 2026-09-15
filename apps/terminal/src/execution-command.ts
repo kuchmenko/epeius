@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline/promises";
 import { toJsonString } from "@bufbuild/protobuf";
 import {
+  ExecutionMode,
   PreparationStatus,
   type RouteQuote,
   RouteQuoteSchema,
@@ -17,6 +18,21 @@ import { castWallet } from "./wallet-cast";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
+export async function verifyAtomicExecutor(
+  rpc: ReturnType<typeof readChain>,
+  executor: NonNullable<ReturnType<typeof configureChain>["atomicExecutor"]>,
+) {
+  return (
+    same(await rpc.codeHash(executor.address), executor.runtimeCodeHash) &&
+    (await rpc.uint32Getter(executor.address, "maxBranches")) ===
+      executor.maxBranches &&
+    (await rpc.uint32Getter(executor.address, "maxOperationsPerBranch")) ===
+      executor.maxOperationsPerBranch &&
+    (await rpc.uint32Getter(executor.address, "maxTotalOperations")) ===
+      executor.maxTotalOperations
+  );
+}
+
 export async function connectExecution(
   values: Record<string, string | undefined>,
   configPath: string,
@@ -24,6 +40,8 @@ export async function connectExecution(
   remoteChainId: string,
   signal: AbortSignal,
   allocations = false,
+  atomic = false,
+  requestTimeoutMs = 15000,
 ) {
   if (!values.keystore || !values["password-file"])
     throw new Error("Provide --keystore and --password-file.");
@@ -32,6 +50,7 @@ export async function connectExecution(
     chain,
     allocations,
     configureChain,
+    atomic,
   );
   if (remoteChainId !== expectedChainId)
     throw new Error(
@@ -40,7 +59,13 @@ export async function connectExecution(
   const rpcUrl = process.env[rpcUrlEnv];
   if (!rpcUrl)
     throw new Error("Configured RPC environment variable is missing.");
-  const rpc = readChain(rpcUrl, signal);
+  const rpc = readChain(rpcUrl, signal, requestTimeoutMs);
+  if (
+    atomic &&
+    (!trusted.atomicExecutor ||
+      !(await verifyAtomicExecutor(rpc, trusted.atomicExecutor)))
+  )
+    throw new Error("Local Atomic V1 executor runtime code does not match.");
   const wallet = castWallet(
     values.keystore,
     values["password-file"],
@@ -108,7 +133,9 @@ export async function executionCommand(
     (!values["quote-id"] && !values["preparation-id"]) ||
     (!!values["quote-id"] && !!values["preparation-id"]) ||
     (values["preparation-id"]
-      ? !!values["route-id"] || !!values.allocations
+      ? !!values["route-id"] ||
+        !!values.allocations ||
+        !!values["execution-mode"]
       : !!values["route-id"] === !!values.allocations)
   )
     throw new Error(
@@ -117,6 +144,9 @@ export async function executionCommand(
   const allocations = values.allocations
     ? parseAllocations(values.allocations)
     : [];
+  const atomic = values["execution-mode"] === "atomic-v1";
+  if (values["execution-mode"] !== undefined && !atomic)
+    throw new Error("--execution-mode must be atomic-v1 when provided.");
   const slippage = values["slippage-bps"] ?? "50";
   if (!/^\d+$/.test(slippage) || Number(slippage) >= 10000)
     throw new Error("--slippage-bps must be 0 through 9999.");
@@ -139,6 +169,7 @@ export async function executionCommand(
       remoteChainId,
       signal,
       (initialPreparation?.allocations.length ?? allocations.length) > 0,
+      initialPreparation?.atomicPlan !== undefined || atomic,
     );
   if (trade && !same(signer, trade.signer))
     throw new Error(
@@ -171,6 +202,9 @@ export async function executionCommand(
                       allocations,
                       sender: signer,
                       slippageBps: Number(slippage),
+                      executionMode: atomic
+                        ? ExecutionMode.ATOMIC_V1
+                        : ExecutionMode.UNSPECIFIED,
                     },
                 { signal, timeoutMs: 25000 },
               );

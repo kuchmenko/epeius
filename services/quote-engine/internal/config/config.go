@@ -28,8 +28,18 @@ type Terminal struct {
 }
 
 type Engine struct {
-	ListenAddr       string `toml:"listen_addr"`
-	QuoteConcurrency int    `toml:"quote_concurrency"`
+	ListenAddr       string        `toml:"listen_addr"`
+	QuoteConcurrency int           `toml:"quote_concurrency"`
+	Atomic           *AtomicLimits `toml:"atomic"`
+}
+
+type AtomicLimits struct {
+	MaxRequestBytes             uint64 `toml:"max_request_bytes"`
+	MaxResponseBytes            uint64 `toml:"max_response_bytes"`
+	MaxRetainedQuotes           uint32 `toml:"max_retained_quotes"`
+	MaxRetainedQuoteBytes       uint64 `toml:"max_retained_quote_bytes"`
+	MaxRetainedPreparations     uint32 `toml:"max_retained_preparations"`
+	MaxRetainedPreparationBytes uint64 `toml:"max_retained_preparation_bytes"`
 }
 
 type Chain struct {
@@ -39,12 +49,26 @@ type Chain struct {
 	Tokens           []Token               `toml:"tokens"`
 	Deployments      map[string]Deployment `toml:"deployments"`
 	Executor         *Executor             `toml:"executor"`
+	AtomicExecutor   *AtomicExecutor       `toml:"atomic_executor"`
 }
 
 type Executor struct {
 	Address           string `toml:"address"`
 	UniswapDeployment string `toml:"uniswap_deployment"`
 	PancakeDeployment string `toml:"pancake_deployment"`
+}
+
+type AtomicExecutor struct {
+	Address                string `toml:"address"`
+	RuntimeCodeHash        string `toml:"runtime_code_hash"`
+	MaxBranches            uint32 `toml:"max_branches"`
+	MaxOperationsPerBranch uint32 `toml:"max_operations_per_branch"`
+	MaxTotalOperations     uint32 `toml:"max_total_operations"`
+	UniswapDeployment      string `toml:"uniswap_deployment"`
+	PancakeDeployment      string `toml:"pancake_deployment"`
+	SlipstreamDeployment   string `toml:"slipstream_deployment"`
+	BalancerDeployment     string `toml:"balancer_deployment"`
+	UniswapV4Deployment    string `toml:"uniswap_v4_deployment"`
 }
 
 type Token struct {
@@ -137,6 +161,19 @@ func (c Config) validate() error {
 	}
 	if c.Engine.QuoteConcurrency < 1 {
 		return errors.New("engine.quote_concurrency must be positive")
+	}
+	atomicConfigured := false
+	for _, chain := range c.Chains {
+		atomicConfigured = atomicConfigured || chain.AtomicExecutor != nil
+	}
+	if atomicConfigured != (c.Engine.Atomic != nil) {
+		return errors.New("engine.atomic must be configured exactly when an Atomic executor is configured")
+	}
+	if limits := c.Engine.Atomic; limits != nil {
+		maxInt := uint64(^uint(0) >> 1)
+		if limits.MaxRequestBytes == 0 || limits.MaxRequestBytes > maxInt || limits.MaxResponseBytes == 0 || limits.MaxResponseBytes > maxInt || limits.MaxRetainedQuotes == 0 || uint64(limits.MaxRetainedQuotes) > maxInt || limits.MaxRetainedQuoteBytes == 0 || limits.MaxRetainedPreparations == 0 || uint64(limits.MaxRetainedPreparations) > maxInt || limits.MaxRetainedPreparationBytes == 0 {
+			return errors.New("engine.atomic resource limits must be positive and transport/count limits must fit int")
+		}
 	}
 	if c.Terminal.SearchBudgetMS < 1 || c.Terminal.SearchBudgetMS > 2147478647 {
 		return errors.New("terminal.search_budget_ms must be between 1 and 2147478647")

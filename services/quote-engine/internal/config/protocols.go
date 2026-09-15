@@ -71,6 +71,68 @@ func ValidateChain(chain Chain) error {
 			return errors.New("executor needs a nonzero address and distinct configured Uniswap and Pancake routers")
 		}
 	}
+	if e := chain.AtomicExecutor; e != nil {
+		limitsOK := e.MaxBranches > 0 && e.MaxOperationsPerBranch > 0 && e.MaxTotalOperations >= e.MaxBranches && e.MaxTotalOperations >= e.MaxOperationsPerBranch && uint64(e.MaxTotalOperations) <= uint64(e.MaxBranches)*uint64(e.MaxOperationsPerBranch)
+		uniswap, uniswapOK := chain.Deployments[e.UniswapDeployment]
+		pancake, pancakeOK := chain.Deployments[e.PancakeDeployment]
+		slipstream, slipstreamOK := chain.Deployments[e.SlipstreamDeployment]
+		balancerDeployment, balancerOK := chain.Deployments[e.BalancerDeployment]
+		uniswapV4, uniswapV4OK := chain.Deployments[e.UniswapV4Deployment]
+		uniswapOK = e.UniswapDeployment != "" && uniswapOK && uniswap.Kind == "uniswap-v3"
+		pancakeOK = e.PancakeDeployment != "" && pancakeOK && pancake.Kind == "pancake-v3"
+		slipstreamOK = e.SlipstreamDeployment != "" && slipstreamOK && slipstream.Kind == "aerodrome-slipstream"
+		balancerOK = e.BalancerDeployment != "" && balancerOK && balancerDeployment.Kind == "balancer-v2"
+		uniswapV4OK = e.UniswapV4Deployment != "" && uniswapV4OK && uniswapV4.Kind == "uniswap-v4"
+		routers := map[common.Address]bool{}
+		for _, deployment := range []struct {
+			enabled bool
+			value   Deployment
+		}{{uniswapOK, uniswap}, {pancakeOK, pancake}, {slipstreamOK, slipstream}} {
+			if deployment.enabled {
+				router := common.HexToAddress(deployment.value.Router)
+				if routers[router] {
+					return errors.New("atomic executor provider routers must be distinct")
+				}
+				routers[router] = true
+			}
+		}
+		if balancerOK && balancerDeployment.Options != nil {
+			options, err := balancer.ParseOptions(*balancerDeployment.Options)
+			if err != nil || len(options.Pools) == 0 {
+				return errors.New("atomic executor Balancer deployment is invalid")
+			}
+			previous := ""
+			for _, pool := range options.Pools {
+				if previous != "" && pool <= previous {
+					return errors.New("atomic executor Balancer pool IDs must be in strict ascending order")
+				}
+				previous = pool
+			}
+			vault := common.HexToAddress(options.Vault)
+			if routers[vault] {
+				return errors.New("atomic executor provider endpoints must be distinct")
+			}
+			routers[vault] = true
+		} else if balancerOK {
+			return errors.New("atomic executor Balancer deployment is invalid")
+		}
+		if uniswapV4OK {
+			options, err := validateUniswapV4(uniswapV4, chain.Tokens)
+			if err != nil {
+				return errors.New("atomic executor Uniswap V4 deployment is invalid")
+			}
+			for _, endpoint := range []string{uniswapV4.Router, options.Permit2, options.PoolManager} {
+				address := common.HexToAddress(endpoint)
+				if routers[address] {
+					return errors.New("atomic executor provider endpoints must be distinct")
+				}
+				routers[address] = true
+			}
+		}
+		if !limitsOK || !common.IsHexAddress(e.Address) || common.HexToAddress(e.Address) == (common.Address{}) || !common.IsHexHash(e.RuntimeCodeHash) || (!uniswapOK && !pancakeOK && !slipstreamOK && !balancerOK && !uniswapV4OK) || (e.UniswapDeployment != "" && !uniswapOK) || (e.PancakeDeployment != "" && !pancakeOK) || (e.SlipstreamDeployment != "" && !slipstreamOK) || (e.BalancerDeployment != "" && !balancerOK) || (e.UniswapV4Deployment != "" && !uniswapV4OK) {
+			return errors.New("atomic executor needs a nonzero address, runtime code hash, and at least one valid provider deployment")
+		}
+	}
 	for id, d := range chain.Deployments {
 		validate, ok := deploymentValidators[d.Kind]
 		if !ok {

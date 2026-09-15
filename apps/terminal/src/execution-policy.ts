@@ -31,18 +31,48 @@ export type SwapTerms = {
   data: string;
   quotedOutput: string;
   routeDetails: string[][];
-  receipt: Pick<ReceiptObligations, "intermediate" | "touched">;
+  receipt: Pick<ReceiptObligations, "atomicPlan" | "intermediate" | "touched">;
   permission?: { target: string; spender: string };
 };
 
 export type ExecutionImplementation = {
-  plan: (prepared: PrepareExecutionResponse, tokens: string[]) => SwapTerms;
+  plan: (
+    prepared: PrepareExecutionResponse,
+    tokens: string[],
+    slippageBps: number,
+  ) => SwapTerms;
 };
 
 export type TrustedExecution = {
   tokens: string[];
   deployments: Record<string, ExecutionImplementation>;
   executor?: ExecutionImplementation;
+  atomicExecutor?: ExecutionImplementation & {
+    address: string;
+    runtimeCodeHash: string;
+    maxBranches: number;
+    maxOperationsPerBranch: number;
+    maxTotalOperations: number;
+    factory?: string;
+    router?: string;
+    pancakeFactory?: string;
+    pancakeRouter?: string;
+    slipstreamFactory?: string;
+    slipstreamRouter?: string;
+    balancerVault?: string;
+    balancerPools?: string[];
+    balancerPoolsHash?: string;
+    universalRouter?: string;
+    permit2?: string;
+    poolManager?: string;
+    uniswapV4Pools?: Array<{
+      currency0: string;
+      currency1: string;
+      feePips: number;
+      tickSpacing: number;
+      hooks: string;
+    }>;
+  };
 };
 
 export type ExecutionPlan = {
@@ -160,16 +190,19 @@ export function validatePreparation(
   )
     throw new Error("Invalid swap amount or token terms.");
   const allocated = p.allocations.length > 0;
+  const atomic = p.atomicPlan !== undefined;
   if (allocated === !!p.route || p.allocations.length > 2)
     throw new Error("Provide either a direct route or executor allocations.");
-  const implementation = p.route
-    ? trusted.deployments[p.route.deploymentId]
-    : trusted.executor;
+  const implementation = atomic
+    ? trusted.atomicExecutor
+    : p.route
+      ? trusted.deployments[p.route.deploymentId]
+      : trusted.executor;
   if (!implementation)
     throw new Error(
       "Route is not allowed by local token and deployment config.",
     );
-  const terms = implementation.plan(p, trusted.tokens);
+  const terms = implementation.plan(p, trusted.tokens, slippageBps);
   if (!approval && (permission || p.approvalTransaction || p.approvalSpender))
     throw new Error("READY preparation must not contain approval fields.");
   const quoted = uint256Decimal(terms.quotedOutput, "Aggregate output");

@@ -1,4 +1,4 @@
-import { formatUnits, getAddress, type Hex, sliceHex } from "viem";
+import { bytesToHex, formatUnits, getAddress, type Hex, sliceHex } from "viem";
 import {
   type ChainStatus,
   PreparationStatus,
@@ -70,6 +70,18 @@ export function formatPreparation(
     `Total input: ${amount(p.tokenIn, p.amountInAtomic)}`,
     `${approval ? "Proposed swap minimum (not sent by this approval)" : "Minimum output"}: ${amount(p.tokenOut, p.amountOutMinimumAtomic)}`,
   ];
+  if (p.atomicPlan) {
+    lines.push(
+      `Atomic V1 plan ID: ${text(p.atomicPlan.planId ? bytesToHex(p.atomicPlan.planId) : "")}`,
+      `Atomic V1 executor plan hash: ${text(p.atomicPlan.executorPlanHash)}`,
+      `Transaction fingerprint: ${text(p.atomicPlan.transactionFingerprint ? bytesToHex(p.atomicPlan.transactionFingerprint) : "")}`,
+      `Transaction gas limit: ${text(tx.gasLimit)}`,
+    );
+    for (const [index, branch] of p.atomicPlan.branches.entries())
+      lines.push(
+        `Branch ${index + 1} minimum: ${amount(p.tokenOut, branch.amountOutMinimumAtomic)}`,
+      );
+  }
   const routes = p.allocations.length
     ? p.allocations
     : [{ route: p.route, amountInAtomic: p.amountInAtomic }];

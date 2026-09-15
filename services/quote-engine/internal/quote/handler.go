@@ -13,6 +13,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/kuchmenko/epeius/generated/go/epeius/atomic/v1/atomicv1connect"
 	quotev1 "github.com/kuchmenko/epeius/generated/go/epeius/quote/v1"
 	"github.com/kuchmenko/epeius/generated/go/epeius/quote/v1/quotev1connect"
 	"github.com/kuchmenko/epeius/services/quote-engine/internal/config"
@@ -45,10 +46,12 @@ type QuoteCandidate struct {
 
 type Handler struct {
 	quotev1connect.UnimplementedQuoteServiceHandler
+	atomicv1connect.UnimplementedAtomicPlanServiceHandler
 	Chains           map[string]Chain
 	Store            *Store
 	Simulator        Simulator
 	QuoteConcurrency int
+	AtomicLimits     AtomicLimits
 }
 
 type Chain struct {
@@ -63,6 +66,7 @@ type Chain struct {
 	DeploymentVerifiers map[string]deploymentVerifier
 	Preparers           map[string]PreparationStrategy
 	AllocationPreparer  PreparationStrategy
+	AtomicPreparer      PreparationStrategy
 }
 
 var positiveInteger = regexp.MustCompile(`^[1-9][0-9]*$`)

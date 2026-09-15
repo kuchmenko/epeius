@@ -124,6 +124,10 @@ func (q balancerV2Quoter) Verify(ctx context.Context, hash common.Hash) error {
 }
 
 func quoteBalancerPool(ctx context.Context, reader Reader, vault common.Address, poolID common.Hash, tokenIn, tokenOut common.Address, amount *big.Int, hash common.Hash) (*big.Int, bool, error) {
+	return quoteBalancerPoolWithSender(ctx, reader, vault, poolID, tokenIn, tokenOut, amount, hash, balancerQuerySender)
+}
+
+func quoteBalancerPoolWithSender(ctx context.Context, reader Reader, vault common.Address, poolID common.Hash, tokenIn, tokenOut common.Address, amount *big.Int, hash common.Hash, sender common.Address) (*big.Int, bool, error) {
 	tokens, err := balancerPoolTokens(ctx, reader, vault, poolID, hash)
 	if err != nil {
 		return nil, false, errors.New("Balancer V2 pool tokens unavailable")
@@ -137,7 +141,7 @@ func quoteBalancerPool(ctx context.Context, reader Reader, vault common.Address,
 	if !hasIn || !hasOut || tokenIn == poolAddress || tokenOut == poolAddress {
 		return nil, false, nil
 	}
-	data, err := balancerVaultABI.Pack("queryBatchSwap", balancerGivenIn, []balancerBatchSwapStep{{PoolID: poolID, AssetInIndex: big.NewInt(0), AssetOutIndex: big.NewInt(1), Amount: amount, UserData: []byte{}}}, []common.Address{tokenIn, tokenOut}, balancerFunds{Sender: balancerQuerySender, Recipient: balancerQuerySender})
+	data, err := balancerVaultABI.Pack("queryBatchSwap", balancerGivenIn, []balancerBatchSwapStep{{PoolID: poolID, AssetInIndex: big.NewInt(0), AssetOutIndex: big.NewInt(1), Amount: amount, UserData: []byte{}}}, []common.Address{tokenIn, tokenOut}, balancerFunds{Sender: sender, Recipient: sender})
 	if err != nil {
 		return nil, false, errors.New("Balancer V2 quote encoding failed")
 	}
@@ -255,7 +259,7 @@ func (s balancerV2Preparation) Select(_ context.Context, _ storedQuote, _ *quote
 	return executionSelection{route: route, output: output}, ""
 }
 
-func (s balancerV2Preparation) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
+func (s balancerV2Preparation) Build(p *quotev1.PrepareExecutionResponse, _ uint32) (executionPlan, string) {
 	amount, _ := new(big.Int).SetString(p.AmountInAtomic, 10)
 	minimum, _ := new(big.Int).SetString(p.AmountOutMinimumAtomic, 10)
 	if minimum.Sign() == 0 || !validBalancerRoute(p.Route, s.id, s.options) {

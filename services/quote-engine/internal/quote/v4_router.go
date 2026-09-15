@@ -30,7 +30,7 @@ func (s v4RouterPreparation) Select(_ context.Context, _ storedQuote, _ *quotev1
 	return executionSelection{route: route, output: output}, ""
 }
 
-func (s v4RouterPreparation) Build(p *quotev1.PrepareExecutionResponse) (executionPlan, string) {
+func (s v4RouterPreparation) Build(p *quotev1.PrepareExecutionResponse, _ uint32) (executionPlan, string) {
 	pool, ok := s.admit(p.Route)
 	if !ok {
 		return executionPlan{}, "unsupported Uniswap V4 route"

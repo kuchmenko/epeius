@@ -1,5 +1,6 @@
 import type { readExecutionConfig } from "../config";
 import type { TrustedExecution } from "../execution-policy";
+import { atomicExecutorV1 } from "./atomic-v1";
 import { balancer } from "./balancer-v2";
 import { fixedExecutor } from "./fixed-executor";
 import { pancake } from "./pancake-v3";
@@ -46,12 +47,48 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
   tokens,
   settings,
   allocations,
-) =>
-  configureExecution({
+  atomic,
+) => {
+  const atomicExecutor = settings.atomic_executor;
+  if (
+    atomic &&
+    (!atomicExecutor ||
+      Object.keys(atomicExecutor).some(
+        (field) =>
+          ![
+            "address",
+            "runtime_code_hash",
+            "max_branches",
+            "max_operations_per_branch",
+            "max_total_operations",
+            "uniswap_deployment",
+            "pancake_deployment",
+            "slipstream_deployment",
+            "balancer_deployment",
+            "uniswap_v4_deployment",
+          ].includes(field),
+      ) ||
+      ![
+        "address",
+        "runtime_code_hash",
+        "max_branches",
+        "max_operations_per_branch",
+        "max_total_operations",
+      ].every((field) => Object.hasOwn(atomicExecutor, field)) ||
+      ![
+        "uniswap_deployment",
+        "pancake_deployment",
+        "slipstream_deployment",
+        "balancer_deployment",
+        "uniswap_v4_deployment",
+      ].some((field) => Object.hasOwn(atomicExecutor, field)))
+  )
+    throw new Error("Local Atomic V1 executor configuration is invalid.");
+  return configureExecution({
     tokens,
     chainId: settings.chain_id,
     deployments: settings.deployments ?? {},
-    ...(allocations
+    ...(allocations && !atomic
       ? {
           executor: {
             address: settings.executor?.address,
@@ -60,7 +97,24 @@ export const configureChain: Parameters<typeof readExecutionConfig>[3] = (
           },
         }
       : {}),
+    ...(atomic
+      ? {
+          atomicExecutor: {
+            address: atomicExecutor?.address,
+            runtimeCodeHash: atomicExecutor?.runtime_code_hash,
+            maxBranches: atomicExecutor?.max_branches,
+            maxOperationsPerBranch: atomicExecutor?.max_operations_per_branch,
+            maxTotalOperations: atomicExecutor?.max_total_operations,
+            uniswapDeployment: atomicExecutor?.uniswap_deployment,
+            pancakeDeployment: atomicExecutor?.pancake_deployment,
+            slipstreamDeployment: atomicExecutor?.slipstream_deployment,
+            balancerDeployment: atomicExecutor?.balancer_deployment,
+            uniswapV4Deployment: atomicExecutor?.uniswap_v4_deployment,
+          },
+        }
+      : {}),
   });
+};
 
 export function configureExecution(config: {
   tokens: string[];
@@ -70,6 +124,18 @@ export function configureExecution(config: {
     address?: string;
     uniswapDeployment?: string;
     pancakeDeployment?: string;
+  };
+  atomicExecutor?: {
+    address?: string;
+    runtimeCodeHash?: string;
+    maxBranches?: number;
+    maxOperationsPerBranch?: number;
+    maxTotalOperations?: number;
+    uniswapDeployment?: string;
+    pancakeDeployment?: string;
+    slipstreamDeployment?: string;
+    balancerDeployment?: string;
+    uniswapV4Deployment?: string;
   };
 }): TrustedExecution {
   const deployments = Object.fromEntries(
@@ -91,6 +157,11 @@ export function configureExecution(config: {
     ...(config.executor
       ? {
           executor: fixedExecutor(config.executor, deployments),
+        }
+      : {}),
+    ...(config.atomicExecutor
+      ? {
+          atomicExecutor: atomicExecutorV1(config.atomicExecutor, deployments),
         }
       : {}),
   };

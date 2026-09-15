@@ -70,6 +70,13 @@
     "abiSha256": "05c865a6b5e79880c49df7efc4b2c6978400f3f1da5abf70cd04fc421694ba16"
   },
   {
+    "name": "ExecutorV2",
+    "origin": "contracts/src/ExecutorV2.sol; solc 0.8.24, contracts/foundry.toml",
+    "license": "MIT",
+    "sourceSha256": "dc82d2369168699f513d0ef4f67d211dbb5964a9b70227e6c5780d5393fe8110",
+    "abiSha256": "0e440953e20eb1d2c76a27bc911f4691b5f963184f880a59ba85c45aadd589f1"
+  },
+  {
     "name": "LiquiditySeeder",
     "origin": "contracts/src/LiquiditySeeder.sol at 1b57a3f6c7354d96ea2ad4ec95c57c18b4e0cd0b; solc 0.8.24, contracts/foundry.toml",
     "license": "MIT",
