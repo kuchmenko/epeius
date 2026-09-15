@@ -21,7 +21,13 @@ import {
   validateAtomicPlanQuote,
 } from "./atomic-plan-quote";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
-import { type Receipt, VerificationOutcome, verifyReceipt } from "./receipt";
+import {
+  type Receipt,
+  requiresNativeRefundTrace,
+  type TransactionCallTrace,
+  VerificationOutcome,
+  verifyReceipt,
+} from "./receipt";
 
 export type AtomicPlanTradeIO = {
   request: AtomicQuoteRequest;
@@ -51,6 +57,10 @@ export type AtomicPlanTradeIO = {
   ) => Promise<boolean>;
   send: (transaction: UnsignedTransaction) => Promise<string>;
   receipt: (hash: string) => Promise<Receipt>;
+  traceCanonicalTransaction?: (
+    hash: string,
+    receipt: Receipt,
+  ) => Promise<TransactionCallTrace>;
   report: (event: unknown) => void;
   journal: AtomicIntentJournalWriter;
 };
@@ -216,7 +226,14 @@ export async function runAtomicPlanTrade(
     const hash = submission.hash;
     let evidence: ReturnType<typeof verifyReceipt>;
     try {
-      evidence = verifyReceipt(await io.receipt(hash), hash, checked.receipt);
+      const receipt = await io.receipt(hash);
+      evidence = verifyReceipt(receipt, hash, checked.receipt);
+      if (requiresNativeRefundTrace(evidence)) {
+        if (!io.traceCanonicalTransaction)
+          throw new Error("Transaction trace is unavailable.");
+        const trace = await io.traceCanonicalTransaction(hash, receipt);
+        evidence = verifyReceipt(receipt, hash, checked.receipt, trace);
+      }
     } catch {
       if (!(await recordReceipt(io, attempt, hash, "receipt_unavailable")))
         return { kind: ExecutionOutcome.Unknown, transactionHash: hash };

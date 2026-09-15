@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
+  encodeAbiParameters,
+  encodeEventTopics,
   encodeFunctionData,
   erc20Abi,
   hexToBytes,
@@ -11,6 +13,7 @@ import {
   toHex,
   zeroHash,
 } from "viem";
+import { executorV2Abi } from "../../../generated/abi";
 import {
   BranchQuoteSchema,
   PinnedBlockSchema,
@@ -25,6 +28,7 @@ import {
   PreparePlanResponseSchema,
   SimulationEvidenceSchema,
   SimulationStatus,
+  SlipstreamPoolSchema,
   UnsignedPreparationSchema,
   V3PoolSchema,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
@@ -37,7 +41,10 @@ import {
   acceptAtomicCandidate,
   validateAtomicPlanPreparation,
 } from "./atomic-plan-execution";
-import { runAtomicPlanTrade } from "./atomic-plan-trade";
+import {
+  type AtomicPlanTradeIO,
+  runAtomicPlanTrade,
+} from "./atomic-plan-trade";
 import { ExecutionOutcome } from "./execution";
 import {
   atomicV1ExecutorCalldata,
@@ -49,6 +56,9 @@ type JournalTransition = AtomicIntentJournalWriter["transition"];
 
 const fixture = await Bun.file(
   "contracts/fixtures/atomic-v1-candidate.json",
+).json();
+const slipstreamFixture = await Bun.file(
+  "contracts/fixtures/atomic-v1-slipstream.json",
 ).json();
 const word = (value: string | bigint | number) =>
   hexToBytes(padHex(toHex(BigInt(value)), { size: 32 }));
@@ -63,82 +73,110 @@ const executor = {
   maxTotalOperations: 12,
   factory: fixture.factory,
   router: fixture.router,
+  slipstreamFactory: slipstreamFixture.factory,
+  slipstreamRouter: slipstreamFixture.router,
 } as const;
 const transactionHash = `0x${"d".repeat(64)}`;
 
-function candidate() {
-  const tokens = [fixture.tokenIn, fixture.intermediateToken, fixture.tokenOut];
+function candidate(kind: 1 | 3 = 1) {
+  const source = kind === 3 ? slipstreamFixture : fixture;
+  const tokens = [source.tokenIn, source.intermediateToken, source.tokenOut];
+  const selectors = kind === 3 ? source.tickSpacings : source.fees;
   return create(PlanCandidateSchema, {
-    candidateId: hexToBytes(fixture.candidateId),
+    candidateId: hexToBytes(source.candidateId),
     program: create(PlanProgramSchema, {
       formatVersion: 1,
-      chainId: word(fixture.chainId),
-      tokenIn: address(fixture.tokenIn),
-      tokenOut: address(fixture.tokenOut),
-      amountIn: word(fixture.amountIn),
+      chainId: word(source.chainId),
+      tokenIn: address(source.tokenIn),
+      tokenOut: address(source.tokenOut),
+      amountIn: word(source.amountIn),
       branches: [
         create(PlanBranchSchema, {
-          amountIn: word(fixture.amountIn),
-          operations: fixture.fees.map((fee: number, index: number) =>
+          amountIn: word(source.amountIn),
+          operations: selectors.map((selector: number, index: number) =>
             create(PoolOperationSchema, {
               tokenIn: address(tokens[index]),
               tokenOut: address(tokens[index + 1]),
-              pool: {
-                case: "uniswapV3",
-                value: create(V3PoolSchema, {
-                  factory: address(fixture.factory),
-                  router: address(fixture.router),
-                  pool: address(fixture.pools[index]),
-                  feePips: fee,
-                }),
-              },
+              pool:
+                kind === 3
+                  ? {
+                      case: "slipstreamInitial" as const,
+                      value: create(SlipstreamPoolSchema, {
+                        factory: address(source.factory),
+                        router: address(source.router),
+                        pool: address(source.pools[index]),
+                        tickSpacing: selector,
+                      }),
+                    }
+                  : {
+                      case: "uniswapV3" as const,
+                      value: create(V3PoolSchema, {
+                        factory: address(source.factory),
+                        router: address(source.router),
+                        pool: address(source.pools[index]),
+                        feePips: selector,
+                      }),
+                    },
             }),
           ),
         }),
       ],
     }),
     quoteBlock: create(PinnedBlockSchema, {
-      number: word(fixture.quoteBlockNumber),
-      hash: hexToBytes(fixture.quoteBlockHash),
+      number: word(source.quoteBlockNumber),
+      hash: hexToBytes(source.quoteBlockHash),
     }),
     branchQuotes: [
       create(BranchQuoteSchema, {
-        operationOutputs: fixture.operationOutputs.map(word),
+        operationOutputs: source.operationOutputs.map(word),
       }),
     ],
   });
 }
 
-function quote(id: number) {
+function quote(id: number, kind: 1 | 3 = 1) {
   return create(PlanQuoteResponseSchema, {
     quoteId: new Uint8Array(32).fill(id),
-    candidates: [candidate()],
+    candidates: [candidate(kind)],
     searchComplete: true,
   });
 }
 
-function readyResponse(selected: ReturnType<typeof acceptAtomicCandidate>) {
+function readyResponse(
+  selected: ReturnType<typeof acceptAtomicCandidate>,
+  kind: 1 | 3 = 1,
+) {
+  const source = kind === 3 ? slipstreamFixture : fixture;
   const program = selected.terms.program;
   if (!program) throw new Error("test program missing");
   const data = atomicV1ExecutorCalldata({
-    tokenIn: fixture.tokenIn,
-    tokenOut: fixture.tokenOut,
-    amountIn: BigInt(fixture.amountIn),
+    tokenIn: source.tokenIn,
+    tokenOut: source.tokenOut,
+    amountIn: BigInt(source.amountIn),
     minAmountOut: selected.minimum,
     deadline: selected.deadline,
     branches: [
       {
-        amountIn: BigInt(fixture.amountIn),
+        amountIn: BigInt(source.amountIn),
         minAmountOut: selected.minimum,
         operations: program.branches[0].operations.map((operation) => {
-          if (operation.pool.case !== "uniswapV3")
+          if (
+            operation.pool.case !== "uniswapV3" &&
+            operation.pool.case !== "slipstreamInitial"
+          )
             throw new Error("test operation missing");
           return {
-            kind: 1,
+            kind,
             tokenOut:
               `0x${Buffer.from(operation.tokenOut ?? []).toString("hex")}` as const,
-            fee: operation.pool.value.feePips ?? 0,
-            tickSpacing: 0,
+            fee:
+              operation.pool.case === "uniswapV3"
+                ? (operation.pool.value.feePips ?? 0)
+                : 0,
+            tickSpacing:
+              operation.pool.case === "slipstreamInitial"
+                ? (operation.pool.value.tickSpacing ?? 0)
+                : 0,
             poolId: zeroHash,
           };
         }),
@@ -146,7 +184,7 @@ function readyResponse(selected: ReturnType<typeof acceptAtomicCandidate>) {
     ],
   });
   const transaction = create(PlanTransactionSchema, {
-    chainId: word(fixture.chainId),
+    chainId: word(source.chainId),
     from: address(signer),
     to: address(executor.address),
     data: hexToBytes(data),
@@ -155,7 +193,7 @@ function readyResponse(selected: ReturnType<typeof acceptAtomicCandidate>) {
   });
   const fingerprint = atomicV1TransactionFingerprint({
     planId: selected.planId,
-    chainId: BigInt(fixture.chainId),
+    chainId: BigInt(source.chainId),
     from: signer,
     to: executor.address,
     value: 0n,
@@ -182,7 +220,10 @@ function readyResponse(selected: ReturnType<typeof acceptAtomicCandidate>) {
       status: SimulationStatus.PASSED,
       branchResults: [
         create(BranchQuoteSchema, {
-          operationOutputs: [word(23), word(43)],
+          operationOutputs:
+            kind === 3
+              ? source.operationOutputs.map(word)
+              : [word(23), word(43)],
         }),
       ],
       observedAtUnix: word(1_999_999_801),
@@ -216,7 +257,11 @@ function approvalResponse() {
   });
 }
 
-function harness(responses: Array<"approval" | "ready"> = ["ready"]) {
+function harness(
+  responses: Array<"approval" | "ready"> = ["ready"],
+  kind: 1 | 3 = 1,
+) {
+  const source = kind === 3 ? slipstreamFixture : fixture;
   const calls: string[] = [];
   const preparedResponses: PreparePlanResponse[] = [];
   const approvalFlow = responses[0] === "approval";
@@ -229,10 +274,10 @@ function harness(responses: Array<"approval" | "ready"> = ["ready"]) {
     selected: () => selected,
     io: {
       request: {
-        chainId: BigInt(fixture.chainId),
-        tokenIn: fixture.tokenIn,
-        tokenOut: fixture.tokenOut,
-        amountIn: BigInt(fixture.amountIn),
+        chainId: BigInt(source.chainId),
+        tokenIn: source.tokenIn,
+        tokenOut: source.tokenOut,
+        amountIn: BigInt(source.amountIn),
       },
       candidateIndex: 0,
       signer,
@@ -240,7 +285,7 @@ function harness(responses: Array<"approval" | "ready"> = ["ready"]) {
       slippageBps: 50,
       quote: async () => {
         calls.push("quote");
-        const value = quote(++quotes);
+        const value = quote(++quotes, kind);
         selected = acceptAtomicCandidate(
           value.candidates[0],
           signer,
@@ -253,17 +298,19 @@ function harness(responses: Array<"approval" | "ready"> = ["ready"]) {
         calls.push("prepare");
         const next = responses.shift();
         const response =
-          next === "approval" ? approvalResponse() : readyResponse(selected);
+          next === "approval"
+            ? approvalResponse()
+            : readyResponse(selected, kind);
         preparedResponses.push(response);
         return response;
       },
       recheck: async () => {
         calls.push("recheck");
-        return readyResponse(selected);
+        return readyResponse(selected, kind);
       },
       chainId: async () => {
         calls.push("chainId");
-        return toHex(BigInt(fixture.chainId));
+        return toHex(BigInt(source.chainId));
       },
       confirm: async (kind: "approval" | "swap") => {
         calls.push(`confirm:${kind}`);
@@ -309,8 +356,135 @@ function harness(responses: Array<"approval" | "ready"> = ["ready"]) {
           } as unknown as Receipt;
         throw new Error("fixture receipt unavailable");
       },
+      traceCanonicalTransaction:
+        undefined as AtomicPlanTradeIO["traceCanonicalTransaction"],
       report: (_event: unknown) => {},
     },
+  };
+}
+
+function slipstreamReceipt(
+  selected: ReturnType<typeof acceptAtomicCandidate>,
+): Receipt {
+  const prepared = validateAtomicPlanPreparation(
+    readyResponse(selected, 3),
+    selected,
+    executor,
+  );
+  if (prepared.kind !== "swap" || !prepared.receipt.atomicPlan)
+    throw new Error("test Slipstream preparation missing");
+  const plan = prepared.receipt.atomicPlan;
+  const operationOutputs = [83n, 61n];
+  const logs: Receipt["logs"] = [
+    {
+      address: slipstreamFixture.tokenIn,
+      topics: encodeEventTopics({
+        abi: erc20Abi,
+        eventName: "Transfer",
+        args: { from: signer, to: slipstreamFixture.pools[0] },
+      }) as string[],
+      data: encodeAbiParameters(
+        [{ type: "uint256" }],
+        [BigInt(slipstreamFixture.amountIn)],
+      ),
+      transactionHash,
+    },
+    {
+      address: slipstreamFixture.tokenOut,
+      topics: encodeEventTopics({
+        abi: erc20Abi,
+        eventName: "Transfer",
+        args: { from: slipstreamFixture.pools[1], to: signer },
+      }) as string[],
+      data: encodeAbiParameters([{ type: "uint256" }], [operationOutputs[1]]),
+      transactionHash,
+    },
+  ];
+  let previous = BigInt(slipstreamFixture.amountIn);
+  for (const [index, operation] of plan.branches[0].operations.entries()) {
+    logs.push({
+      address: executor.address,
+      topics: encodeEventTopics({
+        abi: executorV2Abi,
+        eventName: "OperationExecuted",
+        args: {
+          planHash: plan.planHash as `0x${string}`,
+          branchIndex: 0n,
+          operationIndex: BigInt(index),
+        },
+      }) as string[],
+      data: encodeAbiParameters(
+        [
+          { type: "uint8" },
+          { type: "address" },
+          { type: "address" },
+          { type: "uint256" },
+          { type: "uint256" },
+        ],
+        [
+          3,
+          operation.tokenIn as `0x${string}`,
+          operation.tokenOut as `0x${string}`,
+          previous,
+          operationOutputs[index],
+        ],
+      ),
+      transactionHash,
+    });
+    previous = operationOutputs[index];
+  }
+  logs.push(
+    {
+      address: executor.address,
+      topics: encodeEventTopics({
+        abi: executorV2Abi,
+        eventName: "BranchExecuted",
+        args: { planHash: plan.planHash as `0x${string}`, branchIndex: 0n },
+      }) as string[],
+      data: encodeAbiParameters(
+        [{ type: "uint256" }, { type: "uint256" }],
+        [BigInt(slipstreamFixture.amountIn), operationOutputs[1]],
+      ),
+      transactionHash,
+    },
+    {
+      address: executor.address,
+      topics: encodeEventTopics({
+        abi: executorV2Abi,
+        eventName: "NativeRefunded",
+        args: { planHash: plan.planHash as `0x${string}`, caller: signer },
+      }) as string[],
+      data: encodeAbiParameters([{ type: "uint256" }], [7n]),
+      transactionHash,
+    },
+    {
+      address: executor.address,
+      topics: encodeEventTopics({
+        abi: executorV2Abi,
+        eventName: "PlanExecuted",
+        args: {
+          planHash: plan.planHash as `0x${string}`,
+          caller: signer,
+          tokenOut: slipstreamFixture.tokenOut,
+        },
+      }) as string[],
+      data: encodeAbiParameters(
+        [{ type: "address" }, { type: "uint256" }, { type: "uint256" }],
+        [
+          slipstreamFixture.tokenIn,
+          BigInt(slipstreamFixture.amountIn),
+          operationOutputs[1],
+        ],
+      ),
+      transactionHash,
+    },
+  );
+  return {
+    transactionHash,
+    status: "0x1",
+    blockHash: `0x${"c".repeat(64)}`,
+    blockNumber: "0x7c",
+    logs,
   };
 }
 
@@ -334,6 +508,67 @@ test("Atomic plan trade selects explicitly and rechecks frozen bytes before send
     "receipt",
     "journal:receipt_unavailable",
   ]);
+});
+
+test("Slipstream Atomic trade journals economic pass only after accepted native trace", async () => {
+  const value = harness(["ready"], 3);
+  value.io.receipt = async () => {
+    value.calls.push("receipt");
+    return slipstreamReceipt(value.selected());
+  };
+  value.io.traceCanonicalTransaction = async (hash, receipt) => {
+    value.calls.push("trace");
+    expect(hash).toBe(transactionHash);
+    expect(receipt.transactionHash).toBe(transactionHash);
+    return {
+      type: "CALL",
+      from: signer,
+      to: executor.address,
+      value: "0x0",
+      input: "0x661983c5",
+      calls: [
+        {
+          type: "CALL",
+          from: executor.address,
+          to: signer,
+          value: "0x7",
+          input: "0x",
+        },
+      ],
+    };
+  };
+  const reports: unknown[] = [];
+  value.io.report = (event) => reports.push(event);
+  expect(await runAtomicPlanTrade(value.io)).toEqual({
+    kind: ExecutionOutcome.SwapVerified,
+    transactionHash,
+  });
+  expect(value.calls.slice(-3)).toEqual([
+    "receipt",
+    "trace",
+    "journal:receipt_passed",
+  ]);
+  expect(value.calls.indexOf("trace")).toBeLessThan(
+    value.calls.indexOf("journal:receipt_passed"),
+  );
+  expect(reports.at(-1)).toMatchObject({
+    transactionHash,
+    verification: { outcome: VerificationOutcome.Passed },
+  });
+});
+
+test("Slipstream Atomic trade journals unavailable when native trace is unsupported", async () => {
+  const value = harness(["ready"], 3);
+  value.io.receipt = async () => {
+    value.calls.push("receipt");
+    return slipstreamReceipt(value.selected());
+  };
+  expect(await runAtomicPlanTrade(value.io)).toEqual({
+    kind: ExecutionOutcome.Unknown,
+    transactionHash,
+  });
+  expect(value.calls).toContain("journal:receipt_unavailable");
+  expect(value.calls).not.toContain("journal:receipt_passed");
 });
 
 test("Atomic plan trade obtains a new quote after exact approval", async () => {

@@ -515,6 +515,7 @@ export async function main(rawArgs: string[]) {
               chainId: context.rpc.chainId,
               send: context.wallet.send,
               receipt: context.rpc.waitCanonicalReceipt,
+              traceCanonicalTransaction: context.rpc.traceCanonicalTransaction,
               report: (event) => console.log(JSON.stringify(event)),
               confirm: async (kind, transaction) => {
                 if (!(await verifyAtomicExecutor(context.rpc, trustedExecutor)))

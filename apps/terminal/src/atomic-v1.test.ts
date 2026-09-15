@@ -34,7 +34,11 @@ import {
   atomicV1PlanId,
   atomicV1TransactionFingerprint,
 } from "./protocols/atomic-v1";
-import { type Receipt, verifyReceipt } from "./receipt";
+import {
+  type Receipt,
+  type TransactionCallTrace,
+  verifyReceipt,
+} from "./receipt";
 
 type Fixture = {
   chainId: string;
@@ -948,6 +952,107 @@ test("Atomic V1 receipt requires ordered exact executor events and token deltas"
     outcome: "unavailable",
     reason: expect.stringContaining("no transaction-specific native trace"),
   });
+  const refundFrame: TransactionCallTrace = {
+    type: "CALL",
+    from: fixture.executor,
+    to: fixture.sender,
+    value: "0x1",
+    input: "0x",
+  };
+  const trace: TransactionCallTrace = {
+    type: "CALL",
+    from: fixture.sender,
+    to: fixture.executor,
+    value: "0x0",
+    input: "0x661983c5",
+    calls: [
+      {
+        type: "CALL",
+        from: fixture.executor,
+        to: fixture.router,
+        value: "0x0",
+        input: "0x1234",
+      },
+      refundFrame,
+    ],
+  };
+  expect(
+    verifyReceipt(
+      { ...receipt, logs: withNativeRefund },
+      hash,
+      obligations.receipt,
+      trace,
+    ),
+  ).toMatchObject({
+    outcome: "passed",
+    reason: expect.stringContaining("native refund trace"),
+  });
+  const changed = (
+    change: (value: TransactionCallTrace) => void,
+  ): TransactionCallTrace => {
+    const value = structuredClone(trace);
+    change(value);
+    return value;
+  };
+  const invalidTraces = [
+    changed((value) => {
+      value.type = "DELEGATECALL";
+    }),
+    changed((value) => {
+      value.from = fixture.router;
+    }),
+    changed((value) => {
+      value.to = fixture.router;
+    }),
+    changed((value) => {
+      value.value = "0x1";
+    }),
+    changed((value) => {
+      value.error = "execution reverted";
+    }),
+    changed((value) => {
+      const calls = value.calls as TransactionCallTrace[];
+      calls[1].value = "0x0";
+    }),
+    changed((value) => {
+      const calls = value.calls as TransactionCallTrace[];
+      calls[1].value = "0x2";
+    }),
+    changed((value) => {
+      const calls = value.calls as TransactionCallTrace[];
+      calls.push(structuredClone(calls[1]));
+    }),
+    changed((value) => {
+      const calls = value.calls as TransactionCallTrace[];
+      calls[1].error = "execution reverted";
+    }),
+    changed((value) => {
+      const calls = value.calls as TransactionCallTrace[];
+      calls[1].input = "0x12";
+    }),
+    changed((value) => {
+      value.calls = [{ malformed: true }];
+    }),
+    changed((value) => {
+      const calls = value.calls as TransactionCallTrace[];
+      calls[1].type = "STATICCALL";
+    }),
+    changed((value) => {
+      const calls = value.calls as TransactionCallTrace[];
+      calls[0].error = "execution reverted";
+      calls[0].calls = [calls[1]];
+      value.calls = [calls[0]];
+    }),
+  ];
+  for (const invalid of invalidTraces)
+    expect(
+      verifyReceipt(
+        { ...receipt, logs: withNativeRefund },
+        hash,
+        obligations.receipt,
+        invalid,
+      ).outcome,
+    ).toBe("unavailable");
   expect(
     verifyReceipt(
       {

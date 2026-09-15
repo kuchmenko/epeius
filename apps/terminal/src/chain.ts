@@ -10,7 +10,7 @@ import {
   keccak256,
   zeroHash,
 } from "viem";
-import type { Receipt } from "./receipt";
+import type { Receipt, TransactionCallTrace } from "./receipt";
 
 const validHash = (value: string) => value.length === 66 && isHash(value);
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -112,6 +112,50 @@ export function readChain(rpcUrl: string, signal: AbortSignal) {
         await Bun.sleep(1000);
       }
       throw new Error("Receipt timeout.");
+    },
+    traceCanonicalTransaction: async (
+      hash: string,
+      receipt: Receipt,
+    ): Promise<TransactionCallTrace> => {
+      if (
+        !validHash(hash) ||
+        !same(receipt.transactionHash, hash) ||
+        !receipt.blockHash ||
+        !validHash(receipt.blockHash) ||
+        !receipt.blockNumber ||
+        !isHex(receipt.blockNumber, { strict: true }) ||
+        receipt.blockNumber.length <= 2
+      )
+        throw new Error(
+          "Receipt identity is unavailable for transaction trace.",
+        );
+      const trace = (await rpc("debug_traceTransaction", [
+        hash,
+        { tracer: "callTracer" },
+      ])) as TransactionCallTrace;
+      const confirmed = (await rpc("eth_getTransactionReceipt", [
+        hash,
+      ])) as Receipt | null;
+      if (
+        !confirmed ||
+        !same(confirmed.transactionHash, hash) ||
+        !confirmed.blockHash ||
+        !same(confirmed.blockHash, receipt.blockHash) ||
+        !confirmed.blockNumber ||
+        !same(confirmed.blockNumber, receipt.blockNumber)
+      )
+        throw new Error("Receipt changed after transaction trace.");
+      const block = (await rpc("eth_getBlockByNumber", [
+        receipt.blockNumber,
+        false,
+      ])) as { hash?: string } | null;
+      if (
+        !block?.hash ||
+        !validHash(block.hash) ||
+        !same(block.hash, receipt.blockHash)
+      )
+        throw new Error("Receipt block changed after transaction trace.");
+      return trace;
     },
   };
 }

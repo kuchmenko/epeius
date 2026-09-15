@@ -4,7 +4,10 @@ import {
   encodeEventTopics,
   erc20Abi,
   type Hex,
+  hexToBigInt,
   isAddress,
+  isHex,
+  toHex,
 } from "viem";
 import { executorV2Abi } from "../../../generated/abi";
 
@@ -57,6 +60,16 @@ export type ReceiptObligations = {
   };
 };
 
+export type TransactionCallTrace = {
+  type?: unknown;
+  from?: unknown;
+  to?: unknown;
+  value?: unknown;
+  input?: unknown;
+  error?: unknown;
+  calls?: unknown;
+};
+
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const transfer = encodeEventTopics({ abi: erc20Abi, eventName: "Transfer" })[0];
 const operationExecuted = encodeEventTopics({
@@ -75,6 +88,8 @@ const planExecuted = encodeEventTopics({
   abi: executorV2Abi,
   eventName: "PlanExecuted",
 })[0];
+const nativeRefundTraceRequiredReason =
+  "Atomic V1 native refund event is valid, but no transaction-specific native trace proves delivery.";
 
 export type SwapVerification =
   | {
@@ -99,6 +114,7 @@ export function verifyReceipt(
   receipt: Receipt,
   hash: string,
   obligations: ReceiptObligations,
+  trace?: TransactionCallTrace,
 ): SwapVerification {
   if (!same(receipt.transactionHash, hash))
     return {
@@ -167,6 +183,7 @@ export function verifyReceipt(
     ].some(({ token, owner }) => delta(token, owner) !== 0n);
     let atomicEventValid = true;
     let nativeRefundSeen = false;
+    let nativeRefundAmount = 0n;
     if (obligations.atomicPlan) {
       const events = receipt.logs.filter(
         (log) =>
@@ -272,6 +289,7 @@ export function verifyReceipt(
               same(refund.args.caller, obligations.recipient) &&
               refund.args.amount > 0n;
             nativeRefundSeen = atomicEventValid;
+            nativeRefundAmount = refund.args.amount;
             cursor++;
           }
           const planEvent = events[cursor];
@@ -304,10 +322,21 @@ export function verifyReceipt(
       output >= BigInt(obligations.amountOutMinimumAtomic) &&
       !residue &&
       atomicEventValid;
+    const nativeRefundDelivered =
+      nativeRefundSeen &&
+      trace !== undefined &&
+      validNativeRefundTrace(
+        trace,
+        obligations.recipient,
+        obligations.atomicPlan?.executor ?? "",
+        nativeRefundAmount,
+      );
     return {
       outcome:
         tokenProofPassed && nativeRefundSeen
-          ? VerificationOutcome.Unavailable
+          ? nativeRefundDelivered
+            ? VerificationOutcome.Passed
+            : VerificationOutcome.Unavailable
           : tokenProofPassed
             ? VerificationOutcome.Passed
             : VerificationOutcome.Failed,
@@ -317,7 +346,9 @@ export function verifyReceipt(
       ...(obligations.touched ? { touchedTokenOwnerDeltas: touched } : {}),
       reason:
         tokenProofPassed && nativeRefundSeen
-          ? "Atomic V1 native refund event is valid, but this receipt has no transaction-specific native trace or state diff to prove delivery."
+          ? nativeRefundDelivered
+            ? "Ordered Atomic V1 executor events, standard ERC20 Transfer net deltas, and exact transaction-specific native refund trace."
+            : nativeRefundTraceRequiredReason
           : obligations.atomicPlan
             ? "Ordered Atomic V1 executor events and standard ERC20 Transfer net deltas; no pre-existing balances counted."
             : "Exact-transaction standard ERC20 Transfer net deltas; no pre-existing balances counted.",
@@ -328,4 +359,87 @@ export function verifyReceipt(
       reason: "Receipt cannot establish standard ERC20 transfer invariants.",
     };
   }
+}
+
+export function requiresNativeRefundTrace(
+  verification: SwapVerification,
+): boolean {
+  return (
+    verification.outcome === VerificationOutcome.Unavailable &&
+    verification.reason === nativeRefundTraceRequiredReason
+  );
+}
+
+function validNativeRefundTrace(
+  root: TransactionCallTrace,
+  caller: string,
+  executor: string,
+  amount: bigint,
+): boolean {
+  if (
+    !validCallFrame(root) ||
+    root.type !== "CALL" ||
+    !same(root.from, caller) ||
+    !same(root.to, executor) ||
+    root.value !== "0x0" ||
+    root.error !== undefined
+  )
+    return false;
+  const refunds: Array<{
+    frame: TransactionCallTrace;
+    ancestorsPassed: boolean;
+  }> = [];
+  const visit = (frame: TransactionCallTrace, ancestorsPassed: boolean) => {
+    if (!validCallFrame(frame)) throw new Error("Malformed call trace.");
+    const passed = ancestorsPassed && frame.error === undefined;
+    if (
+      frame !== root &&
+      frame.type === "CALL" &&
+      same(frame.from, executor) &&
+      same(frame.to, caller) &&
+      frame.input === "0x"
+    )
+      refunds.push({ frame, ancestorsPassed: passed });
+    for (const child of frame.calls ?? []) visit(child, passed);
+  };
+  try {
+    visit(root, true);
+  } catch {
+    return false;
+  }
+  return (
+    refunds.length === 1 &&
+    refunds[0].ancestorsPassed &&
+    refunds[0].frame.value === toHex(amount)
+  );
+}
+
+function validCallFrame(
+  frame: TransactionCallTrace,
+): frame is TransactionCallTrace & {
+  type: string;
+  from: string;
+  to: string;
+  value: Hex;
+  input: Hex;
+  calls?: TransactionCallTrace[];
+} {
+  if (
+    typeof frame !== "object" ||
+    frame === null ||
+    typeof frame.type !== "string" ||
+    typeof frame.from !== "string" ||
+    typeof frame.to !== "string" ||
+    typeof frame.value !== "string" ||
+    typeof frame.input !== "string" ||
+    !isAddress(frame.from, { strict: false }) ||
+    !isAddress(frame.to, { strict: false }) ||
+    !isHex(frame.value, { strict: true }) ||
+    !isHex(frame.input, { strict: true }) ||
+    toHex(hexToBigInt(frame.value)) !== frame.value.toLowerCase() ||
+    (frame.error !== undefined && typeof frame.error !== "string") ||
+    (frame.calls !== undefined && !Array.isArray(frame.calls))
+  )
+    return false;
+  return true;
 }

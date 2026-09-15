@@ -112,6 +112,117 @@ test("RPC preserves raw receipt, null polling and canonical block identity witho
   }
 });
 
+test("transaction trace is hash-bound and followed by canonical receipt identity recheck", async () => {
+  const requests: Array<{ method: string; params: unknown[] }> = [];
+  const receipt = {
+    transactionHash: hash,
+    status: "0x1",
+    blockHash,
+    blockNumber: "0x10",
+    logs: [],
+  };
+  const trace = {
+    type: "CALL",
+    from: `0x${"1".repeat(40)}`,
+    to: `0x${"2".repeat(40)}`,
+    value: "0x0",
+    input: "0x12",
+  };
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const body = await request.json();
+      requests.push(body);
+      return Response.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result:
+          body.method === "debug_traceTransaction"
+            ? trace
+            : body.method === "eth_getTransactionReceipt"
+              ? receipt
+              : { hash: blockHash },
+      });
+    },
+  });
+  try {
+    expect(
+      await readChain(
+        server.url.href,
+        new AbortController().signal,
+      ).traceCanonicalTransaction(hash, receipt),
+    ).toEqual(trace);
+    expect(requests.map(({ method, params }) => ({ method, params }))).toEqual([
+      {
+        method: "debug_traceTransaction",
+        params: [hash, { tracer: "callTracer" }],
+      },
+      { method: "eth_getTransactionReceipt", params: [hash] },
+      { method: "eth_getBlockByNumber", params: ["0x10", false] },
+    ]);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("transaction trace fails closed when RPC or canonical identity changes", async () => {
+  const receipt = {
+    transactionHash: hash,
+    status: "0x1",
+    blockHash,
+    blockNumber: "0x10",
+    logs: [],
+  };
+  for (const mode of [
+    "unsupported",
+    "transaction",
+    "receipt-block",
+    "canonical-block",
+  ] as const) {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const body = await request.json();
+        if (mode === "unsupported" && body.method === "debug_traceTransaction")
+          return Response.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            error: { code: -32601, message: "method unavailable" },
+          });
+        const result =
+          body.method === "debug_traceTransaction"
+            ? {}
+            : body.method === "eth_getTransactionReceipt"
+              ? {
+                  ...receipt,
+                  ...(mode === "transaction"
+                    ? { transactionHash: `0x${"ee".repeat(32)}` }
+                    : mode === "receipt-block"
+                      ? { blockHash: `0x${"dd".repeat(32)}` }
+                      : {}),
+                }
+              : {
+                  hash:
+                    mode === "canonical-block"
+                      ? `0x${"dd".repeat(32)}`
+                      : blockHash,
+                };
+        return Response.json({ jsonrpc: "2.0", id: body.id, result });
+      },
+    });
+    try {
+      expect(
+        readChain(
+          server.url.href,
+          new AbortController().signal,
+        ).traceCanonicalTransaction(hash, receipt),
+      ).rejects.toThrow();
+    } finally {
+      server.stop(true);
+    }
+  }
+});
+
 test("canonical polling rejects short, odd and zero hashes before reading the block", async () => {
   const unsealed = [
     undefined,
