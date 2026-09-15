@@ -213,6 +213,7 @@ function harness(t: Awaited<ReturnType<typeof fixture>>) {
     attempt: t.attempt,
     executor,
     policy: finalityPolicy,
+    now: () => 0,
     signal: new AbortController().signal,
     chain,
     verifyExecutor: async () => true,
@@ -270,12 +271,19 @@ test("recovery submits exact stored bytes once only after two absent/hash and no
   const t = await fixture("receipt_unavailable");
   try {
     const h = harness(t);
+    let finalizedPreflights = 0;
+    const blockByNumber = h.io.chain.blockByNumber;
+    h.io.chain.blockByNumber = async (tag) => {
+      if (tag === "finalized") finalizedPreflights++;
+      return blockByNumber(tag);
+    };
     expect(await runAtomicRecovery(h.io)).toMatchObject({
       kind: ExecutionOutcome.ApprovalConfirmed,
       transactionHash: h.hash,
     });
     expect(h.submits()).toBe(1);
     expect(h.confirms()).toBe(1);
+    expect(finalizedPreflights).toBe(2);
     const states = (await readFile(t.path, "utf8"))
       .trim()
       .split("\n")
@@ -287,6 +295,58 @@ test("recovery submits exact stored bytes once only after two absent/hash and no
     ]);
   } finally {
     await t.cleanup();
+  }
+});
+
+test("recovery repeats finality preflight after consent before raw submission", async () => {
+  for (const mode of [
+    "anchor_changed",
+    "finalized_changed",
+    "capability_expired",
+  ] as const) {
+    const t = await fixture("receipt_unavailable");
+    try {
+      const h = harness(t);
+      let anchorReads = 0;
+      let finalizedReads = 0;
+      const blockByNumber = h.io.chain.blockByNumber;
+      h.io.chain.blockByNumber = async (tag) => {
+        const block = await blockByNumber(tag);
+        if (mode === "anchor_changed" && tag === "0x0" && ++anchorReads === 2)
+          return { ...block, hash: `0x${"9".repeat(64)}` };
+        if (
+          mode === "finalized_changed" &&
+          tag === "finalized" &&
+          ++finalizedReads === 2
+        )
+          throw new Error("finalized tag unavailable after consent");
+        return block;
+      };
+      let now = 0;
+      h.io.now = () => now;
+      h.io.confirm = async () => {
+        now =
+          mode === "capability_expired"
+            ? Date.parse(finalityPolicy.capabilityValidUntil)
+            : now;
+        return true;
+      };
+      await expect(runAtomicRecovery(h.io)).rejects.toThrow(
+        mode === "anchor_changed"
+          ? "mapping changed"
+          : mode === "finalized_changed"
+            ? "finalized tag unavailable"
+            : "capability",
+      );
+      expect(h.submits()).toBe(0);
+      const states = (await readFile(t.path, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).state);
+      expect(states).not.toContain("recovery_handoff_started");
+    } finally {
+      await t.cleanup();
+    }
   }
 });
 
@@ -675,5 +735,58 @@ test("recovery CLI uses explicit local config and RPC without engine, wallet, or
   } finally {
     server.stop(true);
     await rm(t.directory, { recursive: true, force: true });
+  }
+});
+
+test("recovery CLI reports historical state without chain work when current policy is missing or expired", async () => {
+  for (const mode of ["missing", "expired"] as const) {
+    const t = await fixture("submission_unknown");
+    await t.journal.close();
+    const config = join(t.directory, "epeius.toml");
+    const expired =
+      mode === "expired"
+        ? `\n[chains.local.finality]\npolicy_version='epeius-finality-v1'\nfinality_method='ethereum_consensus'\ncompletion_tag='finalized'\nsafe_signal='ethereum_safe'\nnetwork_anchor_number=0\nnetwork_anchor_hash='${finalityPolicy.networkAnchorHash}'\nrpc_source_id='expired-source'\ncapability_record='expired-record'\ncapability_valid_until='2020-01-01T00:00:00Z'\nrequest_timeout_ms=100\npoll_interval_ms=1\nwait_timeout_ms=100\nstalled_after_ms=50\nmax_response_age_ms=100\n`
+        : "";
+    await Bun.write(config, `[chains.local]\nchain_id=1${expired}`);
+    try {
+      const child = Bun.spawn(
+        [
+          "bun",
+          "apps/terminal/src/main.ts",
+          "recover-atomic",
+          "--config",
+          config,
+          "--chain",
+          "local",
+          "--atomic-journal",
+          t.path,
+          "--attempt-id",
+          t.attempt.current.attemptId,
+        ],
+        {
+          cwd: join(import.meta.dir, "../../.."),
+          env: { PATH: process.env.PATH ?? "" },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [stdout, stderr, exit] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(exit).toBe(1);
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout)).toMatchObject({
+        recovery: "historical_not_fresh",
+        attemptId: t.attempt.current.attemptId,
+        state: "submission_unknown",
+        transactionHash: t.attempt.signedEnvelope.transactionHash,
+        fresh: false,
+        outcome: ExecutionOutcome.Unknown,
+      });
+    } finally {
+      await rm(t.directory, { recursive: true, force: true });
+    }
   }
 });

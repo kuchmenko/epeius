@@ -4,6 +4,8 @@ import { readSettings } from "./config";
 export const FINALITY_POLICY_VERSION = "epeius-finality-v1";
 export const FINALITY_VERIFIER_VERSION = "epeius-finality-verifier-v1";
 
+export class AtomicFinalityPolicyUnavailableError extends Error {}
+
 export type FinalityMethod =
   | "ethereum_consensus"
   | "op_l1_derivation"
@@ -100,7 +102,9 @@ export function parseAtomicFinalityPolicy(
   now = Date.now(),
 ): AtomicFinalityPolicy {
   if (!plainObject(value))
-    throw new Error("Atomic finality configuration is required.");
+    throw new AtomicFinalityPolicyUnavailableError(
+      "Atomic finality configuration is required.",
+    );
   if (Object.keys(value).some((key) => !fields.includes(key as never)))
     throw new Error("Atomic finality configuration contains unknown fields.");
   if (!fields.every((field) => Object.hasOwn(value, field))) {
@@ -140,7 +144,9 @@ export function parseAtomicFinalityPolicy(
   );
   const capabilityValidUntil = timestamp(value.capability_valid_until);
   if (Date.parse(capabilityValidUntil) <= now)
-    throw new Error("Atomic finality capability record is expired.");
+    throw new AtomicFinalityPolicyUnavailableError(
+      "Atomic finality capability record is expired.",
+    );
 
   const canonical = {
     policyVersion: FINALITY_POLICY_VERSION as typeof FINALITY_POLICY_VERSION,
@@ -170,6 +176,28 @@ export function parseAtomicFinalityPolicy(
     ...canonical,
     configDigest: keccak256(stringToHex(JSON.stringify(canonical))),
   };
+}
+
+export function assertAtomicFinalityPolicyReadmission(
+  previous: AtomicFinalityPolicy,
+  current: AtomicFinalityPolicy,
+) {
+  for (const field of [
+    "policyVersion",
+    "finalityMethod",
+    "completionTag",
+    "chainId",
+    "parentChainId",
+    "safeSignal",
+    "networkAnchorNumber",
+    "networkAnchorHash",
+  ] as const)
+    if (previous[field] !== current[field])
+      throw new Error(
+        "Atomic finality policy renewal changed chain authority.",
+      );
+  if (previous.configDigest === current.configDigest)
+    throw new Error("Atomic finality policy renewal did not change.");
 }
 
 export function validateStoredFinalityPolicy(

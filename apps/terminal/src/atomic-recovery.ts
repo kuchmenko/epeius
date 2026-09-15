@@ -13,6 +13,7 @@ import {
 import type { readChain } from "./chain";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
 import type { AtomicFinalityPolicy } from "./finality-policy";
+import { assertAtomicFinalityPolicyReadmission } from "./finality-policy";
 import { type Receipt, VerificationOutcome } from "./receipt";
 
 type RecoveryChain = Pick<
@@ -30,11 +31,15 @@ type RecoveryChain = Pick<
 >;
 
 export type AtomicRecoveryIO = {
-  journal: Pick<AtomicIntentJournal, "recoveryTransition">;
+  journal: Pick<
+    AtomicIntentJournal,
+    "readmitFinalityPolicy" | "recoveryTransition"
+  >;
   attempt: AtomicRecoveryAttempt;
   executor: AtomicExecutorIdentity;
   policy: AtomicFinalityPolicy;
   signal: AbortSignal;
+  now?: () => number;
   chain: RecoveryChain;
   verifyExecutor: () => Promise<boolean>;
   confirm: (attempt: AtomicRecoveryAttempt) => Promise<boolean>;
@@ -56,24 +61,36 @@ export async function runAtomicRecovery(
   const payload = admitAtomicRecoveryPayload(attempt.prepared, io.executor);
   if (attempt.prepared.transaction.chainId !== signed.chainId)
     throw new Error("Atomic recovery chain identity changed.");
-  if (
+  const storedPolicy =
     attempt.current.schemaVersion === 3 &&
     "finalityPolicy" in attempt.current &&
-    JSON.stringify(attempt.current.finalityPolicy) !== JSON.stringify(io.policy)
-  )
-    throw new Error("Atomic recovery finality policy changed.");
-  await preflightAtomicFinality(io.policy, io.chain, io.signal);
-
-  if (
+    attempt.current.finalityPolicy;
+  const finalityOnly =
     payload.action === "swap" &&
-    [
+    ([
       "receipt_passed",
       "receipt_failed",
       "receipt_observed",
       "finality_unknown",
-    ].includes(attempt.current.state)
-  )
-    return finalizeRecoverySwap(io, payload);
+    ].includes(attempt.current.state) ||
+      (attempt.current.state === "finality_policy_readmitted" &&
+        "policyReadmission" in attempt.current &&
+        attempt.current.policyReadmission?.recoveryScope === "finality_only"));
+  const policyChanged =
+    !!storedPolicy &&
+    JSON.stringify(storedPolicy) !== JSON.stringify(io.policy);
+  if (policyChanged)
+    assertAtomicFinalityPolicyReadmission(storedPolicy, io.policy);
+  await preflightAtomicFinality(io.policy, io.chain, io.signal, io.now?.());
+  if (policyChanged) {
+    try {
+      await io.journal.readmitFinalityPolicy(attempt, io.policy);
+    } catch {
+      return journalIncomplete(io);
+    }
+  }
+
+  if (finalityOnly) return finalizeRecoverySwap(io, payload);
   const rpcChainId = await io.chain.chainId();
   if (
     !isHex(rpcChainId, { strict: true }) ||
@@ -123,6 +140,7 @@ export async function runAtomicRecovery(
   const changed = await inspectSubmission(io, payload);
   if (changed) return changed;
   if (!(await nonceAvailable(io, nonce))) return manualReview(io);
+  await preflightAtomicFinality(io.policy, io.chain, io.signal, io.now?.());
   try {
     await io.journal.recoveryTransition(attempt, "recovery_handoff_started", {
       transactionHash: signed.transactionHash,

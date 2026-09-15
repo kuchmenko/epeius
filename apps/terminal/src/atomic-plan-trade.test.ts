@@ -69,6 +69,37 @@ import {
 
 type JournalTransition = AtomicIntentJournalWriter["transition"];
 
+function finalityPolicyFor(
+  chainId: string,
+  capability: {
+    source?: string;
+    record?: string;
+    validUntil?: string;
+  } = {},
+) {
+  return parseAtomicFinalityPolicy(
+    {
+      policy_version: "epeius-finality-v1",
+      finality_method: "op_l1_derivation",
+      completion_tag: "finalized",
+      parent_chain_id: 1,
+      safe_signal: "op_derived_safe",
+      network_anchor_number: 0,
+      network_anchor_hash: `0x${"a".repeat(64)}`,
+      rpc_source_id: capability.source ?? "test",
+      capability_record: capability.record ?? "test",
+      capability_valid_until: capability.validUntil ?? "2099-01-01T00:00:00Z",
+      request_timeout_ms: 100,
+      poll_interval_ms: 1,
+      wait_timeout_ms: 2,
+      stalled_after_ms: 1,
+      max_response_age_ms: 100,
+    },
+    chainId,
+    0,
+  );
+}
+
 const fixture = await Bun.file(
   "contracts/fixtures/atomic-v1-candidate.json",
 ).json();
@@ -305,27 +336,7 @@ function harness(
   let currentRaw = "";
   let currentSigned: SignedAtomicEnvelope | undefined;
   let selected: ReturnType<typeof acceptAtomicCandidate>;
-  const finalityPolicy = parseAtomicFinalityPolicy(
-    {
-      policy_version: "epeius-finality-v1",
-      finality_method: "op_l1_derivation",
-      completion_tag: "finalized",
-      parent_chain_id: 1,
-      safe_signal: "op_derived_safe",
-      network_anchor_number: 0,
-      network_anchor_hash: `0x${"a".repeat(64)}`,
-      rpc_source_id: "test",
-      capability_record: "test",
-      capability_valid_until: "2099-01-01T00:00:00Z",
-      request_timeout_ms: 100,
-      poll_interval_ms: 1,
-      wait_timeout_ms: 2,
-      stalled_after_ms: 1,
-      max_response_age_ms: 100,
-    },
-    String(source.chainId),
-    0,
-  );
+  const finalityPolicy = finalityPolicyFor(String(source.chainId));
   const block = (tag: string) => ({
     number: tag === "0x0" ? "0x0" : "0xc8",
     hash:
@@ -368,6 +379,7 @@ function harness(
       maxFeePerGas: 30n,
       maxPriorityFeePerGas: 2n,
       finalityPolicy,
+      now: () => 0,
       signal: new AbortController().signal,
       finalityChain,
       quote: async () => {
@@ -769,6 +781,13 @@ test("explicit recovery re-admits frozen Slipstream swap and journals pass only 
   );
   const path = join(directory, "intent.jsonl");
   const value = harness(["ready"], 3);
+  const expiredPolicy = finalityPolicyFor(String(slipstreamFixture.chainId), {
+    source: "expired-source",
+    record: "expired-capability",
+    validUntil: "2020-01-01T00:00:00Z",
+  });
+  value.io.finalityPolicy = expiredPolicy;
+  value.io.now = () => Date.parse(expiredPolicy.capabilityValidUntil) - 1;
   let journal = await AtomicIntentJournal.open(path);
   value.io.journal = journal;
   try {
@@ -782,7 +801,12 @@ test("explicit recovery re-admits frozen Slipstream swap and journals pass only 
       .map((line) => JSON.parse(line));
     const attemptId = records[0].attemptId as string;
     journal = await AtomicIntentJournal.open(path);
-    const attempt = journal.recoveryAttempt(attemptId);
+    let attempt = journal.recoveryAttempt(attemptId);
+    const renewedPolicy = finalityPolicyFor(String(slipstreamFixture.chainId), {
+      source: "renewed-source",
+      record: "renewed-capability",
+    });
+    value.io.finalityPolicy = renewedPolicy;
     let submits = 0;
     let traces = 0;
     const receipt = slipstreamReceipt(value.selected(), value.hash());
@@ -812,11 +836,16 @@ test("explicit recovery re-admits frozen Slipstream swap and journals pass only 
       traces++;
       return trace;
     };
-    const result = await runAtomicRecovery({
-      journal,
+    const recovery = (
+      owner: Pick<
+        AtomicIntentJournal,
+        "readmitFinalityPolicy" | "recoveryTransition"
+      >,
+    ) => ({
+      journal: owner,
       attempt,
       executor,
-      policy: value.io.finalityPolicy,
+      policy: renewedPolicy,
       signal: value.io.signal,
       chain: {
         ...value.io.finalityChain,
@@ -839,19 +868,62 @@ test("explicit recovery re-admits frozen Slipstream swap and journals pass only 
       },
       report: () => {},
     });
+    const readmit = journal.readmitFinalityPolicy.bind(journal);
+    expect(
+      (
+        await runAtomicRecovery(
+          recovery({
+            readmitFinalityPolicy: async (...args) => {
+              await readmit(...args);
+              throw new Error("crash after policy readmission fsync");
+            },
+            recoveryTransition: journal.recoveryTransition.bind(journal),
+          }),
+        )
+      ).kind,
+    ).toBe(ExecutionOutcome.Unknown);
+    expect(submits).toBe(0);
+    await journal.close();
+    journal = await AtomicIntentJournal.open(path);
+    attempt = journal.recoveryAttempt(attemptId);
+    const result = await runAtomicRecovery(recovery(journal));
     expect(result).toEqual({
       kind: ExecutionOutcome.SwapComplete,
       transactionHash: value.hash(),
     });
     expect(traces).toBe(1);
     expect(submits).toBe(0);
-    expect(
-      (await readFile(path, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line).state)
-        .at(-1),
-    ).toBe("finalized_complete");
+    const completedRecords = (await readFile(path, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(completedRecords.map((record) => record.state)).toEqual(
+      expect.arrayContaining([
+        "finality_policy_readmitted",
+        "receipt_observed",
+        "finalized_complete",
+      ]),
+    );
+    expect(completedRecords.at(-1).state).toBe("finalized_complete");
+    const readmissionIndex = completedRecords.findIndex(
+      (record) => record.state === "finality_policy_readmitted",
+    );
+    expect(readmissionIndex).toBeGreaterThan(0);
+    expect(completedRecords[readmissionIndex].policyReadmission).toEqual({
+      recoveryScope: "finality_only",
+      previousConfigDigest: expiredPolicy.configDigest,
+      previousRpcSourceId: "expired-source",
+      previousCapabilityRecord: "expired-capability",
+      previousCapabilityValidUntil: expiredPolicy.capabilityValidUntil,
+      currentConfigDigest: renewedPolicy.configDigest,
+      currentRpcSourceId: "renewed-source",
+      currentCapabilityRecord: "renewed-capability",
+      currentCapabilityValidUntil: renewedPolicy.capabilityValidUntil,
+    });
+    for (const record of completedRecords.slice(0, readmissionIndex))
+      expect(record.finalityPolicy).toEqual(expiredPolicy);
+    for (const record of completedRecords.slice(readmissionIndex))
+      expect(record.finalityPolicy).toEqual(renewedPolicy);
   } finally {
     await journal.close();
     await rm(directory, { recursive: true, force: true });
@@ -941,6 +1013,52 @@ test("Atomic finality preflight failure stops before consent, signing, or submis
     expect(value.calls).not.toContain("sign");
     expect(value.calls).not.toContain("submitRawTransaction");
   }
+});
+
+test("Atomic approval and swap repeat finality preflight after consent", async () => {
+  for (const kind of ["approval", "swap"] as const) {
+    for (const changed of ["anchor", "finalized"] as const) {
+      const value = harness(
+        kind === "approval" ? ["approval", "ready"] : ["ready"],
+      );
+      let reads = 0;
+      const blockByNumber = value.io.finalityChain.blockByNumber;
+      value.io.finalityChain.blockByNumber = async (tag) => {
+        const watched = changed === "anchor" ? "0x0" : "finalized";
+        if (tag === watched && ++reads === 2)
+          throw new Error(`${changed} changed while consent was open`);
+        return blockByNumber(tag);
+      };
+      await expect(runAtomicPlanTrade(value.io)).rejects.toThrow();
+      expect(value.calls).toContain(`confirm:${kind}`);
+      expect(value.calls).not.toContain("sign");
+      expect(value.calls).not.toContain("submitRawTransaction");
+    }
+  }
+
+  const expired = harness();
+  let nowReads = 0;
+  expired.io.now = () =>
+    ++nowReads === 1
+      ? Date.parse(expired.io.finalityPolicy.capabilityValidUntil) - 1
+      : Date.parse(expired.io.finalityPolicy.capabilityValidUntil);
+  await expect(runAtomicPlanTrade(expired.io)).rejects.toThrow("expired");
+  expect(expired.calls).toContain("confirm:swap");
+  expect(expired.calls).not.toContain("sign");
+
+  const unchanged = harness();
+  let finalizedReads = 0;
+  const readBlock = unchanged.io.finalityChain.blockByNumber;
+  unchanged.io.finalityChain.blockByNumber = async (tag) => {
+    if (tag === "finalized") finalizedReads++;
+    return readBlock(tag);
+  };
+  await runAtomicPlanTrade(unchanged.io);
+  expect(finalizedReads).toBeGreaterThanOrEqual(2);
+  expect(unchanged.calls.filter((call) => call === "sign")).toHaveLength(1);
+  expect(
+    unchanged.calls.filter((call) => call === "submitRawTransaction"),
+  ).toHaveLength(1);
 });
 
 test("Atomic journal stores separate approval and swap attempts with exact protobuf bytes and identities", async () => {

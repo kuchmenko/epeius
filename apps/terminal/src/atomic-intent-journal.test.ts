@@ -61,6 +61,27 @@ const finalityPolicy = parseAtomicFinalityPolicy(
   "8453",
   0,
 );
+const renewedFinalityPolicy = parseAtomicFinalityPolicy(
+  {
+    policy_version: "epeius-finality-v1",
+    finality_method: "op_l1_derivation",
+    completion_tag: "finalized",
+    parent_chain_id: 1,
+    safe_signal: "op_derived_safe",
+    network_anchor_number: 0,
+    network_anchor_hash: `0x${"a".repeat(64)}`,
+    rpc_source_id: "renewed-test",
+    capability_record: "renewed-test-2026-09-15",
+    capability_valid_until: "2100-01-01T00:00:00Z",
+    request_timeout_ms: 200,
+    poll_interval_ms: 2,
+    wait_timeout_ms: 200,
+    stalled_after_ms: 100,
+    max_response_age_ms: 200,
+  },
+  "8453",
+  0,
+);
 
 async function signedEnvelope() {
   const raw = await account.signTransaction({
@@ -531,6 +552,72 @@ test("historical schema-2 swap receipt is explicitly migrated before finality re
       finalityReason: "wait_timeout",
       finalityPolicy,
     });
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("schema-3 policy readmission appends provenance without rewriting prior policy", async () => {
+  const t = await temporary();
+  try {
+    let journal = await AtomicIntentJournal.open(t.path, {
+      attemptId: () => id,
+    });
+    const intent = await journal.prepare({
+      action: "swap",
+      payloadType: "unsigned_preparation",
+      payloadBinary: Uint8Array.of(1),
+      planId,
+      executorPlanHash,
+      transactionFingerprint,
+      transaction,
+      envelope,
+      finalityPolicy,
+    });
+    const signed = await journal.sign(intent, await signedEnvelope());
+    await journal.transition(signed, "submitted", {
+      transactionHash: signed.signedEnvelope.transactionHash,
+    });
+    const recovery = journal.recoveryAttempt(id);
+    await journal.readmitFinalityPolicy(recovery, renewedFinalityPolicy);
+    await journal.close();
+
+    const records = lines(await readFile(t.path, "utf8"));
+    expect(
+      records
+        .slice(0, -1)
+        .every(
+          (record) =>
+            JSON.stringify(record.finalityPolicy) ===
+            JSON.stringify(finalityPolicy),
+        ),
+    ).toBeTrue();
+    expect(records.at(-1)).toMatchObject({
+      state: "finality_policy_readmitted",
+      finalityPolicy: renewedFinalityPolicy,
+      policyReadmission: {
+        recoveryScope: "submission",
+        previousConfigDigest: finalityPolicy.configDigest,
+        previousRpcSourceId: finalityPolicy.rpcSourceId,
+        previousCapabilityRecord: finalityPolicy.capabilityRecord,
+        currentConfigDigest: renewedFinalityPolicy.configDigest,
+        currentRpcSourceId: renewedFinalityPolicy.rpcSourceId,
+        currentCapabilityRecord: renewedFinalityPolicy.capabilityRecord,
+      },
+    });
+    const tampered = structuredClone(records);
+    tampered.at(-1).policyReadmission.recoveryScope = "finality_only";
+    await expect(
+      parseAtomicIntentJournal(
+        `${tampered.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      ),
+    ).rejects.toThrow("readmission history changed");
+    journal = await AtomicIntentJournal.open(t.path);
+    expect(journal.recoveryAttempt(id).current).toMatchObject({
+      state: "finality_policy_readmitted",
+      finalityPolicy: renewedFinalityPolicy,
+    });
+    await journal.close();
   } finally {
     await t.cleanup();
   }

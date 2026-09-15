@@ -56,6 +56,7 @@ export type AtomicPlanTradeIO = {
     | "traceCanonicalTransaction"
   >;
   signal: AbortSignal;
+  now?: () => number;
   quote: () => Promise<Parameters<typeof validateAtomicPlanQuote>[0]>;
   prepare: (
     request: Parameters<
@@ -179,12 +180,19 @@ export async function runAtomicPlanTrade(
         io.finalityPolicy,
         io.finalityChain,
         io.signal,
+        io.now?.(),
       );
       if (!(await io.confirm("approval", prepared.transaction, envelope))) {
         await io.journal.transition(attempt, "canceled");
         io.report({ sent: false, outcome: ExecutionOutcome.Canceled });
         return { kind: ExecutionOutcome.Canceled };
       }
+      await preflightAtomicFinality(
+        io.finalityPolicy,
+        io.finalityChain,
+        io.signal,
+        io.now?.(),
+      );
       const submission = await signAndSubmit(io, attempt);
       if (submission.status === "unknown")
         return {
@@ -254,6 +262,7 @@ export async function runAtomicPlanTrade(
       io.finalityPolicy,
       io.finalityChain,
       io.signal,
+      io.now?.(),
     );
     if (!(await io.confirm("swap", prepared.transaction, envelope))) {
       await io.journal.transition(attempt, "canceled");
@@ -280,6 +289,12 @@ export async function runAtomicPlanTrade(
       hexToBigInt(chainId) !== io.request.chainId
     )
       throw new Error("RPC network changed. Nothing sent.");
+    await preflightAtomicFinality(
+      io.finalityPolicy,
+      io.finalityChain,
+      io.signal,
+      io.now?.(),
+    );
     const submission = await signAndSubmit(io, attempt);
     if (submission.status === "unknown")
       return {

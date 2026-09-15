@@ -34,7 +34,10 @@ import {
   executionCommand,
   verifyAtomicExecutor,
 } from "./execution-command";
-import { readAtomicFinalityPolicy } from "./finality-policy";
+import {
+  AtomicFinalityPolicyUnavailableError,
+  readAtomicFinalityPolicy,
+} from "./finality-policy";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import { configureChain } from "./protocols";
 import {
@@ -293,10 +296,49 @@ export async function main(rawArgs: string[]) {
       const journal = await AtomicIntentJournal.open(values["atomic-journal"]);
       try {
         const attempt = journal.recoveryAttempt(values["attempt-id"]);
-        const finalityPolicy = await readAtomicFinalityPolicy(
-          parsed.config,
-          values.chain,
-        );
+        let finalityPolicy: Awaited<
+          ReturnType<typeof readAtomicFinalityPolicy>
+        >;
+        try {
+          finalityPolicy = await readAtomicFinalityPolicy(
+            parsed.config,
+            values.chain,
+          );
+        } catch (error) {
+          if (!(error instanceof AtomicFinalityPolicyUnavailableError))
+            throw error;
+          console.log(
+            JSON.stringify({
+              machineOutputVersion: "epeius-atomic-finality-jsonl-v1",
+              recovery: "historical_not_fresh",
+              attemptId: attempt.current.attemptId,
+              action: attempt.current.action,
+              state: attempt.current.state,
+              transactionHash: attempt.signedEnvelope.transactionHash,
+              ...(attempt.current.schemaVersion === 3 &&
+              "finalityPolicy" in attempt.current
+                ? {
+                    storedPolicy: {
+                      configDigest: attempt.current.finalityPolicy.configDigest,
+                      rpcSourceId: attempt.current.finalityPolicy.rpcSourceId,
+                      capabilityRecord:
+                        attempt.current.finalityPolicy.capabilityRecord,
+                      capabilityValidUntil:
+                        attempt.current.finalityPolicy.capabilityValidUntil,
+                    },
+                  }
+                : {}),
+              fresh: false,
+              outcome: ExecutionOutcome.Unknown,
+              message:
+                "Current Atomic finality policy is missing or expired. Historical journal state was not freshly checked; nothing submitted.",
+            }),
+          );
+          return executionExitCode({
+            kind: ExecutionOutcome.Unknown,
+            transactionHash: attempt.signedEnvelope.transactionHash,
+          });
+        }
         const { expectedChainId, rpcUrlEnv, trusted } =
           await readExecutionConfig(
             parsed.config,

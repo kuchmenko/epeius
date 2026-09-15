@@ -18,7 +18,10 @@ import type {
 } from "./atomic-signed-envelope";
 import { admitSignedAtomicEnvelope } from "./atomic-signed-envelope";
 import type { AtomicFinalityPolicy } from "./finality-policy";
-import { validateStoredFinalityPolicy } from "./finality-policy";
+import {
+  assertAtomicFinalityPolicyReadmission,
+  validateStoredFinalityPolicy,
+} from "./finality-policy";
 
 export const ATOMIC_INTENT_JOURNAL_VERSION = 3;
 
@@ -36,6 +39,7 @@ export type AtomicIntentState =
   | "receipt_unavailable"
   | "receipt_observed"
   | "finality_unknown"
+  | "finality_policy_readmitted"
   | "finalized_complete"
   | "finalized_failed"
   | "submission_unknown";
@@ -83,6 +87,17 @@ type Transition = Intent & {
   provisionalEvidence?: AtomicProvisionalEvidence;
   finalityEvidence?: AtomicFinalityEvidence;
   finalityReason?: string;
+  policyReadmission?: {
+    recoveryScope: "submission" | "finality_only";
+    previousConfigDigest: string;
+    previousRpcSourceId: string;
+    previousCapabilityRecord: string;
+    previousCapabilityValidUntil: string;
+    currentConfigDigest: string;
+    currentRpcSourceId: string;
+    currentCapabilityRecord: string;
+    currentCapabilityValidUntil: string;
+  };
 };
 
 type WithoutV3<T> = T extends unknown
@@ -93,6 +108,7 @@ type WithoutV3<T> = T extends unknown
       | "provisionalEvidence"
       | "finalityEvidence"
       | "finalityReason"
+      | "policyReadmission"
     > & { schemaVersion: 2 }
   : never;
 type V2JournalRecord = WithoutV3<Prepared | Transition>;
@@ -140,6 +156,7 @@ const transitionKeys = [
   "provisionalEvidence",
   "finalityEvidence",
   "finalityReason",
+  "policyReadmission",
 ];
 const v2BaseKeys = baseKeys.filter((key) => key !== "finalityPolicy");
 const v2PreparedKeys = [...v2BaseKeys, "payloadType", "payloadBinaryHex"];
@@ -253,6 +270,7 @@ const transitionsV3: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
     "receipt_unavailable",
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
     "submission_unknown",
   ],
   submission_observed: [
@@ -262,6 +280,7 @@ const transitionsV3: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
     "receipt_unavailable",
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
   ],
   recovery_handoff_started: [
     "submission_observed",
@@ -272,6 +291,7 @@ const transitionsV3: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
     "receipt_unavailable",
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
     "submission_unknown",
   ],
   submitted: [
@@ -281,6 +301,7 @@ const transitionsV3: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
     "receipt_unavailable",
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
   ],
   receipt_passed: [],
   receipt_failed: [],
@@ -292,21 +313,36 @@ const transitionsV3: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
     "receipt_unavailable",
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
   ],
   receipt_observed: [
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
     "finalized_complete",
     "finalized_failed",
   ],
   finality_unknown: [
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
     "finalized_complete",
     "finalized_failed",
   ],
   finalized_complete: [],
   finalized_failed: [],
+  finality_policy_readmitted: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "submitted",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "receipt_observed",
+    "finality_unknown",
+    "finality_policy_readmitted",
+    "submission_unknown",
+  ],
   submission_unknown: [
     "submission_observed",
     "recovery_handoff_started",
@@ -315,6 +351,7 @@ const transitionsV3: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
     "receipt_unavailable",
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
   ],
 };
 const blocksNewAttempt = new Set<AtomicIntentState>([
@@ -327,6 +364,7 @@ const blocksNewAttempt = new Set<AtomicIntentState>([
   "submission_unknown",
   "receipt_observed",
   "finality_unknown",
+  "finality_policy_readmitted",
 ]);
 
 export class AtomicIntentJournal {
@@ -595,6 +633,7 @@ export class AtomicIntentJournal {
         "receipt_failed",
         "receipt_observed",
         "finality_unknown",
+        "finality_policy_readmitted",
       ].includes(current.state) ||
       !("signedEnvelope" in current) ||
       !current.signedEnvelope
@@ -632,6 +671,7 @@ export class AtomicIntentJournal {
         | "finalityEvidence"
         | "finalityReason"
         | "finalityPolicy"
+        | "policyReadmission"
       >
     > = {},
   ) {
@@ -679,6 +719,63 @@ export class AtomicIntentJournal {
     } as Transition | V2JournalRecord;
     await validateRecord(record);
     assertSameIntent(previous, record);
+    assertSameSignedEnvelope(previous, record);
+    assertSameTransactionHash(previous, record);
+    await this.#append(record);
+    this.#states.set(record.attemptId, record);
+    attempt.current = structuredClone(record);
+  }
+
+  async readmitFinalityPolicy(
+    attempt: AtomicRecoveryAttempt,
+    currentPolicy: AtomicFinalityPolicy,
+  ) {
+    this.#assertOpen();
+    const previous = this.#states.get(attempt.current.attemptId);
+    if (
+      previous?.schemaVersion !== 3 ||
+      JSON.stringify(previous) !== JSON.stringify(attempt.current) ||
+      !(transitionsV3[previous.state] ?? []).includes(
+        "finality_policy_readmitted",
+      )
+    )
+      throw new Error("Atomic finality policy readmission is invalid.");
+    assertAtomicFinalityPolicyReadmission(
+      previous.finalityPolicy,
+      currentPolicy,
+    );
+    const record: Transition = {
+      schemaVersion: 3,
+      attemptId: previous.attemptId,
+      action: previous.action,
+      ...(previous.planId ? { planId: previous.planId } : {}),
+      ...(previous.executorPlanHash
+        ? { executorPlanHash: previous.executorPlanHash }
+        : {}),
+      ...(previous.transactionFingerprint
+        ? { transactionFingerprint: previous.transactionFingerprint }
+        : {}),
+      transaction: structuredClone(previous.transaction),
+      envelope: structuredClone(previous.envelope),
+      finalityPolicy: structuredClone(currentPolicy),
+      signedEnvelope: structuredClone(attempt.signedEnvelope),
+      transactionHash: attempt.signedEnvelope.transactionHash,
+      state: "finality_policy_readmitted",
+      policyReadmission: {
+        recoveryScope: policyReadmissionScope(previous),
+        previousConfigDigest: previous.finalityPolicy.configDigest,
+        previousRpcSourceId: previous.finalityPolicy.rpcSourceId,
+        previousCapabilityRecord: previous.finalityPolicy.capabilityRecord,
+        previousCapabilityValidUntil:
+          previous.finalityPolicy.capabilityValidUntil,
+        currentConfigDigest: currentPolicy.configDigest,
+        currentRpcSourceId: currentPolicy.rpcSourceId,
+        currentCapabilityRecord: currentPolicy.capabilityRecord,
+        currentCapabilityValidUntil: currentPolicy.capabilityValidUntil,
+      },
+    };
+    await validateRecord(record);
+    assertSameIntent(previous, record, true);
     assertSameSignedEnvelope(previous, record);
     assertSameTransactionHash(previous, record);
     await this.#append(record);
@@ -754,7 +851,11 @@ async function parseAtomicIntentJournalHistory(raw: string) {
         throw new Error(
           "Atomic intent journal transition sequence is invalid.",
         );
-      assertSameIntent(previous, current);
+      assertSameIntent(
+        previous,
+        current,
+        current.state === "finality_policy_readmitted",
+      );
       assertSameSignedEnvelope(previous, current);
       assertSameTransactionHash(previous, current);
     }
@@ -860,6 +961,7 @@ async function validateRecord(value: unknown): Promise<void> {
     "receipt_unavailable",
     "receipt_observed",
     "finality_unknown",
+    "finality_policy_readmitted",
     "finalized_complete",
     "finalized_failed",
   ].includes(state);
@@ -909,6 +1011,7 @@ async function validateRecord(value: unknown): Promise<void> {
       "finalized_complete",
       "finalized_failed",
     ].includes(state);
+    const hasReadmission = value.policyReadmission !== undefined;
     if (
       (needsProvisional && !hasProvisional) ||
       (!needsProvisional && state !== "finality_unknown" && hasProvisional) ||
@@ -916,13 +1019,15 @@ async function validateRecord(value: unknown): Promise<void> {
         hasFinality ||
       (state === "finality_unknown") !== (value.finalityReason !== undefined) ||
       (value.finalityReason !== undefined &&
-        (typeof value.finalityReason !== "string" || !value.finalityReason))
+        (typeof value.finalityReason !== "string" || !value.finalityReason)) ||
+      (state === "finality_policy_readmitted") !== hasReadmission
     )
       throw new Error(
         "Atomic finality journal transition details are invalid.",
       );
     if (hasProvisional)
       validateStoredProvisionalEvidence(value.provisionalEvidence);
+    if (hasReadmission) validatePolicyReadmission(value);
     if (hasFinality) {
       validateStoredFinalityEvidence(
         value.finalityEvidence,
@@ -1069,7 +1174,11 @@ function journalTransaction(
   return result;
 }
 
-function assertSameIntent(previous: JournalRecord, current: JournalRecord) {
+function assertSameIntent(
+  previous: JournalRecord,
+  current: JournalRecord,
+  allowPolicyReadmission = false,
+) {
   for (const name of [
     "attemptId",
     "action",
@@ -1104,11 +1213,86 @@ function assertSameIntent(previous: JournalRecord, current: JournalRecord) {
     previous.schemaVersion === 3 &&
     current.schemaVersion === 3 &&
     JSON.stringify(previous.finalityPolicy) !==
-      JSON.stringify(current.finalityPolicy)
+      JSON.stringify(current.finalityPolicy) &&
+    !allowPolicyReadmission
   )
     throw new Error(
       "Atomic intent journal finality policy changed within an attempt.",
     );
+  if (
+    allowPolicyReadmission &&
+    previous.schemaVersion === 3 &&
+    current.schemaVersion === 3
+  ) {
+    assertAtomicFinalityPolicyReadmission(
+      previous.finalityPolicy,
+      current.finalityPolicy,
+    );
+    const provenance = (current as Transition).policyReadmission;
+    if (
+      !provenance ||
+      provenance.previousConfigDigest !==
+        previous.finalityPolicy.configDigest ||
+      provenance.previousRpcSourceId !== previous.finalityPolicy.rpcSourceId ||
+      provenance.previousCapabilityRecord !==
+        previous.finalityPolicy.capabilityRecord ||
+      provenance.previousCapabilityValidUntil !==
+        previous.finalityPolicy.capabilityValidUntil ||
+      provenance.recoveryScope !== policyReadmissionScope(previous)
+    )
+      throw new Error("Atomic finality policy readmission history changed.");
+  }
+}
+
+function validatePolicyReadmission(value: Record<string, unknown>) {
+  if (!plainObject(value.policyReadmission))
+    throw new Error("Atomic finality policy readmission is invalid.");
+  exactKeys(value.policyReadmission, [
+    "recoveryScope",
+    "previousConfigDigest",
+    "previousRpcSourceId",
+    "previousCapabilityRecord",
+    "previousCapabilityValidUntil",
+    "currentConfigDigest",
+    "currentRpcSourceId",
+    "currentCapabilityRecord",
+    "currentCapabilityValidUntil",
+  ]);
+  const readmission = value.policyReadmission;
+  const current = value.finalityPolicy as AtomicFinalityPolicy;
+  if (
+    !["submission", "finality_only"].includes(
+      readmission.recoveryScope as string,
+    ) ||
+    !isHash(readmission.previousConfigDigest as string) ||
+    readmission.currentConfigDigest !== current.configDigest ||
+    readmission.currentRpcSourceId !== current.rpcSourceId ||
+    readmission.currentCapabilityRecord !== current.capabilityRecord ||
+    readmission.currentCapabilityValidUntil !== current.capabilityValidUntil ||
+    typeof readmission.previousRpcSourceId !== "string" ||
+    !readmission.previousRpcSourceId ||
+    typeof readmission.previousCapabilityRecord !== "string" ||
+    !readmission.previousCapabilityRecord ||
+    typeof readmission.previousCapabilityValidUntil !== "string" ||
+    !readmission.previousCapabilityValidUntil
+  )
+    throw new Error(
+      "Atomic finality policy readmission provenance is invalid.",
+    );
+}
+
+function policyReadmissionScope(
+  previous: JournalRecord,
+): "submission" | "finality_only" {
+  if (["receipt_observed", "finality_unknown"].includes(previous.state))
+    return "finality_only";
+  if (
+    previous.state === "finality_policy_readmitted" &&
+    "policyReadmission" in previous &&
+    previous.policyReadmission?.recoveryScope === "finality_only"
+  )
+    return "finality_only";
+  return "submission";
 }
 
 function assertSameSignedEnvelope(
@@ -1139,6 +1323,7 @@ function assertSameTransactionHash(
       "receipt_unavailable",
       "receipt_observed",
       "finality_unknown",
+      "finality_policy_readmitted",
       "finalized_complete",
       "finalized_failed",
     ].includes(current.state) &&
@@ -1159,6 +1344,7 @@ function assertSameTransactionHash(
       "submitted",
       "receipt_unavailable",
       "submission_unknown",
+      "finality_policy_readmitted",
     ].includes(previous.state) &&
     "transactionHash" in previous &&
     "transactionHash" in current &&

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { parseAtomicFinalityPolicy } from "./finality-policy";
+import {
+  assertAtomicFinalityPolicyReadmission,
+  parseAtomicFinalityPolicy,
+} from "./finality-policy";
 
 const future = "2099-01-01T00:00:00Z";
 const hash = `0x${"1".repeat(64)}`;
@@ -84,4 +87,32 @@ test("strict finality policy rejects inapplicable and mismatched parent/safe/met
   expect(() => parseAtomicFinalityPolicy(policy("1"), "31337", 0)).toThrow(
     "no reviewed method mapping",
   );
+});
+
+test("policy readmission changes capability only, never chain authority", () => {
+  const previous = parseAtomicFinalityPolicy(policy("1"), "1", 0);
+  const renewed = parseAtomicFinalityPolicy(
+    {
+      ...policy("1"),
+      rpc_source_id: "explicit-renewed-source",
+      capability_record: "fixture-2026-09-16",
+      capability_valid_until: "2100-01-01T00:00:00Z",
+    },
+    "1",
+    0,
+  );
+  expect(() =>
+    assertAtomicFinalityPolicyReadmission(previous, renewed),
+  ).not.toThrow();
+  expect(() =>
+    assertAtomicFinalityPolicyReadmission(previous, previous),
+  ).toThrow("did not change");
+  for (const changed of [
+    { ...renewed, chainId: "8453" },
+    { ...renewed, finalityMethod: "op_l1_derivation" as const },
+    { ...renewed, networkAnchorHash: `0x${"2".repeat(64)}` },
+  ])
+    expect(() =>
+      assertAtomicFinalityPolicyReadmission(previous, changed),
+    ).toThrow("changed chain authority");
 });
