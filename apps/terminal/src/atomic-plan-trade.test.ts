@@ -50,13 +50,22 @@ import {
   runAtomicPlanTrade,
 } from "./atomic-plan-trade";
 import { runAtomicRecovery } from "./atomic-recovery";
-import type { AtomicEnvelope } from "./atomic-signed-envelope";
+import {
+  type AtomicEnvelope,
+  admitSignedAtomicEnvelope,
+  type SignedAtomicEnvelope,
+} from "./atomic-signed-envelope";
 import { ExecutionOutcome } from "./execution";
+import { parseAtomicFinalityPolicy } from "./finality-policy";
 import {
   atomicV1ExecutorCalldata,
   atomicV1TransactionFingerprint,
 } from "./protocols/atomic-v1";
-import { type Receipt, VerificationOutcome } from "./receipt";
+import {
+  type Receipt,
+  type TransactionCallTrace,
+  VerificationOutcome,
+} from "./receipt";
 
 type JournalTransition = AtomicIntentJournalWriter["transition"];
 
@@ -294,12 +303,56 @@ function harness(
   let quotes = 0;
   let currentHash = "";
   let currentRaw = "";
+  let currentSigned: SignedAtomicEnvelope | undefined;
   let selected: ReturnType<typeof acceptAtomicCandidate>;
+  const finalityPolicy = parseAtomicFinalityPolicy(
+    {
+      policy_version: "epeius-finality-v1",
+      finality_method: "op_l1_derivation",
+      completion_tag: "finalized",
+      parent_chain_id: 1,
+      safe_signal: "op_derived_safe",
+      network_anchor_number: 0,
+      network_anchor_hash: `0x${"a".repeat(64)}`,
+      rpc_source_id: "test",
+      capability_record: "test",
+      capability_valid_until: "2099-01-01T00:00:00Z",
+      request_timeout_ms: 100,
+      poll_interval_ms: 1,
+      wait_timeout_ms: 2,
+      stalled_after_ms: 1,
+      max_response_age_ms: 100,
+    },
+    String(source.chainId),
+    0,
+  );
+  const block = (tag: string) => ({
+    number: tag === "0x0" ? "0x0" : "0xc8",
+    hash:
+      tag === "0x0" ? finalityPolicy.networkAnchorHash : `0x${"b".repeat(64)}`,
+    parentHash: tag === "0x0" ? zeroHash : `0x${"9".repeat(64)}`,
+    timestamp: "0x1",
+    transactions: [] as string[],
+  });
+  const finalityChain: AtomicPlanTradeIO["finalityChain"] = {
+    chainId: async () => toHex(BigInt(source.chainId)),
+    blockByNumber: async (tag: string) => block(tag),
+    blockByHash: async () => block("finalized"),
+    receiptByHash: async () => {
+      calls.push("receipt");
+      throw new Error("fixture receipt unavailable");
+    },
+    transactionByHash: async () => null,
+    traceCanonicalTransaction: async () => {
+      throw new Error("fixture trace unavailable");
+    },
+  };
   return {
     calls,
     preparedResponses,
     selected: () => selected,
     hash: () => currentHash,
+    signed: () => currentSigned,
     io: {
       request: {
         chainId: BigInt(source.chainId),
@@ -314,6 +367,9 @@ function harness(
       pendingNonce: 9n,
       maxFeePerGas: 30n,
       maxPriorityFeePerGas: 2n,
+      finalityPolicy,
+      signal: new AbortController().signal,
+      finalityChain,
       quote: async () => {
         calls.push("quote");
         const value = quote(++quotes, kind);
@@ -364,6 +420,7 @@ function harness(
               : {}),
             transaction: structuredClone(input.transaction),
             envelope: structuredClone(input.envelope),
+            finalityPolicy: structuredClone(input.finalityPolicy),
           };
         },
         sign: async (
@@ -391,6 +448,11 @@ function harness(
         calls.push("sign");
         currentRaw = await sign(transaction, envelope);
         currentHash = keccak256(currentRaw as `0x${string}`);
+        currentSigned = await admitSignedAtomicEnvelope(
+          currentRaw,
+          transaction,
+          envelope,
+        );
         return currentRaw;
       },
       submitRawTransaction: async (raw: string) => {
@@ -413,6 +475,83 @@ function harness(
       report: (_event: unknown) => {},
     },
   };
+}
+
+function enableFinality(
+  value: ReturnType<typeof harness>,
+  source: Receipt | (() => Receipt),
+  trace?: TransactionCallTrace,
+) {
+  const receiptBlockHash = `0x${"c".repeat(64)}`;
+  const receiptBlockNumber = "0x7c";
+  const receipt = () => {
+    const sourceReceipt = typeof source === "function" ? source() : source;
+    return {
+      ...sourceReceipt,
+      blockHash: receiptBlockHash,
+      blockNumber: receiptBlockNumber,
+      transactionIndex: "0x0",
+      logs: sourceReceipt.logs.map((log, index) => ({
+        ...log,
+        blockHash: receiptBlockHash,
+        blockNumber: receiptBlockNumber,
+        transactionIndex: "0x0",
+        logIndex: toHex(index),
+        removed: false,
+      })),
+    };
+  };
+  const headHash = `0x${"b".repeat(64)}`;
+  const block = (tag: string) =>
+    tag === "0x0"
+      ? {
+          number: "0x0",
+          hash: value.io.finalityPolicy.networkAnchorHash,
+          parentHash: zeroHash,
+          timestamp: "0x1",
+          transactions: [],
+        }
+      : tag === receiptBlockNumber
+        ? {
+            number: receiptBlockNumber,
+            hash: receiptBlockHash,
+            parentHash: `0x${"9".repeat(64)}`,
+            timestamp: "0x2",
+            transactions: [value.hash()],
+          }
+        : {
+            number: "0xc8",
+            hash: headHash,
+            parentHash: `0x${"9".repeat(64)}`,
+            timestamp: "0x3",
+            transactions: [],
+          };
+  value.io.finalityChain.receiptByHash = async () => receipt();
+  value.io.finalityChain.blockByNumber = async (tag) => block(tag);
+  value.io.finalityChain.blockByHash = async () => block("finalized");
+  value.io.finalityChain.transactionByHash = async () => {
+    const signed = value.signed();
+    if (!signed) throw new Error("missing signed fixture");
+    return {
+      hash: signed.transactionHash,
+      type: "0x2",
+      chainId: toHex(BigInt(signed.chainId)),
+      nonce: toHex(BigInt(signed.nonce)),
+      from: signed.signer,
+      to: signed.to,
+      input: signed.data,
+      value: toHex(BigInt(signed.valueAtomic)),
+      gas: toHex(BigInt(signed.gasLimit)),
+      maxFeePerGas: toHex(BigInt(signed.maxFeePerGasAtomic)),
+      maxPriorityFeePerGas: toHex(BigInt(signed.maxPriorityFeePerGasAtomic)),
+      accessList: [],
+      yParity: toHex(signed.yParity),
+      r: signed.r,
+      s: signed.s,
+    };
+  };
+  if (trace)
+    value.io.finalityChain.traceCanonicalTransaction = async () => trace;
 }
 
 function slipstreamReceipt(
@@ -560,7 +699,7 @@ test("Atomic plan trade selects explicitly and rechecks frozen bytes before send
     "submitRawTransaction",
     "journal:submitted",
     "receipt",
-    "journal:receipt_unavailable",
+    "journal:finality_unknown",
   ]);
 });
 
@@ -591,23 +730,36 @@ test("Slipstream Atomic trade journals economic pass only after accepted native 
       ],
     };
   };
+  enableFinality(
+    value,
+    () => slipstreamReceipt(value.selected(), value.hash()),
+    {
+      type: "CALL",
+      from: signer,
+      to: executor.address,
+      value: "0x0",
+      input: "0x661983c5",
+      calls: [
+        {
+          type: "CALL",
+          from: executor.address,
+          to: signer,
+          value: "0x7",
+          input: "0x",
+        },
+      ],
+    },
+  );
   const reports: unknown[] = [];
   value.io.report = (event) => reports.push(event);
   expect(await runAtomicPlanTrade(value.io)).toEqual({
-    kind: ExecutionOutcome.SwapVerified,
+    kind: ExecutionOutcome.SwapComplete,
     transactionHash: value.hash(),
   });
-  expect(value.calls.slice(-3)).toEqual([
-    "receipt",
-    "trace",
-    "journal:receipt_passed",
-  ]);
-  expect(value.calls.indexOf("trace")).toBeLessThan(
-    value.calls.indexOf("journal:receipt_passed"),
-  );
+  expect(value.calls).toContain("journal:receipt_observed");
+  expect(value.calls.at(-1)).toBe("journal:finalized_complete");
   expect(reports.at(-1)).toMatchObject({
-    transactionHash: value.hash(),
-    verification: { outcome: VerificationOutcome.Passed },
+    finality: { stage: "complete", transactionHash: value.hash() },
   });
 });
 
@@ -634,37 +786,46 @@ test("explicit recovery re-admits frozen Slipstream swap and journals pass only 
     let submits = 0;
     let traces = 0;
     const receipt = slipstreamReceipt(value.selected(), value.hash());
+    const trace = {
+      type: "CALL",
+      from: signer,
+      to: executor.address,
+      value: "0x0",
+      input: "0x661983c5",
+      calls: [
+        {
+          type: "CALL",
+          from: executor.address,
+          to: signer,
+          value: "0x7",
+          input: "0x",
+        },
+      ],
+    };
+    enableFinality(value, receipt, trace);
+    const blockByNumber = value.io.finalityChain.blockByNumber;
+    value.io.finalityChain.blockByNumber = async (tag) => {
+      if (tag === "safe") throw new Error("unsupported block tag");
+      return blockByNumber(tag);
+    };
+    value.io.finalityChain.traceCanonicalTransaction = async () => {
+      traces++;
+      return trace;
+    };
     const result = await runAtomicRecovery({
       journal,
       attempt,
       executor,
+      policy: value.io.finalityPolicy,
+      signal: value.io.signal,
       chain: {
+        ...value.io.finalityChain,
         chainId: async () => toHex(BigInt(slipstreamFixture.chainId)),
         nonce: async () => {
           throw new Error("nonce must not be read for an existing receipt");
         },
         canonicalReceipt: async () => receipt,
-        transactionByHash: async () => null,
         waitCanonicalReceipt: async () => receipt,
-        traceCanonicalTransaction: async () => {
-          traces++;
-          return {
-            type: "CALL",
-            from: signer,
-            to: executor.address,
-            value: "0x0",
-            input: "0x661983c5",
-            calls: [
-              {
-                type: "CALL",
-                from: executor.address,
-                to: signer,
-                value: "0x7",
-                input: "0x",
-              },
-            ],
-          };
-        },
         submitRawTransaction: async () => {
           submits++;
           return value.hash();
@@ -679,7 +840,7 @@ test("explicit recovery re-admits frozen Slipstream swap and journals pass only 
       report: () => {},
     });
     expect(result).toEqual({
-      kind: ExecutionOutcome.SwapVerified,
+      kind: ExecutionOutcome.SwapComplete,
       transactionHash: value.hash(),
     });
     expect(traces).toBe(1);
@@ -690,7 +851,7 @@ test("explicit recovery re-admits frozen Slipstream swap and journals pass only 
         .split("\n")
         .map((line) => JSON.parse(line).state)
         .at(-1),
-    ).toBe("receipt_passed");
+    ).toBe("finalized_complete");
   } finally {
     await journal.close();
     await rm(directory, { recursive: true, force: true });
@@ -707,7 +868,7 @@ test("Slipstream Atomic trade journals unavailable when native trace is unsuppor
     kind: ExecutionOutcome.Unknown,
     transactionHash: value.hash(),
   });
-  expect(value.calls).toContain("journal:receipt_unavailable");
+  expect(value.calls).toContain("journal:finality_unknown");
   expect(value.calls).not.toContain("journal:receipt_passed");
 });
 
@@ -736,7 +897,7 @@ test("Atomic plan trade obtains a new quote after exact approval", async () => {
     "submitRawTransaction",
     "journal:submitted",
     "receipt",
-    "journal:receipt_unavailable",
+    "journal:finality_unknown",
   ]);
 });
 
@@ -761,6 +922,25 @@ test("Atomic plan trade never sends after cancellation or changed recheck", asyn
   await expect(runAtomicPlanTrade(changed.io)).rejects.toThrow();
   expect(changed.calls).not.toContain("sign");
   expect(changed.calls).not.toContain("submitRawTransaction");
+});
+
+test("Atomic finality preflight failure stops before consent, signing, or submission", async () => {
+  for (const unavailable of ["anchor", "finalized"] as const) {
+    const value = harness();
+    const blockByNumber = value.io.finalityChain.blockByNumber;
+    value.io.finalityChain.blockByNumber = async (tag) => {
+      if (
+        (unavailable === "anchor" && tag === "0x0") ||
+        (unavailable === "finalized" && tag === "finalized")
+      )
+        throw new Error(`${unavailable} unavailable`);
+      return blockByNumber(tag);
+    };
+    await expect(runAtomicPlanTrade(value.io)).rejects.toThrow();
+    expect(value.calls).not.toContain("confirm:swap");
+    expect(value.calls).not.toContain("sign");
+    expect(value.calls).not.toContain("submitRawTransaction");
+  }
 });
 
 test("Atomic journal stores separate approval and swap attempts with exact protobuf bytes and identities", async () => {
@@ -789,7 +969,7 @@ test("Atomic journal stores separate approval and swap attempts with exact proto
       "prepared",
       "signed",
       "submitted",
-      "receipt_unavailable",
+      "finality_unknown",
     ]);
     expect(records[0].action).toBe("approval");
     expect(records[4].action).toBe("swap");
@@ -903,7 +1083,10 @@ test("journal failures enforce zero submissions before durable signed bytes and 
     ) => {
       if (
         (failure === "submitted" && state === "submitted") ||
-        (failure === "receipt" && state.startsWith("receipt_"))
+        (failure === "receipt" &&
+          (state.startsWith("receipt_") ||
+            state.startsWith("finality_") ||
+            state.startsWith("finalized_")))
       )
         throw new Error(`${failure} append failed`);
       return transition(attempt, state, details);
@@ -917,12 +1100,16 @@ test("journal failures enforce zero submissions before durable signed bytes and 
       transactionHash: value.hash(),
     });
     expect(submissions).toBe(1);
-    expect(reports.at(-1)).toMatchObject({
-      verification: { outcome: VerificationOutcome.Unavailable },
-      ...(failure === "submit"
-        ? { submission: "unknown" }
-        : { message: expect.stringContaining("journal is incomplete") }),
-    });
+    expect(reports.at(-1)).toMatchObject(
+      failure === "receipt"
+        ? { finality: { stage: "persistence_failed" } }
+        : {
+            verification: { outcome: VerificationOutcome.Unavailable },
+            ...(failure === "submit"
+              ? { submission: "unknown" }
+              : { message: expect.stringContaining("journal is incomplete") }),
+          },
+    );
   }
 });
 
@@ -975,11 +1162,17 @@ test("failed receipt is durably distinct from submission and economic pass", asy
       logs: [],
     };
   };
+  enableFinality(value, () => ({
+    transactionHash: value.hash(),
+    status: "0x0",
+    logs: [],
+  }));
   expect(await runAtomicPlanTrade(value.io)).toEqual({
     kind: ExecutionOutcome.Failed,
     transactionHash: value.hash(),
   });
   expect(value.calls).toContain("journal:submitted");
-  expect(value.calls).toContain("journal:receipt_failed");
-  expect(value.calls).not.toContain("journal:receipt_passed");
+  expect(value.calls).toContain("journal:receipt_observed");
+  expect(value.calls).toContain("journal:finalized_failed");
+  expect(value.calls).not.toContain("journal:finalized_complete");
 });

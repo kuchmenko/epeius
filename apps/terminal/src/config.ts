@@ -141,6 +141,7 @@ export async function readSettings(path: string) {
           uniswap_v4_deployment?: string;
           [key: string]: unknown;
         };
+        finality?: Record<string, unknown>;
         tokens?: Array<{
           address?: string;
           symbol?: string;

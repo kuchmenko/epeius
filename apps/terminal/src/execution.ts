@@ -42,6 +42,7 @@ export const ExecutionOutcome = {
   Canceled: "canceled",
   ApprovalConfirmed: "approval-confirmed",
   SwapVerified: "swap-verified",
+  SwapComplete: "swap-complete",
   Failed: "failed",
   Unknown: "unknown",
 } as const;
@@ -58,6 +59,7 @@ export type ExecutionResult =
       kind:
         | typeof ExecutionOutcome.ApprovalConfirmed
         | typeof ExecutionOutcome.SwapVerified
+        | typeof ExecutionOutcome.SwapComplete
         | typeof ExecutionOutcome.Failed;
       transactionHash: string;
     }

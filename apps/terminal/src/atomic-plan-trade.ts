@@ -6,6 +6,7 @@ import {
   PreparePlanResponseSchema,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import type { UnsignedTransaction } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import { finalizeAtomicSwap, preflightAtomicFinality } from "./atomic-finality";
 import type {
   AtomicIntentAttempt,
   AtomicIntentJournalWriter,
@@ -26,13 +27,13 @@ import {
   admitSignedAtomicEnvelope,
   atomicEnvelope,
 } from "./atomic-signed-envelope";
+import type { ReturnTypeOfReadChain } from "./chain";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
+import type { AtomicFinalityPolicy } from "./finality-policy";
 import {
   type Receipt,
-  requiresNativeRefundTrace,
   type TransactionCallTrace,
   VerificationOutcome,
-  verifyReceipt,
 } from "./receipt";
 
 export type AtomicPlanTradeIO = {
@@ -44,6 +45,17 @@ export type AtomicPlanTradeIO = {
   pendingNonce: bigint;
   maxFeePerGas: bigint;
   maxPriorityFeePerGas: bigint;
+  finalityPolicy: AtomicFinalityPolicy;
+  finalityChain: Pick<
+    ReturnTypeOfReadChain,
+    | "chainId"
+    | "receiptByHash"
+    | "transactionByHash"
+    | "blockByNumber"
+    | "blockByHash"
+    | "traceCanonicalTransaction"
+  >;
+  signal: AbortSignal;
   quote: () => Promise<Parameters<typeof validateAtomicPlanQuote>[0]>;
   prepare: (
     request: Parameters<
@@ -161,7 +173,13 @@ export async function runAtomicPlanTrade(
         planId: accepted.planId,
         transaction: prepared.transaction,
         envelope,
+        finalityPolicy: io.finalityPolicy,
       });
+      await preflightAtomicFinality(
+        io.finalityPolicy,
+        io.finalityChain,
+        io.signal,
+      );
       if (!(await io.confirm("approval", prepared.transaction, envelope))) {
         await io.journal.transition(attempt, "canceled");
         io.report({ sent: false, outcome: ExecutionOutcome.Canceled });
@@ -230,7 +248,13 @@ export async function runAtomicPlanTrade(
       transactionFingerprint: prepared.transactionFingerprint,
       transaction: prepared.transaction,
       envelope,
+      finalityPolicy: io.finalityPolicy,
     });
+    await preflightAtomicFinality(
+      io.finalityPolicy,
+      io.finalityChain,
+      io.signal,
+    );
     if (!(await io.confirm("swap", prepared.transaction, envelope))) {
       await io.journal.transition(attempt, "canceled");
       io.report({ sent: false, outcome: ExecutionOutcome.Canceled });
@@ -263,40 +287,39 @@ export async function runAtomicPlanTrade(
         transactionHash: submission.hash,
       };
     const hash = submission.hash;
-    let evidence: ReturnType<typeof verifyReceipt>;
-    try {
-      const receipt = await io.receipt(hash);
-      evidence = verifyReceipt(receipt, hash, checked.receipt);
-      if (requiresNativeRefundTrace(evidence)) {
-        if (!io.traceCanonicalTransaction)
-          throw new Error("Transaction trace is unavailable.");
-        const trace = await io.traceCanonicalTransaction(hash, receipt);
-        evidence = verifyReceipt(receipt, hash, checked.receipt, trace);
-      }
-    } catch {
-      if (
-        !(await recordReceipt(
-          io,
+    const finality = await finalizeAtomicSwap({
+      policy: io.finalityPolicy,
+      hash,
+      signedEnvelope: submission.attempt.signedEnvelope,
+      obligations: checked.receipt,
+      chain: io.finalityChain,
+      signal: io.signal,
+      report: io.report,
+      recordObserved: (evidence) =>
+        io.journal.transition(submission.attempt, "receipt_observed", {
+          transactionHash: hash,
+          provisionalEvidence: evidence,
+        }),
+      recordUnknown: (reason, evidence) =>
+        io.journal.transition(submission.attempt, "finality_unknown", {
+          transactionHash: hash,
+          finalityReason: reason,
+          ...(evidence ? { provisionalEvidence: evidence } : {}),
+        }),
+      recordFinal: (state, provisional, evidence) =>
+        io.journal.transition(
           submission.attempt,
-          hash,
-          "receipt_unavailable",
-        ))
-      )
-        return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
-      return unknownReceipt(io, hash);
-    }
-    const state =
-      evidence.outcome === VerificationOutcome.Passed
-        ? "receipt_passed"
-        : evidence.outcome === VerificationOutcome.Failed
-          ? "receipt_failed"
-          : "receipt_unavailable";
-    if (!(await recordReceipt(io, submission.attempt, hash, state)))
-      return { kind: ExecutionOutcome.Unknown, transactionHash: hash };
-    io.report({ transactionHash: hash, verification: evidence });
-    return evidence.outcome === VerificationOutcome.Passed
-      ? { kind: ExecutionOutcome.SwapVerified, transactionHash: hash }
-      : evidence.outcome === VerificationOutcome.Failed
+          state === "complete" ? "finalized_complete" : "finalized_failed",
+          {
+            transactionHash: hash,
+            provisionalEvidence: provisional,
+            finalityEvidence: evidence,
+          },
+        ),
+    });
+    return finality.kind === "complete"
+      ? { kind: ExecutionOutcome.SwapComplete, transactionHash: hash }
+      : finality.kind === "failed_final"
         ? { kind: ExecutionOutcome.Failed, transactionHash: hash }
         : { kind: ExecutionOutcome.Unknown, transactionHash: hash };
   }

@@ -34,6 +34,7 @@ import {
   executionCommand,
   verifyAtomicExecutor,
 } from "./execution-command";
+import { readAtomicFinalityPolicy } from "./finality-policy";
 import { formatQuote, formatStatus, formatTokens } from "./format";
 import { configureChain } from "./protocols";
 import {
@@ -51,6 +52,7 @@ export function executionExitCode(result: ExecutionResult) {
     case ExecutionOutcome.Preview:
     case ExecutionOutcome.ApprovalConfirmed:
     case ExecutionOutcome.SwapVerified:
+    case ExecutionOutcome.SwapComplete:
       return 0;
     case ExecutionOutcome.Canceled:
     case ExecutionOutcome.Failed:
@@ -291,6 +293,10 @@ export async function main(rawArgs: string[]) {
       const journal = await AtomicIntentJournal.open(values["atomic-journal"]);
       try {
         const attempt = journal.recoveryAttempt(values["attempt-id"]);
+        const finalityPolicy = await readAtomicFinalityPolicy(
+          parsed.config,
+          values.chain,
+        );
         const { expectedChainId, rpcUrlEnv, trusted } =
           await readExecutionConfig(
             parsed.config,
@@ -309,12 +315,18 @@ export async function main(rawArgs: string[]) {
         const rpcUrl = process.env[rpcUrlEnv];
         if (!rpcUrl)
           throw new Error("Configured RPC environment variable is missing.");
-        const rpc = readChain(rpcUrl, abort.signal);
+        const rpc = readChain(
+          rpcUrl,
+          abort.signal,
+          finalityPolicy.requestTimeoutMs,
+        );
         return executionExitCode(
           await runAtomicRecovery({
             journal,
             attempt,
             executor,
+            policy: finalityPolicy,
+            signal: abort.signal,
             chain: rpc,
             verifyExecutor: () => verifyAtomicExecutor(rpc, executor),
             report: (event) => console.log(JSON.stringify(event)),
@@ -580,6 +592,10 @@ export async function main(rawArgs: string[]) {
         throw new Error("Engine must enable execution on the connected chain.");
       // Establish executable account/network before asking for the first trade quote.
       // Execution still rereads config and discovers the account at its original read point.
+      const finalityPolicy =
+        values["execution-mode"] === "atomic-v1"
+          ? await readAtomicFinalityPolicy(config.path, chain.key)
+          : undefined;
       const context = await connectExecution(
         values,
         config.path,
@@ -588,6 +604,7 @@ export async function main(rawArgs: string[]) {
         abort.signal,
         false,
         values["execution-mode"] === "atomic-v1",
+        finalityPolicy?.requestTimeoutMs,
       );
       const rpcChainId = await context.rpc.chainId();
       if (
@@ -601,6 +618,8 @@ export async function main(rawArgs: string[]) {
       if (values["execution-mode"] === "atomic-v1") {
         if (!atomicFees)
           throw new Error("Atomic V1 fee caps were not admitted.");
+        if (!finalityPolicy)
+          throw new Error("Atomic finality policy was not admitted.");
         const pendingNonce = await context.rpc.pendingNonce(context.signer);
         const candidateIndex = Number(values["candidate-index"]);
         const slippage = values["slippage-bps"] ?? "50";
@@ -642,6 +661,9 @@ export async function main(rawArgs: string[]) {
               pendingNonce,
               maxFeePerGas: atomicFees.maxFeePerGas,
               maxPriorityFeePerGas: atomicFees.maxPriorityFeePerGas,
+              finalityPolicy,
+              finalityChain: context.rpc,
+              signal: abort.signal,
               journal,
               quote: () =>
                 atomicClient.getPlanQuote(

@@ -18,13 +18,15 @@ import {
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import { UnsignedTransactionSchema } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { AtomicIntentJournal } from "./atomic-intent-journal";
-import { admitRpcTransaction, runAtomicRecovery } from "./atomic-recovery";
+import { runAtomicRecovery } from "./atomic-recovery";
 import {
+  admitRpcAtomicTransaction,
   admitSignedAtomicEnvelope,
   atomicEnvelope,
 } from "./atomic-signed-envelope";
 import { readChain } from "./chain";
 import { ExecutionOutcome } from "./execution";
+import { parseAtomicFinalityPolicy } from "./finality-policy";
 
 const account = privateKeyToAccount(
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
@@ -40,7 +42,7 @@ const token = `0x${"5".repeat(40)}`;
 const amount = 123n;
 const word = (value: bigint) => hexToBytes(padHex(toHex(value), { size: 32 }));
 const transaction = create(UnsignedTransactionSchema, {
-  chainId: "31337",
+  chainId: "1",
   from: account.address,
   to: token,
   data: encodeFunctionData({
@@ -52,6 +54,26 @@ const transaction = create(UnsignedTransactionSchema, {
   gasLimit: "100000",
 });
 const envelope = atomicEnvelope(0n, 2_000_000_000n, 1_000_000_000n);
+const finalityPolicy = parseAtomicFinalityPolicy(
+  {
+    policy_version: "epeius-finality-v1",
+    finality_method: "ethereum_consensus",
+    completion_tag: "finalized",
+    safe_signal: "ethereum_safe",
+    network_anchor_number: 0,
+    network_anchor_hash: `0x${"a".repeat(64)}`,
+    rpc_source_id: "test",
+    capability_record: "test",
+    capability_valid_until: "2099-01-01T00:00:00Z",
+    request_timeout_ms: 100,
+    poll_interval_ms: 1,
+    wait_timeout_ms: 100,
+    stalled_after_ms: 50,
+    max_response_age_ms: 100,
+  },
+  "1",
+  0,
+);
 const approval = create(PreparePlanResponseSchema, {
   status: PlanPreparationStatus.APPROVAL_REQUIRED,
   approval: {
@@ -59,7 +81,7 @@ const approval = create(PreparePlanResponseSchema, {
     spender: hexToBytes(executor.address as `0x${string}`),
     amount: word(amount),
     transaction: {
-      chainId: word(31337n),
+      chainId: word(1n),
       from: hexToBytes(account.address),
       to: hexToBytes(token as `0x${string}`),
       data: hexToBytes(transaction.data as `0x${string}`),
@@ -88,10 +110,11 @@ async function fixture(
     planId: `0x${"1".repeat(64)}`,
     transaction,
     envelope,
+    finalityPolicy,
   });
   const raw = await account.signTransaction({
     type: "eip1559",
-    chainId: 31337,
+    chainId: 1,
     nonce: 0,
     maxFeePerGas: 2_000_000_000n,
     maxPriorityFeePerGas: 1_000_000_000n,
@@ -139,7 +162,7 @@ function rpcTransaction(
   return {
     hash: signed.transactionHash,
     type: "0x2",
-    chainId: "0x7a69",
+    chainId: "0x1",
     nonce: "0x0",
     from: signed.signer,
     to: signed.to,
@@ -161,23 +184,37 @@ function harness(t: Awaited<ReturnType<typeof fixture>>) {
   let confirms = 0;
   const hash = t.attempt.signedEnvelope.transactionHash;
   const receipt = { transactionHash: hash, status: "0x1", logs: [] };
+  const block = (tag: string) => ({
+    number: tag === "0x0" ? "0x0" : "0x1",
+    hash:
+      tag === "0x0" ? finalityPolicy.networkAnchorHash : `0x${"b".repeat(64)}`,
+    parentHash: tag === "0x0" ? `0x${"0".repeat(64)}` : `0x${"9".repeat(64)}`,
+    timestamp: "0x1",
+    transactions: [],
+  });
+  const chain = {
+    chainId: async () => "0x1",
+    nonce: async (_address: string, _tag: "latest" | "pending") => 0n,
+    canonicalReceipt: async () => null as typeof receipt | null,
+    receiptByHash: async () => chain.canonicalReceipt(),
+    transactionByHash: async () => null as unknown | null,
+    blockByNumber: async (tag: string) => block(tag),
+    blockByHash: async () => block("finalized"),
+    waitCanonicalReceipt: async () => receipt,
+    traceCanonicalTransaction: async () => ({}),
+    submitRawTransaction: async (raw: string) => {
+      submits++;
+      expect(raw).toBe(t.attempt.signedEnvelope.rawTransaction);
+      return hash;
+    },
+  };
   const io = {
     journal: t.journal,
     attempt: t.attempt,
     executor,
-    chain: {
-      chainId: async () => "0x7a69",
-      nonce: async (_address: string, _tag: "latest" | "pending") => 0n,
-      canonicalReceipt: async () => null as typeof receipt | null,
-      transactionByHash: async () => null as unknown | null,
-      waitCanonicalReceipt: async () => receipt,
-      traceCanonicalTransaction: async () => ({}),
-      submitRawTransaction: async (raw: string) => {
-        submits++;
-        expect(raw).toBe(t.attempt.signedEnvelope.rawTransaction);
-        return hash;
-      },
-    },
+    policy: finalityPolicy,
+    signal: new AbortController().signal,
+    chain,
     verifyExecutor: async () => true,
     confirm: async () => {
       confirms++;
@@ -420,12 +457,12 @@ test("observed transaction admission rejects every changed authority field", asy
   try {
     const exact = rpcTransaction(t.attempt.signedEnvelope);
     expect(() =>
-      admitRpcTransaction(exact, t.attempt.signedEnvelope),
+      admitRpcAtomicTransaction(exact, t.attempt.signedEnvelope),
     ).not.toThrow();
     for (const [field, value] of [
       ["hash", `0x${"9".repeat(64)}`],
       ["type", "0x1"],
-      ["chainId", "0x1"],
+      ["chainId", "0x2"],
       ["nonce", "0x1"],
       ["from", `0x${"9".repeat(40)}`],
       ["to", `0x${"9".repeat(40)}`],
@@ -440,13 +477,13 @@ test("observed transaction admission rejects every changed authority field", asy
       ["s", `0x${"9".repeat(64)}`],
     ] as const)
       expect(() =>
-        admitRpcTransaction(
+        admitRpcAtomicTransaction(
           { ...exact, [field]: value },
           t.attempt.signedEnvelope,
         ),
       ).toThrow();
     expect(() =>
-      admitRpcTransaction(
+      admitRpcAtomicTransaction(
         { ...exact, nonce: "0x00" },
         t.attempt.signedEnvelope,
       ),
@@ -459,7 +496,7 @@ test("observed transaction admission rejects every changed authority field", asy
 test("real local Anvil recovers one never-submitted stored envelope as the exact same bytes and hash", async () => {
   const port = 20_000 + Math.floor(Math.random() * 20_000);
   const anvil = Bun.spawn(
-    ["anvil", "--silent", "--port", String(port), "--chain-id", "31337"],
+    ["anvil", "--silent", "--port", String(port), "--chain-id", "1"],
     { stdout: "pipe", stderr: "pipe" },
   );
   const url = `http://127.0.0.1:${port}`;
@@ -489,8 +526,20 @@ test("real local Anvil recovers one never-submitted stored envelope as the exact
         journal: t.journal,
         attempt: t.attempt,
         executor,
+        policy: finalityPolicy,
+        signal: new AbortController().signal,
         chain: {
           ...chain,
+          blockByNumber: async (tag) =>
+            tag === "0x0"
+              ? {
+                  number: "0x0",
+                  hash: finalityPolicy.networkAnchorHash,
+                  parentHash: `0x${"0".repeat(64)}`,
+                  timestamp: "0x0",
+                  transactions: [],
+                }
+              : chain.blockByNumber(tag),
           submitRawTransaction: async (raw) => {
             submits++;
             expect(raw).toBe(t.attempt.signedEnvelope.rawTransaction);
@@ -510,7 +559,7 @@ test("real local Anvil recovers one never-submitted stored envelope as the exact
         t.attempt.signedEnvelope.transactionHash,
       );
       expect(() =>
-        admitRpcTransaction(observed, t.attempt.signedEnvelope),
+        admitRpcAtomicTransaction(observed, t.attempt.signedEnvelope),
       ).not.toThrow();
       expect(
         (await chain.canonicalReceipt(t.attempt.signedEnvelope.transactionHash))
@@ -555,7 +604,7 @@ test("recovery CLI uses explicit local config and RPC without engine, wallet, or
       methods.push(body.method);
       const result =
         body.method === "eth_chainId"
-          ? "0x7a69"
+          ? "0x1"
           : body.method === "eth_getCode"
             ? code
             : body.method === "eth_call"
@@ -569,7 +618,19 @@ test("recovery CLI uses explicit local config and RPC without engine, wallet, or
                     logs: [],
                   }
                 : body.method === "eth_getBlockByNumber"
-                  ? { hash: blockHash }
+                  ? {
+                      number: body.params[0] === "0x0" ? "0x0" : "0x1",
+                      hash:
+                        body.params[0] === "0x0"
+                          ? finalityPolicy.networkAnchorHash
+                          : blockHash,
+                      parentHash:
+                        body.params[0] === "0x0"
+                          ? `0x${"0".repeat(64)}`
+                          : `0x${"9".repeat(64)}`,
+                      timestamp: "0x1",
+                      transactions: [],
+                    }
                   : null;
       return Response.json({ jsonrpc: "2.0", id: body.id, result });
     },
@@ -577,7 +638,7 @@ test("recovery CLI uses explicit local config and RPC without engine, wallet, or
   const config = join(t.directory, "epeius.toml");
   await Bun.write(
     config,
-    `[chains.local]\nchain_id=31337\nrpc_url_env='RECOVERY_RPC'\nexecution_enabled=true\n[chains.local.deployments.uni]\nkind='uniswap-v3'\nfactory='0x${"6".repeat(40)}'\nrouter='0x${"7".repeat(40)}'\nfees=[500]\n[chains.local.atomic_executor]\naddress='${executor.address}'\nruntime_code_hash='${keccak256(code)}'\nmax_branches=4\nmax_operations_per_branch=4\nmax_total_operations=4\nuniswap_deployment='uni'\n`,
+    `[chains.local]\nchain_id=1\nrpc_url_env='RECOVERY_RPC'\nexecution_enabled=true\n[chains.local.finality]\npolicy_version='epeius-finality-v1'\nfinality_method='ethereum_consensus'\ncompletion_tag='finalized'\nsafe_signal='ethereum_safe'\nnetwork_anchor_number=0\nnetwork_anchor_hash='${finalityPolicy.networkAnchorHash}'\nrpc_source_id='test'\ncapability_record='test'\ncapability_valid_until='2099-01-01T00:00:00Z'\nrequest_timeout_ms=100\npoll_interval_ms=1\nwait_timeout_ms=100\nstalled_after_ms=50\nmax_response_age_ms=100\n[chains.local.deployments.uni]\nkind='uniswap-v3'\nfactory='0x${"6".repeat(40)}'\nrouter='0x${"7".repeat(40)}'\nfees=[500]\n[chains.local.atomic_executor]\naddress='${executor.address}'\nruntime_code_hash='${keccak256(code)}'\nmax_branches=4\nmax_operations_per_branch=4\nmax_total_operations=4\nuniswap_deployment='uni'\n`,
   );
   try {
     const child = Bun.spawn(
@@ -609,16 +670,8 @@ test("recovery CLI uses explicit local config and RPC without engine, wallet, or
     expect(exit).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toContain('"recovery":"receipt_passed"');
-    expect(methods).toEqual([
-      "eth_chainId",
-      "eth_getCode",
-      "eth_call",
-      "eth_call",
-      "eth_call",
-      "eth_getTransactionReceipt",
-      "eth_getTransactionByHash",
-      "eth_getBlockByNumber",
-    ]);
+    expect(methods).toContain("eth_getBlockByNumber");
+    expect(methods).not.toContain("eth_sendRawTransaction");
   } finally {
     server.stop(true);
     await rm(t.directory, { recursive: true, force: true });

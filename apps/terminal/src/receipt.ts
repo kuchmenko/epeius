@@ -26,11 +26,16 @@ export type Receipt = {
   status: string;
   blockHash?: string | null;
   blockNumber?: string | null;
+  transactionIndex?: string | null;
   logs: Array<{
     address: string;
     topics: string[];
     data: string;
     transactionHash: string;
+    blockHash?: string | null;
+    blockNumber?: string | null;
+    transactionIndex?: string | null;
+    logIndex?: string | null;
     removed?: boolean;
   }>;
 };

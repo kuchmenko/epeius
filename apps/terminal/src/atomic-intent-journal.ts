@@ -5,12 +5,22 @@ import { dirname } from "node:path";
 import { isAddress, isHash, isHex } from "viem";
 import type { UnsignedTransaction } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import type {
+  AtomicFinalityEvidence,
+  AtomicProvisionalEvidence,
+} from "./atomic-finality";
+import {
+  validateStoredFinalityEvidence,
+  validateStoredProvisionalEvidence,
+} from "./atomic-finality";
+import type {
   AtomicEnvelope,
   SignedAtomicEnvelope,
 } from "./atomic-signed-envelope";
 import { admitSignedAtomicEnvelope } from "./atomic-signed-envelope";
+import type { AtomicFinalityPolicy } from "./finality-policy";
+import { validateStoredFinalityPolicy } from "./finality-policy";
 
-export const ATOMIC_INTENT_JOURNAL_VERSION = 2;
+export const ATOMIC_INTENT_JOURNAL_VERSION = 3;
 
 export type AtomicIntentAction = "approval" | "swap";
 export type AtomicIntentState =
@@ -24,6 +34,10 @@ export type AtomicIntentState =
   | "receipt_passed"
   | "receipt_failed"
   | "receipt_unavailable"
+  | "receipt_observed"
+  | "finality_unknown"
+  | "finalized_complete"
+  | "finalized_failed"
   | "submission_unknown";
 
 type Intent = {
@@ -34,6 +48,7 @@ type Intent = {
   transactionFingerprint?: string;
   transaction: UnsignedTransaction;
   envelope: AtomicEnvelope;
+  finalityPolicy: AtomicFinalityPolicy;
 };
 
 export type AtomicIntentAttempt = Intent;
@@ -54,7 +69,7 @@ type Prepared = Intent & {
 };
 
 export type AtomicRecoveryAttempt = {
-  prepared: Prepared;
+  prepared: Prepared | V2Prepared;
   current: JournalRecord;
   signedEnvelope: SignedAtomicEnvelope;
 };
@@ -65,15 +80,31 @@ type Transition = Intent & {
   signedEnvelope?: SignedAtomicEnvelope;
   transactionHash?: string;
   verification?: "receipt_success" | "economic_pass" | "failed" | "unavailable";
+  provisionalEvidence?: AtomicProvisionalEvidence;
+  finalityEvidence?: AtomicFinalityEvidence;
+  finalityReason?: string;
 };
 
+type WithoutV3<T> = T extends unknown
+  ? Omit<
+      T,
+      | "schemaVersion"
+      | "finalityPolicy"
+      | "provisionalEvidence"
+      | "finalityEvidence"
+      | "finalityReason"
+    > & { schemaVersion: 2 }
+  : never;
+type V2JournalRecord = WithoutV3<Prepared | Transition>;
+type V2Prepared = Extract<V2JournalRecord, { state: "prepared" }>;
 type V1JournalRecord = Omit<
-  Prepared | Transition,
-  "schemaVersion" | "envelope"
+  V2JournalRecord,
+  "schemaVersion" | "envelope" | "signedEnvelope"
 > & {
   schemaVersion: 1;
+  signedEnvelope?: never;
 };
-type JournalRecord = Prepared | Transition | V1JournalRecord;
+type JournalRecord = Prepared | Transition | V2JournalRecord | V1JournalRecord;
 
 export type AtomicIntentJournalHooks = {
   before?: (
@@ -98,6 +129,7 @@ const baseKeys = [
   "transactionFingerprint",
   "transaction",
   "envelope",
+  "finalityPolicy",
 ] as const;
 const preparedKeys = [...baseKeys, "payloadType", "payloadBinaryHex"];
 const transitionKeys = [
@@ -105,8 +137,19 @@ const transitionKeys = [
   "signedEnvelope",
   "transactionHash",
   "verification",
+  "provisionalEvidence",
+  "finalityEvidence",
+  "finalityReason",
 ];
-const v1BaseKeys = baseKeys.filter((key) => key !== "envelope");
+const v2BaseKeys = baseKeys.filter((key) => key !== "finalityPolicy");
+const v2PreparedKeys = [...v2BaseKeys, "payloadType", "payloadBinaryHex"];
+const v2TransitionKeys = [
+  ...v2BaseKeys,
+  "signedEnvelope",
+  "transactionHash",
+  "verification",
+];
+const v1BaseKeys = v2BaseKeys.filter((key) => key !== "envelope");
 const v1PreparedKeys = [...v1BaseKeys, "payloadType", "payloadBinaryHex"];
 const v1TransitionKeys = [...v1BaseKeys, "transactionHash", "verification"];
 const transactionKeys = [
@@ -198,6 +241,82 @@ const transitionsV2: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
     "receipt_unavailable",
   ],
 };
+const transitionsV3: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
+  prepared: ["canceled", "signed"],
+  canceled: [],
+  signed: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "submitted",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "receipt_observed",
+    "finality_unknown",
+    "submission_unknown",
+  ],
+  submission_observed: [
+    "submission_observed",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "receipt_observed",
+    "finality_unknown",
+  ],
+  recovery_handoff_started: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "submitted",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "receipt_observed",
+    "finality_unknown",
+    "submission_unknown",
+  ],
+  submitted: [
+    "submission_observed",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "receipt_observed",
+    "finality_unknown",
+  ],
+  receipt_passed: [],
+  receipt_failed: [],
+  receipt_unavailable: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "receipt_observed",
+    "finality_unknown",
+  ],
+  receipt_observed: [
+    "receipt_observed",
+    "finality_unknown",
+    "finalized_complete",
+    "finalized_failed",
+  ],
+  finality_unknown: [
+    "receipt_observed",
+    "finality_unknown",
+    "finalized_complete",
+    "finalized_failed",
+  ],
+  finalized_complete: [],
+  finalized_failed: [],
+  submission_unknown: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "receipt_observed",
+    "finality_unknown",
+  ],
+};
 const blocksNewAttempt = new Set<AtomicIntentState>([
   "handoff_started",
   "signed",
@@ -206,6 +325,8 @@ const blocksNewAttempt = new Set<AtomicIntentState>([
   "submitted",
   "receipt_unavailable",
   "submission_unknown",
+  "receipt_observed",
+  "finality_unknown",
 ]);
 
 export class AtomicIntentJournal {
@@ -215,7 +336,7 @@ export class AtomicIntentJournal {
   readonly #lockIdentity: { dev: bigint; ino: bigint };
   readonly #hooks: AtomicIntentJournalHooks;
   readonly #states: Map<string, JournalRecord>;
-  readonly #prepared: Map<string, Prepared | V1JournalRecord>;
+  readonly #prepared: Map<string, Prepared | V2Prepared | V1JournalRecord>;
   #closed = false;
 
   private constructor(
@@ -225,7 +346,7 @@ export class AtomicIntentJournal {
     lockIdentity: { dev: bigint; ino: bigint },
     hooks: AtomicIntentJournalHooks,
     states: Map<string, JournalRecord>,
-    prepared: Map<string, Prepared | V1JournalRecord>,
+    prepared: Map<string, Prepared | V2Prepared | V1JournalRecord>,
   ) {
     this.#file = file;
     this.#lockPath = lockPath;
@@ -336,6 +457,7 @@ export class AtomicIntentJournal {
     transactionFingerprint?: string;
     transaction: UnsignedTransaction;
     envelope: AtomicEnvelope;
+    finalityPolicy: AtomicFinalityPolicy;
   }): Promise<AtomicIntentAttempt> {
     this.#assertOpen();
     if (
@@ -358,6 +480,7 @@ export class AtomicIntentJournal {
         : {}),
       transaction: journalTransaction(input.transaction),
       envelope: structuredClone(input.envelope),
+      finalityPolicy: structuredClone(input.finalityPolicy),
     };
     const record: Prepared = {
       schemaVersion: ATOMIC_INTENT_JOURNAL_VERSION,
@@ -409,14 +532,21 @@ export class AtomicIntentJournal {
       AtomicIntentState,
       "prepared" | "handoff_started" | "signed"
     >,
-    details: Pick<Transition, "transactionHash" | "verification"> = {},
+    details: Pick<
+      Transition,
+      | "transactionHash"
+      | "verification"
+      | "provisionalEvidence"
+      | "finalityEvidence"
+      | "finalityReason"
+    > = {},
   ) {
     this.#assertOpen();
     const previous = this.#states.get(attempt.attemptId);
     if (
       !previous ||
       previous.schemaVersion !== ATOMIC_INTENT_JOURNAL_VERSION ||
-      !(transitionsV2[previous.state] ?? []).includes(state)
+      !(transitionsV3[previous.state] ?? []).includes(state)
     )
       throw new Error("Atomic intent journal transition is invalid.");
     const record: Transition = {
@@ -439,12 +569,18 @@ export class AtomicIntentJournal {
     const current = this.#states.get(attemptId);
     if (!prepared || !current)
       throw new Error("Atomic recovery attempt was not found.");
-    if (prepared.schemaVersion !== 2 || current.schemaVersion !== 2)
+    if (
+      ![2, 3].includes(prepared.schemaVersion) ||
+      ![2, 3].includes(current.schemaVersion)
+    )
       throw new Error(
         "Atomic journal schema 1 is inspect-only and unrecoverable.",
       );
     if (
-      ["canceled", "receipt_passed", "receipt_failed"].includes(current.state)
+      current.state === "canceled" ||
+      ["finalized_complete", "finalized_failed"].includes(current.state) ||
+      (current.action === "approval" &&
+        ["receipt_passed", "receipt_failed"].includes(current.state))
     )
       throw new Error("Atomic recovery attempt is canceled or final.");
     if (
@@ -455,6 +591,10 @@ export class AtomicIntentJournal {
         "submission_unknown",
         "submitted",
         "receipt_unavailable",
+        "receipt_passed",
+        "receipt_failed",
+        "receipt_observed",
+        "finality_unknown",
       ].includes(current.state) ||
       !("signedEnvelope" in current) ||
       !current.signedEnvelope
@@ -463,7 +603,7 @@ export class AtomicIntentJournal {
         "Atomic recovery attempt has no recoverable signed bytes.",
       );
     return {
-      prepared: structuredClone(prepared),
+      prepared: structuredClone(prepared) as Prepared | V2Prepared,
       current: structuredClone(current),
       signedEnvelope: structuredClone(current.signedEnvelope),
     };
@@ -478,19 +618,43 @@ export class AtomicIntentJournal {
       | "receipt_passed"
       | "receipt_failed"
       | "receipt_unavailable"
+      | "receipt_observed"
+      | "finality_unknown"
+      | "finalized_complete"
+      | "finalized_failed"
       | "submission_unknown",
-    details: Pick<Transition, "transactionHash" | "verification"> = {},
+    details: Partial<
+      Pick<
+        Transition,
+        | "transactionHash"
+        | "verification"
+        | "provisionalEvidence"
+        | "finalityEvidence"
+        | "finalityReason"
+        | "finalityPolicy"
+      >
+    > = {},
   ) {
     this.#assertOpen();
     const previous = this.#states.get(attempt.current.attemptId);
     if (
-      previous?.schemaVersion !== 2 ||
+      !previous ||
+      ![2, 3].includes(previous.schemaVersion) ||
       JSON.stringify(previous) !== JSON.stringify(attempt.current) ||
-      !(transitionsV2[previous.state] ?? []).includes(state)
+      (!(transitionsFor(previous.schemaVersion)[previous.state] ?? []).includes(
+        state,
+      ) &&
+        !(
+          previous.schemaVersion === 2 &&
+          ["receipt_observed", "finality_unknown"].includes(state)
+        ))
     )
       throw new Error("Atomic recovery journal transition is invalid.");
-    const record: Transition = {
-      schemaVersion: 2,
+    const migrate =
+      previous.schemaVersion === 2 &&
+      ["receipt_observed", "finality_unknown"].includes(state);
+    const record = {
+      schemaVersion: migrate ? 3 : previous.schemaVersion,
       attemptId: previous.attemptId,
       action: previous.action,
       ...(previous.planId ? { planId: previous.planId } : {}),
@@ -501,11 +665,18 @@ export class AtomicIntentJournal {
         ? { transactionFingerprint: previous.transactionFingerprint }
         : {}),
       transaction: structuredClone(previous.transaction),
-      envelope: structuredClone(previous.envelope),
+      envelope: structuredClone(
+        (previous as Prepared | Transition | V2JournalRecord).envelope,
+      ),
+      ...(previous.schemaVersion === 3
+        ? { finalityPolicy: structuredClone(previous.finalityPolicy) }
+        : migrate && details.finalityPolicy
+          ? { finalityPolicy: structuredClone(details.finalityPolicy) }
+          : {}),
       signedEnvelope: structuredClone(attempt.signedEnvelope),
       state,
       ...details,
-    };
+    } as Transition | V2JournalRecord;
     await validateRecord(record);
     assertSameIntent(previous, record);
     assertSameSignedEnvelope(previous, record);
@@ -544,7 +715,7 @@ export async function parseAtomicIntentJournal(raw: string) {
 
 async function parseAtomicIntentJournalHistory(raw: string) {
   const states = new Map<string, JournalRecord>();
-  const prepared = new Map<string, Prepared | V1JournalRecord>();
+  const prepared = new Map<string, Prepared | V2Prepared | V1JournalRecord>();
   if (!raw) return { states, prepared };
   if (!raw.endsWith("\n"))
     throw new Error("Atomic intent journal has a partial final record.");
@@ -563,14 +734,22 @@ async function parseAtomicIntentJournalHistory(raw: string) {
     if (current.state === "prepared") {
       if (previous)
         throw new Error("Atomic intent journal contains a duplicate attempt.");
-      prepared.set(current.attemptId, current as Prepared | V1JournalRecord);
+      prepared.set(
+        current.attemptId,
+        current as Prepared | V2Prepared | V1JournalRecord,
+      );
     } else {
       if (
         !previous ||
-        previous.schemaVersion !== current.schemaVersion ||
-        !(transitionsFor(current.schemaVersion)[previous.state] ?? []).includes(
-          current.state,
-        )
+        (previous.schemaVersion !== current.schemaVersion
+          ? !(
+              previous.schemaVersion === 2 &&
+              current.schemaVersion === 3 &&
+              ["receipt_observed", "finality_unknown"].includes(current.state)
+            )
+          : !(
+              transitionsFor(current.schemaVersion)[previous.state] ?? []
+            ).includes(current.state))
       )
         throw new Error(
           "Atomic intent journal transition sequence is invalid.",
@@ -587,10 +766,10 @@ async function parseAtomicIntentJournalHistory(raw: string) {
 async function validateRecord(value: unknown): Promise<void> {
   if (!plainObject(value))
     throw new Error("Atomic intent journal record must be an object.");
-  if (value.schemaVersion !== 1 && value.schemaVersion !== 2)
+  if (![1, 2, 3].includes(value.schemaVersion as number))
     throw new Error("Atomic intent journal schema version is unsupported.");
-  const version = value.schemaVersion;
-  const validStates = version === 1 ? transitionsV1 : transitionsV2;
+  const version = value.schemaVersion as 1 | 2 | 3;
+  const validStates = transitionsFor(version);
   if (
     typeof value.attemptId !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
@@ -607,10 +786,14 @@ async function validateRecord(value: unknown): Promise<void> {
     state === "prepared"
       ? version === 1
         ? v1PreparedKeys
-        : preparedKeys
+        : version === 2
+          ? v2PreparedKeys
+          : preparedKeys
       : version === 1
         ? v1TransitionKeys
-        : transitionKeys,
+        : version === 2
+          ? v2TransitionKeys
+          : transitionKeys,
   );
   for (const name of [
     "planId",
@@ -620,7 +803,15 @@ async function validateRecord(value: unknown): Promise<void> {
     if (value[name] !== undefined && !isHash(value[name] as string))
       throw new Error("Atomic intent journal hash identity is invalid.");
   validateTransaction(value.transaction);
-  if (version === 2) validateEnvelope(value.envelope);
+  if (version >= 2) validateEnvelope(value.envelope);
+  if (version === 3) {
+    validateStoredFinalityPolicy(value.finalityPolicy);
+    if (
+      (value.finalityPolicy as AtomicFinalityPolicy).chainId !==
+      (value.transaction as Record<string, unknown>).chainId
+    )
+      throw new Error("Atomic finality policy chain identity changed.");
+  }
   if (state === "prepared") {
     if (
       (value.payloadType !== "approval_response" &&
@@ -641,7 +832,7 @@ async function validateRecord(value: unknown): Promise<void> {
       throw new Error("Atomic intent journal prepared payload is invalid.");
     return;
   }
-  if (version === 2) {
+  if (version >= 2) {
     const signedRequired = state !== "canceled";
     if (signedRequired !== (value.signedEnvelope !== undefined))
       throw new Error("Atomic intent journal signed envelope is missing.");
@@ -667,6 +858,10 @@ async function validateRecord(value: unknown): Promise<void> {
     "receipt_passed",
     "receipt_failed",
     "receipt_unavailable",
+    "receipt_observed",
+    "finality_unknown",
+    "finalized_complete",
+    "finalized_failed",
   ].includes(state);
   if (
     (hashRequired && !isHash(value.transactionHash as string)) ||
@@ -688,6 +883,62 @@ async function validateRecord(value: unknown): Promise<void> {
     (value.action === "approval") !== (value.verification === "receipt_success")
   )
     throw new Error("Atomic intent journal receipt meaning is invalid.");
+
+  if (version === 3) {
+    if (
+      value.action === "approval" &&
+      [
+        "receipt_observed",
+        "finality_unknown",
+        "finalized_complete",
+        "finalized_failed",
+      ].includes(state)
+    )
+      throw new Error("Atomic approval cannot use swap finality states.");
+    if (
+      value.action === "swap" &&
+      ["receipt_passed", "receipt_failed"].includes(state)
+    )
+      throw new Error(
+        "Atomic swap receipt cannot be terminal before finality.",
+      );
+    const hasProvisional = value.provisionalEvidence !== undefined;
+    const hasFinality = value.finalityEvidence !== undefined;
+    const needsProvisional = [
+      "receipt_observed",
+      "finalized_complete",
+      "finalized_failed",
+    ].includes(state);
+    if (
+      (needsProvisional && !hasProvisional) ||
+      (!needsProvisional && state !== "finality_unknown" && hasProvisional) ||
+      ["finalized_complete", "finalized_failed"].includes(state) !==
+        hasFinality ||
+      (state === "finality_unknown") !== (value.finalityReason !== undefined) ||
+      (value.finalityReason !== undefined &&
+        (typeof value.finalityReason !== "string" || !value.finalityReason))
+    )
+      throw new Error(
+        "Atomic finality journal transition details are invalid.",
+      );
+    if (hasProvisional)
+      validateStoredProvisionalEvidence(value.provisionalEvidence);
+    if (hasFinality) {
+      validateStoredFinalityEvidence(
+        value.finalityEvidence,
+        value.provisionalEvidence as AtomicProvisionalEvidence,
+        value.finalityPolicy as AtomicFinalityPolicy,
+      );
+      const provisional =
+        value.provisionalEvidence as AtomicProvisionalEvidence;
+      if (
+        (state === "finalized_complete") !==
+        (provisional.execution === "success" &&
+          provisional.economics === "passed")
+      )
+        throw new Error("Atomic finalized result meaning is invalid.");
+    }
+  }
 }
 
 function validateTransaction(value: unknown) {
@@ -837,12 +1088,26 @@ function assertSameIntent(previous: JournalRecord, current: JournalRecord) {
       "Atomic intent journal transaction changed within an attempt.",
     );
   if (
-    previous.schemaVersion === 2 &&
-    current.schemaVersion === 2 &&
-    JSON.stringify(previous.envelope) !== JSON.stringify(current.envelope)
+    previous.schemaVersion >= 2 &&
+    current.schemaVersion >= 2 &&
+    JSON.stringify(
+      (previous as Prepared | Transition | V2JournalRecord).envelope,
+    ) !==
+      JSON.stringify(
+        (current as Prepared | Transition | V2JournalRecord).envelope,
+      )
   )
     throw new Error(
       "Atomic intent journal envelope changed within an attempt.",
+    );
+  if (
+    previous.schemaVersion === 3 &&
+    current.schemaVersion === 3 &&
+    JSON.stringify(previous.finalityPolicy) !==
+      JSON.stringify(current.finalityPolicy)
+  )
+    throw new Error(
+      "Atomic intent journal finality policy changed within an attempt.",
     );
 }
 
@@ -864,7 +1129,7 @@ function assertSameTransactionHash(
   current: JournalRecord,
 ) {
   if (
-    current.schemaVersion === 2 &&
+    current.schemaVersion >= 2 &&
     [
       "submission_observed",
       "recovery_handoff_started",
@@ -872,15 +1137,22 @@ function assertSameTransactionHash(
       "receipt_passed",
       "receipt_failed",
       "receipt_unavailable",
+      "receipt_observed",
+      "finality_unknown",
+      "finalized_complete",
+      "finalized_failed",
     ].includes(current.state) &&
     "signedEnvelope" in current &&
-    current.signedEnvelope?.transactionHash !== current.transactionHash
+    current.signedEnvelope?.transactionHash !==
+      (current as unknown as Record<string, unknown>).transactionHash
   )
     throw new Error(
       "Atomic intent journal submitted hash differs from signed bytes.",
     );
   if (
-    current.state.startsWith("receipt_") &&
+    (current.state.startsWith("receipt_") ||
+      current.state.startsWith("finality_") ||
+      current.state.startsWith("finalized_")) &&
     [
       "signed",
       "submission_observed",
@@ -897,8 +1169,12 @@ function assertSameTransactionHash(
     );
 }
 
-function transitionsFor(version: 1 | 2) {
-  return version === 1 ? transitionsV1 : transitionsV2;
+function transitionsFor(version: 1 | 2 | 3) {
+  return version === 1
+    ? transitionsV1
+    : version === 2
+      ? transitionsV2
+      : transitionsV3;
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]) {

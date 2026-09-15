@@ -9,6 +9,7 @@ import {
   keccak256,
   padHex,
   recoverTransactionAddress,
+  toHex,
   toRlp,
 } from "viem";
 import type { UnsignedTransaction } from "../../../generated/ts/epeius/quote/v1/quote_pb";
@@ -157,4 +158,55 @@ export async function admitSignedAtomicEnvelope(
     rawTransaction: raw,
     transactionHash,
   };
+}
+
+export function admitRpcAtomicTransaction(
+  value: unknown,
+  expected: SignedAtomicEnvelope,
+) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Observed transaction is malformed.");
+  const tx = value as Record<string, unknown>;
+  const quantity = (name: string) => {
+    const raw = tx[name];
+    if (
+      typeof raw !== "string" ||
+      !isHex(raw, { strict: true }) ||
+      raw === "0x"
+    )
+      throw new Error("Observed transaction authority is malformed.");
+    const number = BigInt(raw);
+    if (toHex(number) !== raw.toLowerCase())
+      throw new Error("Observed transaction authority is noncanonical.");
+    return number.toString();
+  };
+  const same = (left: unknown, right: string) =>
+    typeof left === "string" && left.toLowerCase() === right.toLowerCase();
+  const signatureScalar = (name: "r" | "s") => {
+    const raw = tx[name];
+    if (typeof raw === "string" && /^0x[0-9a-fA-F]{64}$/.test(raw))
+      return BigInt(raw).toString();
+    return quantity(name);
+  };
+  if (
+    !same(tx.hash, expected.transactionHash) ||
+    quantity("type") !== "2" ||
+    quantity("chainId") !== expected.chainId ||
+    quantity("nonce") !== expected.nonce ||
+    !same(tx.from, expected.signer) ||
+    !isAddress(String(tx.from), { strict: false }) ||
+    !same(tx.to, expected.to) ||
+    !isAddress(String(tx.to), { strict: false }) ||
+    !same(tx.input, expected.data) ||
+    quantity("value") !== expected.valueAtomic ||
+    quantity("gas") !== expected.gasLimit ||
+    quantity("maxFeePerGas") !== expected.maxFeePerGasAtomic ||
+    quantity("maxPriorityFeePerGas") !== expected.maxPriorityFeePerGasAtomic ||
+    !Array.isArray(tx.accessList) ||
+    tx.accessList.length !== 0 ||
+    quantity("yParity") !== String(expected.yParity) ||
+    signatureScalar("r") !== BigInt(expected.r).toString() ||
+    signatureScalar("s") !== BigInt(expected.s).toString()
+  )
+    throw new Error("Observed transaction differs from stored signed bytes.");
 }

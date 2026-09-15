@@ -41,6 +41,7 @@ export async function connectExecution(
   signal: AbortSignal,
   allocations = false,
   atomic = false,
+  requestTimeoutMs = 15000,
 ) {
   if (!values.keystore || !values["password-file"])
     throw new Error("Provide --keystore and --password-file.");
@@ -58,7 +59,7 @@ export async function connectExecution(
   const rpcUrl = process.env[rpcUrlEnv];
   if (!rpcUrl)
     throw new Error("Configured RPC environment variable is missing.");
-  const rpc = readChain(rpcUrl, signal);
+  const rpc = readChain(rpcUrl, signal, requestTimeoutMs);
   if (
     atomic &&
     (!trusted.atomicExecutor ||

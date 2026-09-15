@@ -32,6 +32,7 @@ test("CLI exit mapping covers every execution outcome; verification is action-sp
     canceled: 1,
     "approval-confirmed": 0,
     "swap-verified": 0,
+    "swap-complete": 0,
     failed: 1,
     unknown: 1,
   };

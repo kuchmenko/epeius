@@ -1,26 +1,29 @@
-import { isAddress, isHash, isHex, toHex } from "viem";
+import { isHash, isHex } from "viem";
+import { finalizeAtomicSwap, preflightAtomicFinality } from "./atomic-finality";
 import type {
   AtomicIntentJournal,
   AtomicRecoveryAttempt,
 } from "./atomic-intent-journal";
 import type { AtomicExecutorIdentity } from "./atomic-plan-execution";
 import { admitAtomicRecoveryPayload } from "./atomic-plan-execution";
-import { admitSignedAtomicEnvelope } from "./atomic-signed-envelope";
+import {
+  admitRpcAtomicTransaction,
+  admitSignedAtomicEnvelope,
+} from "./atomic-signed-envelope";
 import type { readChain } from "./chain";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
-import {
-  type Receipt,
-  requiresNativeRefundTrace,
-  VerificationOutcome,
-  verifyReceipt,
-} from "./receipt";
+import type { AtomicFinalityPolicy } from "./finality-policy";
+import { type Receipt, VerificationOutcome } from "./receipt";
 
 type RecoveryChain = Pick<
   ReturnType<typeof readChain>,
   | "chainId"
   | "nonce"
   | "canonicalReceipt"
+  | "receiptByHash"
   | "transactionByHash"
+  | "blockByNumber"
+  | "blockByHash"
   | "waitCanonicalReceipt"
   | "traceCanonicalTransaction"
   | "submitRawTransaction"
@@ -30,6 +33,8 @@ export type AtomicRecoveryIO = {
   journal: Pick<AtomicIntentJournal, "recoveryTransition">;
   attempt: AtomicRecoveryAttempt;
   executor: AtomicExecutorIdentity;
+  policy: AtomicFinalityPolicy;
+  signal: AbortSignal;
   chain: RecoveryChain;
   verifyExecutor: () => Promise<boolean>;
   confirm: (attempt: AtomicRecoveryAttempt) => Promise<boolean>;
@@ -51,6 +56,24 @@ export async function runAtomicRecovery(
   const payload = admitAtomicRecoveryPayload(attempt.prepared, io.executor);
   if (attempt.prepared.transaction.chainId !== signed.chainId)
     throw new Error("Atomic recovery chain identity changed.");
+  if (
+    attempt.current.schemaVersion === 3 &&
+    "finalityPolicy" in attempt.current &&
+    JSON.stringify(attempt.current.finalityPolicy) !== JSON.stringify(io.policy)
+  )
+    throw new Error("Atomic recovery finality policy changed.");
+  await preflightAtomicFinality(io.policy, io.chain, io.signal);
+
+  if (
+    payload.action === "swap" &&
+    [
+      "receipt_passed",
+      "receipt_failed",
+      "receipt_observed",
+      "finality_unknown",
+    ].includes(attempt.current.state)
+  )
+    return finalizeRecoverySwap(io, payload);
   const rpcChainId = await io.chain.chainId();
   if (
     !isHex(rpcChainId, { strict: true }) ||
@@ -137,7 +160,9 @@ export async function runAtomicRecovery(
   } catch {
     return journalIncomplete(io);
   }
-  return followReceipt(io, payload);
+  return payload.action === "swap"
+    ? finalizeRecoverySwap(io, payload)
+    : followReceipt(io, payload);
 }
 
 async function inspectSubmission(
@@ -145,19 +170,26 @@ async function inspectSubmission(
   payload: ReturnType<typeof admitAtomicRecoveryPayload>,
 ): Promise<ExecutionResult | undefined> {
   const hash = io.attempt.signedEnvelope.transactionHash;
-  let receipt: Receipt | null;
+  let receipt: unknown | null;
   let transaction: unknown | null;
   try {
     [receipt, transaction] = await Promise.all([
-      io.chain.canonicalReceipt(hash),
+      io.chain.receiptByHash(hash),
       io.chain.transactionByHash(hash),
     ]);
   } catch {
     return manualReview(io);
   }
   if (transaction !== null)
-    admitRpcTransaction(transaction, io.attempt.signedEnvelope);
-  if (receipt) return recordReceipt(io, payload, receipt);
+    admitRpcAtomicTransaction(transaction, io.attempt.signedEnvelope);
+  if (receipt)
+    return payload.action === "swap"
+      ? finalizeRecoverySwap(io, payload)
+      : recordReceipt(
+          io,
+          payload,
+          (await io.chain.canonicalReceipt(hash)) as Receipt,
+        );
   if (transaction !== null) {
     try {
       await io.journal.recoveryTransition(io.attempt, "submission_observed", {
@@ -166,7 +198,9 @@ async function inspectSubmission(
     } catch {
       return journalIncomplete(io);
     }
-    return followReceipt(io, payload);
+    return payload.action === "swap"
+      ? finalizeRecoverySwap(io, payload)
+      : followReceipt(io, payload);
   }
 }
 
@@ -214,6 +248,56 @@ async function followReceipt(
   }
 }
 
+async function finalizeRecoverySwap(
+  io: AtomicRecoveryIO,
+  payload: ReturnType<typeof admitAtomicRecoveryPayload>,
+): Promise<ExecutionResult> {
+  if (payload.action !== "swap")
+    throw new Error("Atomic swap payload required.");
+  const hash = io.attempt.signedEnvelope.transactionHash;
+  const result = await finalizeAtomicSwap({
+    policy: io.policy,
+    hash,
+    signedEnvelope: io.attempt.signedEnvelope,
+    obligations: payload.receipt,
+    chain: io.chain,
+    signal: io.signal,
+    report: io.report,
+    recordObserved: (evidence) =>
+      io.journal.recoveryTransition(io.attempt, "receipt_observed", {
+        transactionHash: hash,
+        provisionalEvidence: evidence,
+        ...(io.attempt.current.schemaVersion === 2
+          ? { finalityPolicy: io.policy }
+          : {}),
+      }),
+    recordUnknown: (reason, evidence) =>
+      io.journal.recoveryTransition(io.attempt, "finality_unknown", {
+        transactionHash: hash,
+        finalityReason: reason,
+        ...(evidence ? { provisionalEvidence: evidence } : {}),
+        ...(io.attempt.current.schemaVersion === 2
+          ? { finalityPolicy: io.policy }
+          : {}),
+      }),
+    recordFinal: (state, provisional, evidence) =>
+      io.journal.recoveryTransition(
+        io.attempt,
+        state === "complete" ? "finalized_complete" : "finalized_failed",
+        {
+          transactionHash: hash,
+          provisionalEvidence: provisional,
+          finalityEvidence: evidence,
+        },
+      ),
+  });
+  return result.kind === "complete"
+    ? { kind: ExecutionOutcome.SwapComplete, transactionHash: hash }
+    : result.kind === "failed_final"
+      ? { kind: ExecutionOutcome.Failed, transactionHash: hash }
+      : { kind: ExecutionOutcome.Unknown, transactionHash: hash };
+}
+
 async function recordReceipt(
   io: AtomicRecoveryIO,
   payload: ReturnType<typeof admitAtomicRecoveryPayload>,
@@ -229,36 +313,16 @@ async function recordReceipt(
         : VerificationOutcome.Failed;
     verification = { outcome };
   } else {
-    let evidence = verifyReceipt(receipt, hash, payload.receipt);
-    if (requiresNativeRefundTrace(evidence)) {
-      try {
-        const trace = await io.chain.traceCanonicalTransaction(hash, receipt);
-        evidence = verifyReceipt(receipt, hash, payload.receipt, trace);
-      } catch {
-        // The exact receipt remains known, but economic verification does not.
-      }
-    }
-    outcome = evidence.outcome;
-    verification = evidence;
+    return finalizeRecoverySwap(io, payload);
   }
   const state =
-    outcome === VerificationOutcome.ReceiptSuccess ||
-    outcome === VerificationOutcome.Passed
+    outcome === VerificationOutcome.ReceiptSuccess
       ? "receipt_passed"
-      : outcome === VerificationOutcome.Failed
-        ? "receipt_failed"
-        : "receipt_unavailable";
+      : "receipt_failed";
   try {
     await io.journal.recoveryTransition(io.attempt, state, {
       transactionHash: hash,
-      verification:
-        state === "receipt_passed"
-          ? payload.action === "approval"
-            ? "receipt_success"
-            : "economic_pass"
-          : state === "receipt_failed"
-            ? "failed"
-            : "unavailable",
+      verification: state === "receipt_passed" ? "receipt_success" : "failed",
     });
   } catch {
     return journalIncomplete(io);
@@ -267,59 +331,12 @@ async function recordReceipt(
   return {
     kind:
       state === "receipt_passed"
-        ? payload.action === "approval"
-          ? ExecutionOutcome.ApprovalConfirmed
-          : ExecutionOutcome.SwapVerified
+        ? ExecutionOutcome.ApprovalConfirmed
         : state === "receipt_failed"
           ? ExecutionOutcome.Failed
           : ExecutionOutcome.Unknown,
     transactionHash: hash,
   };
-}
-
-export function admitRpcTransaction(
-  value: unknown,
-  expected: AtomicRecoveryAttempt["signedEnvelope"],
-) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error("Observed transaction is malformed.");
-  const tx = value as Record<string, unknown>;
-  const quantity = (name: string) => {
-    const raw = tx[name];
-    if (
-      typeof raw !== "string" ||
-      !isHex(raw, { strict: true }) ||
-      raw === "0x"
-    )
-      throw new Error("Observed transaction authority is malformed.");
-    const number = BigInt(raw);
-    if (toHex(number) !== raw.toLowerCase())
-      throw new Error("Observed transaction authority is noncanonical.");
-    return number.toString();
-  };
-  const same = (left: unknown, right: string) =>
-    typeof left === "string" && left.toLowerCase() === right.toLowerCase();
-  if (
-    !same(tx.hash, expected.transactionHash) ||
-    quantity("type") !== "2" ||
-    quantity("chainId") !== expected.chainId ||
-    quantity("nonce") !== expected.nonce ||
-    !same(tx.from, expected.signer) ||
-    !isAddress(String(tx.from), { strict: false }) ||
-    !same(tx.to, expected.to) ||
-    !isAddress(String(tx.to), { strict: false }) ||
-    !same(tx.input, expected.data) ||
-    quantity("value") !== expected.valueAtomic ||
-    quantity("gas") !== expected.gasLimit ||
-    quantity("maxFeePerGas") !== expected.maxFeePerGasAtomic ||
-    quantity("maxPriorityFeePerGas") !== expected.maxPriorityFeePerGasAtomic ||
-    !Array.isArray(tx.accessList) ||
-    tx.accessList.length !== 0 ||
-    quantity("yParity") !== String(expected.yParity) ||
-    !same(tx.r, expected.r) ||
-    !same(tx.s, expected.s)
-  )
-    throw new Error("Observed transaction differs from stored signed bytes.");
 }
 
 function manualReview(io: AtomicRecoveryIO): ExecutionResult {

@@ -16,11 +16,15 @@ import type { Receipt, TransactionCallTrace } from "./receipt";
 const validHash = (value: string) => value.length === 66 && isHash(value);
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-export function readChain(rpcUrl: string, signal: AbortSignal) {
+export function readChain(
+  rpcUrl: string,
+  signal: AbortSignal,
+  requestTimeoutMs = 15000,
+) {
   const rpc = async (method: string, params: unknown[] = []) => {
     signal.throwIfAborted();
     const deadline = new AbortController();
-    const timer = setTimeout(() => deadline.abort(), 15000);
+    const timer = setTimeout(() => deadline.abort(), requestTimeoutMs);
     try {
       // viem 2.38.5 takes the signal on its transport, not client.request.
       // A fresh signal covers headers AND body; no SDK timeout or retries compete.
@@ -106,6 +110,16 @@ export function readChain(rpcUrl: string, signal: AbortSignal) {
     transactionByHash: async (hash: string): Promise<unknown | null> => {
       if (!validHash(hash)) throw new Error("Transaction hash is invalid.");
       return (await rpc("eth_getTransactionByHash", [hash])) as unknown | null;
+    },
+    receiptByHash: async (hash: string): Promise<unknown | null> => {
+      if (!validHash(hash)) throw new Error("Transaction hash is invalid.");
+      return (await rpc("eth_getTransactionReceipt", [hash])) as unknown | null;
+    },
+    blockByNumber: async (number: string): Promise<unknown | null> =>
+      (await rpc("eth_getBlockByNumber", [number, false])) as unknown | null,
+    blockByHash: async (hash: string): Promise<unknown | null> => {
+      if (!validHash(hash)) throw new Error("Block hash is invalid.");
+      return (await rpc("eth_getBlockByHash", [hash, false])) as unknown | null;
     },
     submitRawTransaction: async (raw: string) => {
       if (!/^0x02[0-9a-f]+$/.test(raw) || raw.length % 2 !== 0)
@@ -203,3 +217,5 @@ export function readChain(rpcUrl: string, signal: AbortSignal) {
     },
   };
 }
+
+export type ReturnTypeOfReadChain = ReturnType<typeof readChain>;

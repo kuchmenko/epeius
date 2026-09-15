@@ -21,6 +21,7 @@ import {
   admitSignedAtomicEnvelope,
   atomicEnvelope,
 } from "./atomic-signed-envelope";
+import { parseAtomicFinalityPolicy } from "./finality-policy";
 
 const id = "12345678-1234-4123-8123-123456789abc";
 const planId = `0x${"1".repeat(64)}`;
@@ -39,6 +40,27 @@ const transaction = create(UnsignedTransactionSchema, {
   gasLimit: "987654",
 });
 const envelope = atomicEnvelope(9n, 30n, 2n);
+const finalityPolicy = parseAtomicFinalityPolicy(
+  {
+    policy_version: "epeius-finality-v1",
+    finality_method: "op_l1_derivation",
+    completion_tag: "finalized",
+    parent_chain_id: 1,
+    safe_signal: "op_derived_safe",
+    network_anchor_number: 0,
+    network_anchor_hash: `0x${"a".repeat(64)}`,
+    rpc_source_id: "test",
+    capability_record: "test",
+    capability_valid_until: "2099-01-01T00:00:00Z",
+    request_timeout_ms: 100,
+    poll_interval_ms: 1,
+    wait_timeout_ms: 100,
+    stalled_after_ms: 50,
+    max_response_age_ms: 100,
+  },
+  "8453",
+  0,
+);
 
 async function signedEnvelope() {
   const raw = await account.signTransaction({
@@ -90,14 +112,11 @@ test("journal creates mode 0600, fsyncs file and directory, and preserves exact 
       transactionFingerprint,
       transaction,
       envelope,
+      finalityPolicy,
     });
     const signed = await journal.sign(attempt, await signedEnvelope());
     await journal.transition(signed, "submitted", {
       transactionHash: signed.signedEnvelope.transactionHash,
-    });
-    await journal.transition(signed, "receipt_passed", {
-      transactionHash: signed.signedEnvelope.transactionHash,
-      verification: "economic_pass",
     });
     await journal.close();
 
@@ -113,19 +132,16 @@ test("journal creates mode 0600, fsyncs file and directory, and preserves exact 
       "sync_record",
       "write",
       "sync_record",
-      "write",
-      "sync_record",
     ]);
     const records = lines(await readFile(t.path, "utf8"));
     expect(records.map((record) => record.state)).toEqual([
       "prepared",
       "signed",
       "submitted",
-      "receipt_passed",
     ]);
     for (const record of records) {
       expect(record).toMatchObject({
-        schemaVersion: 2,
+        schemaVersion: 3,
         attemptId: id,
         action: "swap",
         planId,
@@ -147,9 +163,8 @@ test("journal creates mode 0600, fsyncs file and directory, and preserves exact 
       payloadType: "unsigned_preparation",
       payloadBinaryHex: "0x0001027f80ff",
     });
-    expect(records[3]).toMatchObject({
+    expect(records[2]).toMatchObject({
       transactionHash: signed.signedEnvelope.transactionHash,
-      verification: "economic_pass",
     });
     const raw = await readFile(t.path, "utf8");
     await expect(parseAtomicIntentJournal(raw)).resolves.toBeDefined();
@@ -220,6 +235,7 @@ test("parser rejects malformed, partial, unknown, reordered, duplicate, and mism
       transactionFingerprint,
       transaction,
       envelope,
+      finalityPolicy,
     });
     const signed = await journal.sign(attempt, await signedEnvelope());
     await journal.transition(signed, "submitted", {
@@ -232,7 +248,7 @@ test("parser rejects malformed, partial, unknown, reordered, duplicate, and mism
     const mutations: string[] = [
       "{",
       JSON.stringify(valid[0]),
-      encode([{ ...valid[0], schemaVersion: 3 }]),
+      encode([{ ...valid[0], schemaVersion: 4 }]),
       encode([{ ...valid[0], mode: "atomic-v2" }]),
       encode([valid[1]]),
       encode([valid[0], valid[0]]),
@@ -351,6 +367,7 @@ test("open and append failures stop before authority can advance", async () => {
           planId,
           transaction,
           envelope,
+          finalityPolicy,
         }),
       ).rejects.toThrow(`fail ${failAt}`);
       await journal.close();
@@ -373,6 +390,7 @@ test("unresolved handoff history blocks every new attempt on reopen", async () =
       planId,
       transaction,
       envelope,
+      finalityPolicy,
     });
     await journal.sign(attempt, await signedEnvelope());
     await journal.close();
@@ -385,6 +403,7 @@ test("unresolved handoff history blocks every new attempt on reopen", async () =
         planId,
         transaction,
         envelope,
+        finalityPolicy,
       }),
     ).rejects.toThrow("do not resend");
     await reopened.close();
@@ -443,13 +462,75 @@ test("complete schema-v1 history remains valid without reinterpretation", async 
         planId,
         transaction,
         envelope,
+        finalityPolicy,
       }),
     ).resolves.toBeDefined();
     await journal.close();
     const appended = lines(await readFile(t.path, "utf8"));
     expect(appended.map(({ schemaVersion }) => schemaVersion)).toEqual([
-      1, 1, 1, 1, 2,
+      1, 1, 1, 1, 3,
     ]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("historical schema-2 swap receipt is explicitly migrated before finality retry", async () => {
+  const t = await temporary();
+  try {
+    let journal = await AtomicIntentJournal.open(t.path, {
+      attemptId: () => id,
+    });
+    const attempt = await journal.prepare({
+      action: "swap",
+      payloadType: "unsigned_preparation",
+      payloadBinary: Uint8Array.of(1),
+      planId,
+      executorPlanHash,
+      transactionFingerprint,
+      transaction,
+      envelope,
+      finalityPolicy,
+    });
+    const signed = await journal.sign(attempt, await signedEnvelope());
+    await journal.transition(signed, "submitted", {
+      transactionHash: signed.signedEnvelope.transactionHash,
+    });
+    await journal.close();
+    const historical = lines(await readFile(t.path, "utf8")).map(
+      ({ finalityPolicy: _, ...record }) => ({ ...record, schemaVersion: 2 }),
+    );
+    historical.push({
+      ...historical.at(-1),
+      state: "receipt_passed",
+      transactionHash: signed.signedEnvelope.transactionHash,
+      verification: "economic_pass",
+    });
+    await writeFile(
+      t.path,
+      `${historical.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    journal = await AtomicIntentJournal.open(t.path);
+    const recovery = journal.recoveryAttempt(id);
+    await journal.recoveryTransition(recovery, "finality_unknown", {
+      transactionHash: signed.signedEnvelope.transactionHash,
+      finalityReason: "wait_timeout",
+      finalityPolicy,
+    });
+    await journal.close();
+    const records = lines(await readFile(t.path, "utf8"));
+    expect(records.at(-2)).toMatchObject({
+      schemaVersion: 2,
+      state: "receipt_passed",
+      verification: "economic_pass",
+    });
+    expect(records.at(-1)).toMatchObject({
+      schemaVersion: 3,
+      state: "finality_unknown",
+      finalityReason: "wait_timeout",
+      finalityPolicy,
+    });
   } finally {
     await t.cleanup();
   }
