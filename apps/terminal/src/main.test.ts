@@ -223,6 +223,11 @@ test("help needs no config and removed flags give migration errors", async () =>
     [["quote", "--sender", "x"], 1, "--sender was removed"],
     [["quote", "--slippage-bps", "50"], 1, "--slippage-bps was removed"],
     [["execute"], 1, "Provide --keystore"],
+    [
+      ["recover-atomic"],
+      1,
+      "requires explicit --config, --chain, --atomic-journal, and --attempt-id",
+    ],
   ] as const) {
     const child = Bun.spawn(["bun", "apps/terminal/src/main.ts", ...args], {
       cwd: join(import.meta.dir, "../../.."),

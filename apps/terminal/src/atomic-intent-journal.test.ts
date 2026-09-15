@@ -434,6 +434,7 @@ test("complete schema-v1 history remains valid without reinterpretation", async 
     const journal = await AtomicIntentJournal.open(t.path, {
       attemptId: () => "abcdefab-cdef-4abc-8def-abcdefabcdef",
     });
+    expect(() => journal.recoveryAttempt(id)).toThrow("inspect-only");
     await expect(
       journal.prepare({
         action: "approval",

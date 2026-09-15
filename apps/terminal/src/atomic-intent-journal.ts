@@ -18,6 +18,8 @@ export type AtomicIntentState =
   | "canceled"
   | "handoff_started"
   | "signed"
+  | "submission_observed"
+  | "recovery_handoff_started"
   | "submitted"
   | "receipt_passed"
   | "receipt_failed"
@@ -49,6 +51,12 @@ type Prepared = Intent & {
   state: "prepared";
   payloadType: "approval_response" | "unsigned_preparation";
   payloadBinaryHex: string;
+};
+
+export type AtomicRecoveryAttempt = {
+  prepared: Prepared;
+  current: JournalRecord;
+  signedEnvelope: SignedAtomicEnvelope;
 };
 
 type Transition = Intent & {
@@ -143,16 +151,58 @@ const transitionsV1: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
 const transitionsV2: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
   prepared: ["canceled", "signed"],
   canceled: [],
-  signed: ["submitted", "submission_unknown"],
-  submitted: ["receipt_passed", "receipt_failed", "receipt_unavailable"],
+  signed: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "submitted",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "submission_unknown",
+  ],
+  submission_observed: [
+    "submission_observed",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+  ],
+  recovery_handoff_started: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "submitted",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+    "submission_unknown",
+  ],
+  submitted: [
+    "submission_observed",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+  ],
   receipt_passed: [],
   receipt_failed: [],
-  receipt_unavailable: [],
-  submission_unknown: [],
+  receipt_unavailable: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+  ],
+  submission_unknown: [
+    "submission_observed",
+    "recovery_handoff_started",
+    "receipt_passed",
+    "receipt_failed",
+    "receipt_unavailable",
+  ],
 };
 const blocksNewAttempt = new Set<AtomicIntentState>([
   "handoff_started",
   "signed",
+  "submission_observed",
+  "recovery_handoff_started",
   "submitted",
   "receipt_unavailable",
   "submission_unknown",
@@ -165,6 +215,7 @@ export class AtomicIntentJournal {
   readonly #lockIdentity: { dev: bigint; ino: bigint };
   readonly #hooks: AtomicIntentJournalHooks;
   readonly #states: Map<string, JournalRecord>;
+  readonly #prepared: Map<string, Prepared | V1JournalRecord>;
   #closed = false;
 
   private constructor(
@@ -174,6 +225,7 @@ export class AtomicIntentJournal {
     lockIdentity: { dev: bigint; ino: bigint },
     hooks: AtomicIntentJournalHooks,
     states: Map<string, JournalRecord>,
+    prepared: Map<string, Prepared | V1JournalRecord>,
   ) {
     this.#file = file;
     this.#lockPath = lockPath;
@@ -181,6 +233,7 @@ export class AtomicIntentJournal {
     this.#lockIdentity = lockIdentity;
     this.#hooks = hooks;
     this.#states = states;
+    this.#prepared = prepared;
   }
 
   static async open(path: string, hooks: AtomicIntentJournalHooks = {}) {
@@ -251,7 +304,7 @@ export class AtomicIntentJournal {
         }
       }
       const raw = await file.readFile({ encoding: "utf8" });
-      const states = await parseAtomicIntentJournal(raw);
+      const { states, prepared } = await parseAtomicIntentJournalHistory(raw);
       return new AtomicIntentJournal(
         file,
         lockPath,
@@ -259,6 +312,7 @@ export class AtomicIntentJournal {
         { dev: lockStat.dev, ino: lockStat.ino },
         hooks,
         states,
+        prepared,
       );
     } catch (error) {
       await file?.close().catch(() => {});
@@ -317,6 +371,7 @@ export class AtomicIntentJournal {
       throw new Error("Atomic intent journal attempt ID is already present.");
     await this.#append(record);
     this.#states.set(attempt.attemptId, record);
+    this.#prepared.set(attempt.attemptId, record);
     return attempt;
   }
 
@@ -378,6 +433,88 @@ export class AtomicIntentJournal {
     this.#states.set(attempt.attemptId, record);
   }
 
+  recoveryAttempt(attemptId: string): AtomicRecoveryAttempt {
+    this.#assertOpen();
+    const prepared = this.#prepared.get(attemptId);
+    const current = this.#states.get(attemptId);
+    if (!prepared || !current)
+      throw new Error("Atomic recovery attempt was not found.");
+    if (prepared.schemaVersion !== 2 || current.schemaVersion !== 2)
+      throw new Error(
+        "Atomic journal schema 1 is inspect-only and unrecoverable.",
+      );
+    if (
+      ["canceled", "receipt_passed", "receipt_failed"].includes(current.state)
+    )
+      throw new Error("Atomic recovery attempt is canceled or final.");
+    if (
+      ![
+        "signed",
+        "submission_observed",
+        "recovery_handoff_started",
+        "submission_unknown",
+        "submitted",
+        "receipt_unavailable",
+      ].includes(current.state) ||
+      !("signedEnvelope" in current) ||
+      !current.signedEnvelope
+    )
+      throw new Error(
+        "Atomic recovery attempt has no recoverable signed bytes.",
+      );
+    return {
+      prepared: structuredClone(prepared),
+      current: structuredClone(current),
+      signedEnvelope: structuredClone(current.signedEnvelope),
+    };
+  }
+
+  async recoveryTransition(
+    attempt: AtomicRecoveryAttempt,
+    state:
+      | "submission_observed"
+      | "recovery_handoff_started"
+      | "submitted"
+      | "receipt_passed"
+      | "receipt_failed"
+      | "receipt_unavailable"
+      | "submission_unknown",
+    details: Pick<Transition, "transactionHash" | "verification"> = {},
+  ) {
+    this.#assertOpen();
+    const previous = this.#states.get(attempt.current.attemptId);
+    if (
+      previous?.schemaVersion !== 2 ||
+      JSON.stringify(previous) !== JSON.stringify(attempt.current) ||
+      !(transitionsV2[previous.state] ?? []).includes(state)
+    )
+      throw new Error("Atomic recovery journal transition is invalid.");
+    const record: Transition = {
+      schemaVersion: 2,
+      attemptId: previous.attemptId,
+      action: previous.action,
+      ...(previous.planId ? { planId: previous.planId } : {}),
+      ...(previous.executorPlanHash
+        ? { executorPlanHash: previous.executorPlanHash }
+        : {}),
+      ...(previous.transactionFingerprint
+        ? { transactionFingerprint: previous.transactionFingerprint }
+        : {}),
+      transaction: structuredClone(previous.transaction),
+      envelope: structuredClone(previous.envelope),
+      signedEnvelope: structuredClone(attempt.signedEnvelope),
+      state,
+      ...details,
+    };
+    await validateRecord(record);
+    assertSameIntent(previous, record);
+    assertSameSignedEnvelope(previous, record);
+    assertSameTransactionHash(previous, record);
+    await this.#append(record);
+    this.#states.set(record.attemptId, record);
+    attempt.current = structuredClone(record);
+  }
+
   async close() {
     if (this.#closed) return;
     this.#closed = true;
@@ -402,8 +539,13 @@ export class AtomicIntentJournal {
 }
 
 export async function parseAtomicIntentJournal(raw: string) {
+  return (await parseAtomicIntentJournalHistory(raw)).states;
+}
+
+async function parseAtomicIntentJournalHistory(raw: string) {
   const states = new Map<string, JournalRecord>();
-  if (!raw) return states;
+  const prepared = new Map<string, Prepared | V1JournalRecord>();
+  if (!raw) return { states, prepared };
   if (!raw.endsWith("\n"))
     throw new Error("Atomic intent journal has a partial final record.");
   for (const line of raw.slice(0, -1).split("\n")) {
@@ -421,6 +563,7 @@ export async function parseAtomicIntentJournal(raw: string) {
     if (current.state === "prepared") {
       if (previous)
         throw new Error("Atomic intent journal contains a duplicate attempt.");
+      prepared.set(current.attemptId, current as Prepared | V1JournalRecord);
     } else {
       if (
         !previous ||
@@ -438,7 +581,7 @@ export async function parseAtomicIntentJournal(raw: string) {
     }
     states.set(current.attemptId, current);
   }
-  return states;
+  return { states, prepared };
 }
 
 async function validateRecord(value: unknown): Promise<void> {
@@ -518,6 +661,8 @@ async function validateRecord(value: unknown): Promise<void> {
     }
   }
   const hashRequired = [
+    "submission_observed",
+    "recovery_handoff_started",
     "submitted",
     "receipt_passed",
     "receipt_failed",
@@ -720,7 +865,14 @@ function assertSameTransactionHash(
 ) {
   if (
     current.schemaVersion === 2 &&
-    current.state === "submitted" &&
+    [
+      "submission_observed",
+      "recovery_handoff_started",
+      "submitted",
+      "receipt_passed",
+      "receipt_failed",
+      "receipt_unavailable",
+    ].includes(current.state) &&
     "signedEnvelope" in current &&
     current.signedEnvelope?.transactionHash !== current.transactionHash
   )
@@ -729,7 +881,13 @@ function assertSameTransactionHash(
     );
   if (
     current.state.startsWith("receipt_") &&
-    previous.state === "submitted" &&
+    [
+      "signed",
+      "submission_observed",
+      "submitted",
+      "receipt_unavailable",
+      "submission_unknown",
+    ].includes(previous.state) &&
     "transactionHash" in previous &&
     "transactionHash" in current &&
     previous.transactionHash !== current.transactionHash

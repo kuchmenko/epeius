@@ -18,9 +18,16 @@ import {
   validateAtomicPlanQuote,
 } from "./atomic-plan-quote";
 import { runAtomicPlanTrade } from "./atomic-plan-trade";
+import { runAtomicRecovery } from "./atomic-recovery";
 import type { AtomicEnvelope } from "./atomic-signed-envelope";
+import { readChain } from "./chain";
 import { atomicPlanClient, quoteClient } from "./client";
-import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
+import {
+  MAX_BUDGET,
+  readConfig,
+  readExecutionConfig,
+  validateEngineUrl,
+} from "./config";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
 import {
   connectExecution,
@@ -28,6 +35,7 @@ import {
   verifyAtomicExecutor,
 } from "./execution-command";
 import { formatQuote, formatStatus, formatTokens } from "./format";
+import { configureChain } from "./protocols";
 import {
   chainFromStatus,
   decimalToAtomic,
@@ -90,6 +98,7 @@ Usage:
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--execution-mode atomic-v1] [--search-budget-ms N] [--engine-url URL] [--json]
   bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH ([--route-id ID] | --execution-mode atomic-v1 --candidate-index N --atomic-journal PATH --max-fee-per-gas-atomic INTEGER --max-priority-fee-per-gas-atomic INTEGER) [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- recover-atomic --chain KEY --atomic-journal PATH --attempt-id UUID [--confirm-recovery yes] --config PATH
   bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID | --allocations JSON) [--execution-mode atomic-v1] [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
@@ -257,6 +266,82 @@ export async function main(rawArgs: string[]) {
         throw new Error(
           `--${removed} was removed; delete it from this command.`,
         );
+    if (command === "recover-atomic") {
+      const values = options(args, [
+        "chain",
+        "atomic-journal",
+        "attempt-id",
+        "confirm-recovery",
+      ]);
+      if (
+        !parsed.config ||
+        parsed.engineUrl ||
+        !values.chain ||
+        !values["atomic-journal"] ||
+        !values["attempt-id"]
+      )
+        throw new Error(
+          "Atomic recovery requires explicit --config, --chain, --atomic-journal, and --attempt-id; --engine-url is not used.",
+        );
+      if (
+        values["confirm-recovery"] !== undefined &&
+        values["confirm-recovery"] !== "yes"
+      )
+        throw new Error("--confirm-recovery requires the literal value yes.");
+      const journal = await AtomicIntentJournal.open(values["atomic-journal"]);
+      try {
+        const attempt = journal.recoveryAttempt(values["attempt-id"]);
+        const { expectedChainId, rpcUrlEnv, trusted } =
+          await readExecutionConfig(
+            parsed.config,
+            values.chain,
+            false,
+            configureChain,
+            true,
+          );
+        const executor = trusted.atomicExecutor;
+        if (!executor)
+          throw new Error("Local Atomic V1 executor is unavailable.");
+        if (attempt.signedEnvelope.chainId !== expectedChainId)
+          throw new Error(
+            "Recovery attempt does not match the selected chain.",
+          );
+        const rpcUrl = process.env[rpcUrlEnv];
+        if (!rpcUrl)
+          throw new Error("Configured RPC environment variable is missing.");
+        const rpc = readChain(rpcUrl, abort.signal);
+        return executionExitCode(
+          await runAtomicRecovery({
+            journal,
+            attempt,
+            executor,
+            chain: rpc,
+            verifyExecutor: () => verifyAtomicExecutor(rpc, executor),
+            report: (event) => console.log(JSON.stringify(event)),
+            confirm: async () => {
+              if (values["confirm-recovery"] === "yes") return true;
+              if (!process.stdin.isTTY) return false;
+              const prompt = createInterface({
+                input: process.stdin,
+                output: process.stderr,
+              });
+              try {
+                return (
+                  (await prompt.question(
+                    "Type recover to submit these exact stored signed bytes once: ",
+                    { signal: abort.signal },
+                  )) === "recover"
+                );
+              } finally {
+                prompt.close();
+              }
+            },
+          }),
+        );
+      } finally {
+        await journal.close();
+      }
+    }
     const config = await readConfig(parsed.config);
     if (command === "prepare" || command === "execute") {
       const values = options(args, [

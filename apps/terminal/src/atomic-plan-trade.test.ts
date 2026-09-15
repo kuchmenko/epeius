@@ -49,6 +49,7 @@ import {
   type AtomicPlanTradeIO,
   runAtomicPlanTrade,
 } from "./atomic-plan-trade";
+import { runAtomicRecovery } from "./atomic-recovery";
 import type { AtomicEnvelope } from "./atomic-signed-envelope";
 import { ExecutionOutcome } from "./execution";
 import {
@@ -608,6 +609,92 @@ test("Slipstream Atomic trade journals economic pass only after accepted native 
     transactionHash: value.hash(),
     verification: { outcome: VerificationOutcome.Passed },
   });
+});
+
+test("explicit recovery re-admits frozen Slipstream swap and journals pass only after native trace", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "epeius-atomic-recovery-swap-"),
+  );
+  const path = join(directory, "intent.jsonl");
+  const value = harness(["ready"], 3);
+  let journal = await AtomicIntentJournal.open(path);
+  value.io.journal = journal;
+  try {
+    expect((await runAtomicPlanTrade(value.io)).kind).toBe(
+      ExecutionOutcome.Unknown,
+    );
+    await journal.close();
+    const records = (await readFile(path, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const attemptId = records[0].attemptId as string;
+    journal = await AtomicIntentJournal.open(path);
+    const attempt = journal.recoveryAttempt(attemptId);
+    let submits = 0;
+    let traces = 0;
+    const receipt = slipstreamReceipt(value.selected(), value.hash());
+    const result = await runAtomicRecovery({
+      journal,
+      attempt,
+      executor,
+      chain: {
+        chainId: async () => toHex(BigInt(slipstreamFixture.chainId)),
+        nonce: async () => {
+          throw new Error("nonce must not be read for an existing receipt");
+        },
+        canonicalReceipt: async () => receipt,
+        transactionByHash: async () => null,
+        waitCanonicalReceipt: async () => receipt,
+        traceCanonicalTransaction: async () => {
+          traces++;
+          return {
+            type: "CALL",
+            from: signer,
+            to: executor.address,
+            value: "0x0",
+            input: "0x661983c5",
+            calls: [
+              {
+                type: "CALL",
+                from: executor.address,
+                to: signer,
+                value: "0x7",
+                input: "0x",
+              },
+            ],
+          };
+        },
+        submitRawTransaction: async () => {
+          submits++;
+          return value.hash();
+        },
+      },
+      verifyExecutor: async () => true,
+      confirm: async () => {
+        throw new Error(
+          "consent must not be requested for an existing receipt",
+        );
+      },
+      report: () => {},
+    });
+    expect(result).toEqual({
+      kind: ExecutionOutcome.SwapVerified,
+      transactionHash: value.hash(),
+    });
+    expect(traces).toBe(1);
+    expect(submits).toBe(0);
+    expect(
+      (await readFile(path, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).state)
+        .at(-1),
+    ).toBe("receipt_passed");
+  } finally {
+    await journal.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("Slipstream Atomic trade journals unavailable when native trace is unsupported", async () => {

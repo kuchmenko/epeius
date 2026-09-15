@@ -46,21 +46,66 @@ export function readChain(rpcUrl: string, signal: AbortSignal) {
       clearTimeout(timer);
     }
   };
+  const nonce = async (address: string, tag: "latest" | "pending") => {
+    const value = String(await rpc("eth_getTransactionCount", [address, tag]));
+    if (!isHex(value, { strict: true }) || value.length <= 2)
+      throw new Error(
+        `${tag === "pending" ? "Pending" : "Latest"} account nonce is unavailable.`,
+      );
+    const result = hexToBigInt(value as Hex);
+    if (
+      toHex(result) !== value.toLowerCase() ||
+      result > 0xffff_ffff_ffff_ffffn
+    )
+      throw new Error(
+        `${tag === "pending" ? "Pending" : "Latest"} account nonce is invalid.`,
+      );
+    return result;
+  };
+  const readCanonicalReceipt = async (
+    hash: string,
+    unsealedIsError: boolean,
+  ): Promise<Receipt | null> => {
+    if (!validHash(hash)) throw new Error("Transaction hash is invalid.");
+    const receipt = (await rpc("eth_getTransactionReceipt", [
+      hash,
+    ])) as Receipt | null;
+    if (receipt === null) return null;
+    if (!same(receipt.transactionHash, hash))
+      throw new Error("Receipt transaction identity is invalid.");
+    if (
+      !receipt.blockHash ||
+      !validHash(receipt.blockHash) ||
+      same(receipt.blockHash, zeroHash) ||
+      !receipt.blockNumber ||
+      !isHex(receipt.blockNumber, { strict: true }) ||
+      receipt.blockNumber.length <= 2
+    ) {
+      if (!unsealedIsError) return null;
+      throw new Error("Receipt identity is not canonical.");
+    }
+    const block = (await rpc("eth_getBlockByNumber", [
+      receipt.blockNumber,
+      false,
+    ])) as {
+      hash?: string;
+    } | null;
+    if (
+      !block?.hash ||
+      !validHash(block.hash) ||
+      !same(receipt.blockHash, block.hash)
+    )
+      throw new Error("Receipt block is not canonical.");
+    return receipt;
+  };
   return {
     chainId: async () => String(await rpc("eth_chainId")).toLowerCase(),
-    pendingNonce: async (address: string) => {
-      const value = String(
-        await rpc("eth_getTransactionCount", [address, "pending"]),
-      );
-      if (!isHex(value, { strict: true }) || value.length <= 2)
-        throw new Error("Pending account nonce is unavailable.");
-      const nonce = hexToBigInt(value as Hex);
-      if (
-        toHex(nonce) !== value.toLowerCase() ||
-        nonce > 0xffff_ffff_ffff_ffffn
-      )
-        throw new Error("Pending account nonce is invalid.");
-      return nonce;
+    nonce,
+    pendingNonce: (address: string) => nonce(address, "pending"),
+    canonicalReceipt: (hash: string) => readCanonicalReceipt(hash, true),
+    transactionByHash: async (hash: string): Promise<unknown | null> => {
+      if (!validHash(hash)) throw new Error("Transaction hash is invalid.");
+      return (await rpc("eth_getTransactionByHash", [hash])) as unknown | null;
     },
     submitRawTransaction: async (raw: string) => {
       if (!/^0x02[0-9a-f]+$/.test(raw) || raw.length % 2 !== 0)
@@ -106,32 +151,8 @@ export function readChain(rpcUrl: string, signal: AbortSignal) {
     },
     waitCanonicalReceipt: async (hash: string): Promise<Receipt> => {
       for (let attempt = 0; attempt < 60; attempt++) {
-        const receipt = (await rpc("eth_getTransactionReceipt", [
-          hash,
-        ])) as Receipt | null;
-        // Preconfirmations may report success with a zero or missing block hash.
-        if (
-          receipt?.blockHash &&
-          validHash(receipt.blockHash) &&
-          !same(receipt.blockHash, zeroHash) &&
-          receipt.blockNumber &&
-          isHex(receipt.blockNumber, { strict: true }) &&
-          receipt.blockNumber.length > 2
-        ) {
-          const block = (await rpc("eth_getBlockByNumber", [
-            receipt.blockNumber,
-            false,
-          ])) as { hash?: string } | null;
-          if (
-            block?.hash &&
-            validHash(block.hash) &&
-            hexToBigInt(block.hash as `0x${string}`) !== 0n
-          ) {
-            if (!same(receipt.blockHash, block.hash))
-              throw new Error("Receipt block is not canonical.");
-            return receipt;
-          }
-        }
+        const receipt = await readCanonicalReceipt(hash, false);
+        if (receipt) return receipt;
         await Bun.sleep(1000);
       }
       throw new Error("Receipt timeout.");

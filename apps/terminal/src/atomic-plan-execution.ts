@@ -1,9 +1,10 @@
-import { create, equals, toBinary } from "@bufbuild/protobuf";
+import { create, equals, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   bytesToHex,
   encodeFunctionData,
   erc20Abi,
   getAddress,
+  type Hex,
   hexToBytes,
   isHash,
   padHex,
@@ -18,6 +19,7 @@ import {
   PlanPreparationStatus,
   type PoolOperation,
   type PreparePlanResponse,
+  PreparePlanResponseSchema,
   SimulationStatus,
   UnsignedPreparationSchema,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
@@ -430,6 +432,302 @@ export function assertAtomicPlanRecheck(
   return checked;
 }
 
+export function admitAtomicRecoveryPayload(
+  input: {
+    action: "approval" | "swap";
+    payloadType: "approval_response" | "unsigned_preparation";
+    payloadBinaryHex: string;
+    planId?: string;
+    executorPlanHash?: string;
+    transactionFingerprint?: string;
+    transaction: UnsignedTransaction;
+  },
+  executor: AtomicExecutorIdentity,
+): { action: "approval" } | { action: "swap"; receipt: ReceiptObligations } {
+  const binary = hexToBytes(input.payloadBinaryHex as Hex);
+  if (input.action === "approval") {
+    if (input.payloadType !== "approval_response")
+      throw new Error("Atomic recovery approval payload type is invalid.");
+    const response = fromBinary(PreparePlanResponseSchema, binary);
+    rejectUnknown(response);
+    if (
+      bytesToHex(toBinary(PreparePlanResponseSchema, response)) !==
+        input.payloadBinaryHex ||
+      response.status !== PlanPreparationStatus.APPROVAL_REQUIRED ||
+      response.preparation ||
+      response.simulation ||
+      !response.approval ||
+      !response.approval.transaction
+    )
+      throw new Error("Atomic recovery approval payload is invalid.");
+    const approval = response.approval;
+    const approvalTransaction = approval.transaction;
+    if (!approvalTransaction)
+      throw new Error("Atomic recovery approval transaction is absent.");
+    const transaction = wireTransaction(approvalTransaction);
+    const amount = uint(approval.amount, "approval amount");
+    const expectedData = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: "approve",
+      args: [getAddress(executor.address), amount],
+    });
+    if (
+      getAddress(exact(approval.spender, 20, "approval spender")) !==
+        getAddress(executor.address) ||
+      !same(approval.token, approvalTransaction.to) ||
+      bytesToHex(approvalTransaction.data ?? new Uint8Array()) !==
+        expectedData ||
+      !sameWireTransaction(transaction, input.transaction)
+    )
+      throw new Error("Atomic recovery approval authority is invalid.");
+    return { action: "approval" };
+  }
+  if (
+    input.payloadType !== "unsigned_preparation" ||
+    !input.planId ||
+    !input.executorPlanHash ||
+    !input.transactionFingerprint
+  )
+    throw new Error("Atomic recovery swap identities are incomplete.");
+  const preparation = fromBinary(UnsignedPreparationSchema, binary);
+  rejectUnknown(preparation);
+  if (
+    bytesToHex(toBinary(UnsignedPreparationSchema, preparation)) !==
+      input.payloadBinaryHex ||
+    !preparation.terms ||
+    !preparation.transaction ||
+    preparation.terms.branchMinima.length !== 1 ||
+    preparation.terms.program?.branches.length !== 1
+  )
+    throw new Error("Atomic recovery frozen preparation is invalid.");
+  const terms = preparation.terms;
+  const program = terms.program;
+  if (!program) throw new Error("Atomic recovery plan program is absent.");
+  const signer = getAddress(exact(terms.signer, 20, "signer"));
+  const recipient = getAddress(exact(terms.recipient, 20, "recipient"));
+  const executorAddress = getAddress(executor.address);
+  const acceptedExecutor = terms.executor;
+  const minimum = uint(terms.amountOutMinimum, "aggregate minimum");
+  const branchMinimum = uint(terms.branchMinima[0], "branch minimum");
+  const expiresAt = uint(terms.expiresAtUnix, "expiry");
+  const deadline = uint(terms.deadlineUnix, "deadline");
+  if (
+    signer !== recipient ||
+    minimum <= 0n ||
+    branchMinimum !== minimum ||
+    expiresAt <= 0n ||
+    deadline <= expiresAt ||
+    uint(terms.quoteBlock?.number, "quote block number") <= 0n ||
+    exact(terms.quoteBlock?.hash, 32, "quote block hash") === zeroHash ||
+    !acceptedExecutor ||
+    acceptedExecutor.version !== 2 ||
+    getAddress(exact(acceptedExecutor.address, 20, "executor")) !==
+      executorAddress ||
+    exact(acceptedExecutor.runtimeCodeHash, 32, "runtime hash") !==
+      executor.runtimeCodeHash
+  )
+    throw new Error("Atomic recovery accepted executor identity is invalid.");
+  const plan = executorPlanFromTerms(terms);
+  validateRecoveryProgramDeployment(program, executor);
+  const branchHashes = atomicV1AcceptedBranchHashes(program, [branchMinimum]);
+  const planId = atomicV1PlanId({
+    chainId: uint(program.chainId, "chain ID"),
+    executor: executorAddress,
+    runtimeCodeHash: executor.runtimeCodeHash as `0x${string}`,
+    signer,
+    recipient,
+    tokenIn: plan.tokenIn,
+    tokenOut: plan.tokenOut,
+    amountIn: plan.amountIn,
+    minimum,
+    quoteBlockNumber: uint(terms.quoteBlock?.number, "quote block number"),
+    quoteBlockHash: exact(terms.quoteBlock?.hash, 32, "quote block hash"),
+    expiresAt,
+    deadline,
+    branchHashes,
+  });
+  const data = atomicV1ExecutorCalldata(plan);
+  const transaction = wireTransaction(preparation.transaction);
+  const planHash = atomicV1ExecutorPlanHash({
+    chainId: uint(program.chainId, "chain ID"),
+    executor: executorAddress,
+    sender: signer,
+    plan,
+  });
+  const fingerprint = atomicV1TransactionFingerprint({
+    planId,
+    chainId: uint(program.chainId, "chain ID"),
+    from: signer,
+    to: executorAddress,
+    value: 0n,
+    data,
+    gasLimit: BigInt(transaction.gasLimit),
+  });
+  if (
+    exact(preparation.preparationId, 32, "preparation ID") === zeroHash ||
+    exact(preparation.planId, 32, "plan ID") !== planId ||
+    input.planId !== planId ||
+    input.executorPlanHash !== planHash ||
+    input.transactionFingerprint !== fingerprint ||
+    transaction.data !== data ||
+    transaction.valueAtomic !== "0" ||
+    transaction.chainId !== uint(program.chainId, "chain ID").toString() ||
+    getAddress(transaction.from) !== signer ||
+    getAddress(transaction.to) !== executorAddress ||
+    BigInt(transaction.gasLimit) <= 0n ||
+    !sameWireTransaction(transaction, input.transaction)
+  )
+    throw new Error("Atomic recovery frozen identities changed.");
+  return {
+    action: "swap",
+    receipt: receiptObligations(
+      { terms, planId } as ReturnType<typeof acceptAtomicCandidate>,
+      executor,
+      planHash,
+      fingerprint,
+    ),
+  };
+}
+
+function validateRecoveryProgramDeployment(
+  program: NonNullable<
+    ReturnType<typeof acceptAtomicCandidate>["terms"]["program"]
+  >,
+  executor: AtomicExecutorIdentity,
+) {
+  const branch = program.branches[0];
+  const programTokenIn = getAddress(
+    exact(program.tokenIn, 20, "program input"),
+  );
+  const programTokenOut = getAddress(
+    exact(program.tokenOut, 20, "program output"),
+  );
+  if (
+    program.formatVersion !== 1 ||
+    uint(program.chainId, "chain ID") <= 0n ||
+    uint(program.amountIn, "input amount") <= 0n ||
+    programTokenIn === programTokenOut ||
+    !branch ||
+    uint(branch.amountIn, "branch input") !==
+      uint(program.amountIn, "input amount") ||
+    branch.operations.length < 1 ||
+    branch.operations.length > 2
+  )
+    throw new Error("Atomic recovery plan path is unsupported.");
+  const first = operationPool(branch.operations[0]);
+  if (
+    ((first.kind === 4 || first.kind === 5) &&
+      branch.operations.length !== 1) ||
+    branch.operations.some(
+      (operation) => operationPool(operation).kind !== first.kind,
+    )
+  )
+    throw new Error("Atomic recovery plan path is unsupported.");
+  const factory =
+    first.kind < 4
+      ? getAddress(
+          first.kind === 1
+            ? (executor.factory ?? "")
+            : first.kind === 2
+              ? (executor.pancakeFactory ?? "")
+              : (executor.slipstreamFactory ?? ""),
+        )
+      : undefined;
+  const router =
+    first.kind < 4
+      ? getAddress(
+          first.kind === 1
+            ? (executor.router ?? "")
+            : first.kind === 2
+              ? (executor.pancakeRouter ?? "")
+              : (executor.slipstreamRouter ?? ""),
+        )
+      : undefined;
+  let currentToken = programTokenIn;
+  const physicalPools = new Set<string>();
+  for (const operation of branch.operations) {
+    const { pool, kind, fee, tickSpacing, poolId } = operationPool(operation);
+    const tokenIn = getAddress(exact(operation.tokenIn, 20, "operation input"));
+    const tokenOut = getAddress(
+      exact(operation.tokenOut, 20, "operation output"),
+    );
+    const pair =
+      BigInt(tokenIn) < BigInt(tokenOut)
+        ? `${tokenIn}:${tokenOut}`
+        : `${tokenOut}:${tokenIn}`;
+    const physical =
+      kind === 4
+        ? `4:${poolId}`
+        : kind === 5
+          ? `5:${exact(pool.key?.currency0, 20, "V4 currency0")}:${exact(pool.key?.currency1, 20, "V4 currency1")}:${fee}:${tickSpacing}`
+          : `${kind}:${pair}:${kind === 3 ? tickSpacing : fee}`;
+    if (
+      tokenIn !== currentToken ||
+      (kind === 4
+        ? getAddress(exact(pool.vault, 20, "Balancer Vault")) !==
+            getAddress(executor.balancerVault ?? "") ||
+          poolId === zeroHash ||
+          !executor.balancerPools?.includes(poolId)
+        : kind === 5
+          ? !pool.key ||
+            fee === undefined ||
+            fee > 1_000_000 ||
+            tickSpacing === undefined ||
+            tickSpacing <= 0 ||
+            tickSpacing > 32_767 ||
+            getAddress(exact(pool.poolManager, 20, "V4 PoolManager")) !==
+              getAddress(executor.poolManager ?? "") ||
+            getAddress(exact(pool.key.hooks, 20, "V4 hooks")) !== zeroAddress ||
+            BigInt(exact(pool.key.currency0, 20, "V4 currency0")) >=
+              BigInt(exact(pool.key.currency1, 20, "V4 currency1")) ||
+            ![tokenIn, tokenOut].every((token) =>
+              [
+                getAddress(exact(pool.key?.currency0, 20, "V4 currency0")),
+                getAddress(exact(pool.key?.currency1, 20, "V4 currency1")),
+              ].includes(token),
+            ) ||
+            !executor.uniswapV4Pools?.some(
+              (candidate) =>
+                getAddress(candidate.currency0) ===
+                  getAddress(exact(pool.key?.currency0, 20, "V4 currency0")) &&
+                getAddress(candidate.currency1) ===
+                  getAddress(exact(pool.key?.currency1, 20, "V4 currency1")) &&
+                candidate.feePips === fee &&
+                candidate.tickSpacing === tickSpacing &&
+                getAddress(candidate.hooks) === zeroAddress,
+            )
+          : (kind === 3
+              ? tickSpacing === undefined ||
+                tickSpacing <= 0 ||
+                tickSpacing > 8_388_607
+              : fee === undefined || fee >= 1_000_000) ||
+            getAddress(exact(pool.factory, 20, "factory")) !== factory ||
+            getAddress(exact(pool.router, 20, "router")) !== router) ||
+      tokenIn === tokenOut ||
+      physicalPools.has(physical)
+    )
+      throw new Error("Atomic recovery plan differs from local deployment.");
+    physicalPools.add(physical);
+    currentToken = tokenOut;
+  }
+  if (currentToken !== programTokenOut)
+    throw new Error("Atomic recovery plan final token is invalid.");
+}
+
+function sameWireTransaction(
+  left: UnsignedTransaction,
+  right: UnsignedTransaction,
+) {
+  return (
+    left.chainId === right.chainId &&
+    left.from.toLowerCase() === right.from.toLowerCase() &&
+    left.to.toLowerCase() === right.to.toLowerCase() &&
+    left.data.toLowerCase() === right.data.toLowerCase() &&
+    left.valueAtomic === right.valueAtomic &&
+    left.gasLimit === right.gasLimit
+  );
+}
+
 function executorPlanFromTerms(
   terms: ReturnType<typeof acceptAtomicCandidate>["terms"],
 ): AtomicExecutorPlan {
@@ -499,12 +797,13 @@ function receiptObligations(
   );
   const tokenIn = exact(program.tokenIn, 20, "input token");
   const tokenOut = exact(program.tokenOut, 20, "output token");
+  const minimum = uint(expected.terms.amountOutMinimum, "aggregate minimum");
   return {
     tokenIn,
     tokenOut,
     recipient: exact(expected.terms.recipient, 20, "recipient"),
     amountInAtomic: uint(program.amountIn, "input amount").toString(),
-    amountOutMinimumAtomic: expected.minimum.toString(),
+    amountOutMinimumAtomic: minimum.toString(),
     intermediate: operations.slice(0, -1).map((operation) => ({
       token: exact(operation.tokenOut, 20, "intermediate token"),
       owner: endpoint,
@@ -536,7 +835,7 @@ function receiptObligations(
             program.branches[0].amountIn,
             "branch input",
           ).toString(),
-          minimumAtomic: expected.minimum.toString(),
+          minimumAtomic: minimum.toString(),
           operations: operations.map((operation) => {
             const { kind } = operationPool(operation);
             return {
