@@ -9,7 +9,12 @@ import {
   type QuoteRequest,
   QuoteRequestSchema,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
-import { readConfig, readExecutionConfig, validateEngineUrl } from "./config";
+import {
+  readAtomicNonceLockConfig,
+  readConfig,
+  readExecutionConfig,
+  validateEngineUrl,
+} from "./config";
 import type {
   ExecutionOutcome,
   ExecutionResult,
@@ -199,6 +204,42 @@ test("execution config rereads independently and validates executor only for all
     await expect(
       readExecutionConfig(path, "test", false, configureChain, true),
     ).rejects.toThrow("configuration is invalid");
+  } finally {
+    await rm(directory, { recursive: true });
+  }
+});
+
+test("Atomic nonce lock config is explicit, strict, absolute and chain-bound", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "epeius-nonce-config-"));
+  const path = join(directory, "config.toml");
+  const config = (atomic: string, chainId = "1") =>
+    `[terminal]\ndefault_chain='test'\nengine_url='http://127.0.0.1:1'\nsearch_budget_ms=1\n${atomic}\n[chains.test]\nchain_id=${chainId}\n`;
+  try {
+    await Bun.write(
+      path,
+      config(`[terminal.atomic]\nnonce_lock_root='${directory}'`),
+    );
+    expect(await readAtomicNonceLockConfig(path, "test")).toEqual({
+      root: directory,
+      chainId: "1",
+    });
+    for (const atomic of [
+      "",
+      "[terminal.atomic]",
+      "[terminal.atomic]\nnonce_lock_root=''",
+      "[terminal.atomic]\nnonce_lock_root='relative'",
+      `[terminal.atomic]\nnonce_lock_root='${directory}'\nunknown=true`,
+    ]) {
+      await Bun.write(path, config(atomic));
+      await expect(readAtomicNonceLockConfig(path, "test")).rejects.toThrow();
+    }
+    await Bun.write(
+      path,
+      config(`[terminal.atomic]\nnonce_lock_root='${directory}'`, "0"),
+    );
+    await expect(readAtomicNonceLockConfig(path, "test")).rejects.toThrow(
+      "positive local chain ID",
+    );
   } finally {
     await rm(directory, { recursive: true });
   }

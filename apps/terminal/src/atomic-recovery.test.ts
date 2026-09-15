@@ -18,6 +18,7 @@ import {
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import { UnsignedTransactionSchema } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { AtomicIntentJournal } from "./atomic-intent-journal";
+import { AtomicNonceLock } from "./atomic-nonce-lock";
 import { runAtomicRecovery } from "./atomic-recovery";
 import {
   admitRpcAtomicTransaction,
@@ -698,7 +699,7 @@ test("recovery CLI uses explicit local config and RPC without engine, wallet, or
   const config = join(t.directory, "epeius.toml");
   await Bun.write(
     config,
-    `[chains.local]\nchain_id=1\nrpc_url_env='RECOVERY_RPC'\nexecution_enabled=true\n[chains.local.finality]\npolicy_version='epeius-finality-v1'\nfinality_method='ethereum_consensus'\ncompletion_tag='finalized'\nsafe_signal='ethereum_safe'\nnetwork_anchor_number=0\nnetwork_anchor_hash='${finalityPolicy.networkAnchorHash}'\nrpc_source_id='test'\ncapability_record='test'\ncapability_valid_until='2099-01-01T00:00:00Z'\nrequest_timeout_ms=100\npoll_interval_ms=1\nwait_timeout_ms=100\nstalled_after_ms=50\nmax_response_age_ms=100\n[chains.local.deployments.uni]\nkind='uniswap-v3'\nfactory='0x${"6".repeat(40)}'\nrouter='0x${"7".repeat(40)}'\nfees=[500]\n[chains.local.atomic_executor]\naddress='${executor.address}'\nruntime_code_hash='${keccak256(code)}'\nmax_branches=4\nmax_operations_per_branch=4\nmax_total_operations=4\nuniswap_deployment='uni'\n`,
+    `[terminal.atomic]\nnonce_lock_root='${t.directory}'\n[chains.local]\nchain_id=1\nrpc_url_env='RECOVERY_RPC'\nexecution_enabled=true\n[chains.local.finality]\npolicy_version='epeius-finality-v1'\nfinality_method='ethereum_consensus'\ncompletion_tag='finalized'\nsafe_signal='ethereum_safe'\nnetwork_anchor_number=0\nnetwork_anchor_hash='${finalityPolicy.networkAnchorHash}'\nrpc_source_id='test'\ncapability_record='test'\ncapability_valid_until='2099-01-01T00:00:00Z'\nrequest_timeout_ms=100\npoll_interval_ms=1\nwait_timeout_ms=100\nstalled_after_ms=50\nmax_response_age_ms=100\n[chains.local.deployments.uni]\nkind='uniswap-v3'\nfactory='0x${"6".repeat(40)}'\nrouter='0x${"7".repeat(40)}'\nfees=[500]\n[chains.local.atomic_executor]\naddress='${executor.address}'\nruntime_code_hash='${keccak256(code)}'\nmax_branches=4\nmax_operations_per_branch=4\nmax_total_operations=4\nuniswap_deployment='uni'\n`,
   );
   try {
     const child = Bun.spawn(
@@ -738,6 +739,66 @@ test("recovery CLI uses explicit local config and RPC without engine, wallet, or
   }
 });
 
+test("recovery CLI nonce contention fails before any chain observation or submission", async () => {
+  const t = await fixture("submission_unknown");
+  await t.journal.close();
+  const holder = await AtomicNonceLock.acquire(
+    t.directory,
+    "1",
+    t.attempt.signedEnvelope.signer,
+  );
+  const methods: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const body = await request.json();
+      methods.push(body.method);
+      return Response.json({ jsonrpc: "2.0", id: body.id, result: null });
+    },
+  });
+  const config = join(t.directory, "epeius.toml");
+  await Bun.write(
+    config,
+    `[terminal.atomic]\nnonce_lock_root='${t.directory}'\n[chains.local]\nchain_id=1\nrpc_url_env='RECOVERY_RPC'\nexecution_enabled=true\n`,
+  );
+  try {
+    const child = Bun.spawn(
+      [
+        "bun",
+        "apps/terminal/src/main.ts",
+        "recover-atomic",
+        "--config",
+        config,
+        "--chain",
+        "local",
+        "--atomic-journal",
+        t.path,
+        "--attempt-id",
+        t.attempt.current.attemptId,
+      ],
+      {
+        cwd: join(import.meta.dir, "../../.."),
+        env: { ...process.env, RECOVERY_RPC: server.url.href },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [stderr, exit] = await Promise.all([
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exit).toBe(1);
+    expect(stderr).toContain("Atomic nonce lock is held or unsafe");
+    expect(stderr).toContain("chain=1");
+    expect(stderr).toContain(t.attempt.signedEnvelope.signer.toLowerCase());
+    expect(methods).toEqual([]);
+  } finally {
+    server.stop(true);
+    await holder.close();
+    await rm(t.directory, { recursive: true, force: true });
+  }
+});
+
 test("recovery CLI reports historical state without chain work when current policy is missing or expired", async () => {
   for (const mode of ["missing", "expired"] as const) {
     const t = await fixture("submission_unknown");
@@ -747,7 +808,10 @@ test("recovery CLI reports historical state without chain work when current poli
       mode === "expired"
         ? `\n[chains.local.finality]\npolicy_version='epeius-finality-v1'\nfinality_method='ethereum_consensus'\ncompletion_tag='finalized'\nsafe_signal='ethereum_safe'\nnetwork_anchor_number=0\nnetwork_anchor_hash='${finalityPolicy.networkAnchorHash}'\nrpc_source_id='expired-source'\ncapability_record='expired-record'\ncapability_valid_until='2020-01-01T00:00:00Z'\nrequest_timeout_ms=100\npoll_interval_ms=1\nwait_timeout_ms=100\nstalled_after_ms=50\nmax_response_age_ms=100\n`
         : "";
-    await Bun.write(config, `[chains.local]\nchain_id=1${expired}`);
+    await Bun.write(
+      config,
+      `[terminal.atomic]\nnonce_lock_root='${t.directory}'\n[chains.local]\nchain_id=1${expired}`,
+    );
     try {
       const child = Bun.spawn(
         [

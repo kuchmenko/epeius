@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { isAddress } from "viem";
 import type { TrustedExecution } from "./execution-policy";
 
@@ -116,7 +116,10 @@ export { MAX_BUDGET };
 // Readers choose their own validation needs and read moments; no cached snapshot.
 export async function readSettings(path: string) {
   return Bun.TOML.parse(await Bun.file(path).text()) as {
-    terminal?: { default_chain?: string };
+    terminal?: {
+      default_chain?: string;
+      atomic?: Record<string, unknown>;
+    };
     chains?: Record<
       string,
       {
@@ -159,6 +162,31 @@ export async function readSettings(path: string) {
       }
     >;
   };
+}
+
+export async function readAtomicNonceLockConfig(
+  configPath: string,
+  chain: string,
+) {
+  const settings = await readSettings(configPath);
+  const atomic = settings.terminal?.atomic;
+  if (
+    !atomic ||
+    Object.keys(atomic).length !== 1 ||
+    !Object.hasOwn(atomic, "nonce_lock_root") ||
+    typeof atomic.nonce_lock_root !== "string" ||
+    !atomic.nonce_lock_root ||
+    !isAbsolute(atomic.nonce_lock_root)
+  )
+    throw new Error(
+      "Atomic commands require strict [terminal.atomic] nonce_lock_root as one non-empty absolute path.",
+    );
+  const chainId = settings.chains?.[chain]?.chain_id;
+  if (!Number.isSafeInteger(chainId) || (chainId ?? 0) <= 0)
+    throw new Error(
+      "Atomic nonce lock requires a safe positive local chain ID.",
+    );
+  return { root: atomic.nonce_lock_root, chainId: String(chainId) };
 }
 
 export async function readExecutionConfig(

@@ -12,6 +12,7 @@ import {
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { AtomicIntentJournal } from "./atomic-intent-journal";
+import { AtomicNonceLock } from "./atomic-nonce-lock";
 import {
   atomicPlanQuoteRequest,
   formatAtomicPlanQuote,
@@ -24,6 +25,7 @@ import { readChain } from "./chain";
 import { atomicPlanClient, quoteClient } from "./client";
 import {
   MAX_BUDGET,
+  readAtomicNonceLockConfig,
   readConfig,
   readExecutionConfig,
   validateEngineUrl,
@@ -293,9 +295,23 @@ export async function main(rawArgs: string[]) {
         values["confirm-recovery"] !== "yes"
       )
         throw new Error("--confirm-recovery requires the literal value yes.");
+      const nonceLockConfig = await readAtomicNonceLockConfig(
+        parsed.config,
+        values.chain,
+      );
       const journal = await AtomicIntentJournal.open(values["atomic-journal"]);
+      let nonceLock: AtomicNonceLock | undefined;
       try {
         const attempt = journal.recoveryAttempt(values["attempt-id"]);
+        if (attempt.signedEnvelope.chainId !== nonceLockConfig.chainId)
+          throw new Error(
+            "Recovery attempt does not match the selected chain.",
+          );
+        nonceLock = await AtomicNonceLock.acquire(
+          nonceLockConfig.root,
+          nonceLockConfig.chainId,
+          attempt.signedEnvelope.signer,
+        );
         let finalityPolicy: Awaited<
           ReturnType<typeof readAtomicFinalityPolicy>
         >;
@@ -394,6 +410,7 @@ export async function main(rawArgs: string[]) {
         );
       } finally {
         await journal.close();
+        await nonceLock?.close();
       }
     }
     const config = await readConfig(parsed.config);
@@ -638,6 +655,10 @@ export async function main(rawArgs: string[]) {
         values["execution-mode"] === "atomic-v1"
           ? await readAtomicFinalityPolicy(config.path, chain.key)
           : undefined;
+      const nonceLockConfig =
+        values["execution-mode"] === "atomic-v1"
+          ? await readAtomicNonceLockConfig(config.path, chain.key)
+          : undefined;
       const context = await connectExecution(
         values,
         config.path,
@@ -662,7 +683,12 @@ export async function main(rawArgs: string[]) {
           throw new Error("Atomic V1 fee caps were not admitted.");
         if (!finalityPolicy)
           throw new Error("Atomic finality policy was not admitted.");
-        const pendingNonce = await context.rpc.pendingNonce(context.signer);
+        if (!nonceLockConfig)
+          throw new Error("Atomic nonce lock config was not admitted.");
+        if (nonceLockConfig.chainId !== context.expectedChainId)
+          throw new Error(
+            "Atomic nonce lock config changed during local chain admission.",
+          );
         const candidateIndex = Number(values["candidate-index"]);
         const slippage = values["slippage-bps"] ?? "50";
         if (
@@ -689,81 +715,94 @@ export async function main(rawArgs: string[]) {
           amountIn: BigInt(amountInAtomic),
         };
         const atomicClient = atomicPlanClient(engineUrl);
-        const journal = await AtomicIntentJournal.open(
-          values["atomic-journal"] as string,
+        const nonceLock = await AtomicNonceLock.acquire(
+          nonceLockConfig.root,
+          context.expectedChainId,
+          context.signer,
         );
         try {
-          return executionExitCode(
-            await runAtomicPlanTrade({
-              request,
-              candidateIndex: candidateIndex - 1,
-              signer: context.signer,
-              executor: trustedExecutor,
-              slippageBps: Number(slippage),
-              pendingNonce,
-              maxFeePerGas: atomicFees.maxFeePerGas,
-              maxPriorityFeePerGas: atomicFees.maxPriorityFeePerGas,
-              finalityPolicy,
-              finalityChain: context.rpc,
-              signal: abort.signal,
-              journal,
-              quote: () =>
-                atomicClient.getPlanQuote(
-                  atomicPlanQuoteRequest(request, searchBudgetMs),
-                  {
-                    signal: abort.signal,
-                    timeoutMs: searchBudgetMs + 5000,
-                  },
-                ),
-              prepare: (request) =>
-                atomicClient.preparePlan(request, {
-                  signal: abort.signal,
-                  timeoutMs: 25000,
-                }),
-              recheck: (request) =>
-                atomicClient.recheckPlan(request, {
-                  signal: abort.signal,
-                  timeoutMs: 25000,
-                }),
-              chainId: context.rpc.chainId,
-              sign: context.wallet.signAtomic,
-              submitRawTransaction: context.rpc.submitRawTransaction,
-              receipt: context.rpc.waitCanonicalReceipt,
-              traceCanonicalTransaction: context.rpc.traceCanonicalTransaction,
-              report: (event) => console.log(JSON.stringify(event)),
-              confirm: async (kind, transaction, envelope) => {
-                if (!(await verifyAtomicExecutor(context.rpc, trustedExecutor)))
-                  throw new Error(
-                    "Local Atomic V1 executor runtime code or limits changed. Nothing sent.",
-                  );
-                console.error(
-                  JSON.stringify(
-                    atomicConsentDetails(kind, transaction, envelope),
-                  ),
-                );
-                if (values[`confirm-${kind}`] === "yes") return true;
-                if (values["confirm-approval"] || values["confirm-swap"])
-                  return false;
-                if (!process.stdin.isTTY) return false;
-                const prompt = createInterface({
-                  input: process.stdin,
-                  output: process.stderr,
-                });
-                try {
-                  return (
-                    (await prompt.question(
-                      `Type ${kind} to sign and send this transaction: `,
-                      { signal: abort.signal },
-                    )) === kind
-                  );
-                } finally {
-                  prompt.close();
-                }
-              },
-            }),
+          const pendingNonce = await context.rpc.pendingNonce(context.signer);
+          const journal = await AtomicIntentJournal.open(
+            values["atomic-journal"] as string,
           );
+          try {
+            return executionExitCode(
+              await runAtomicPlanTrade({
+                request,
+                candidateIndex: candidateIndex - 1,
+                signer: context.signer,
+                executor: trustedExecutor,
+                slippageBps: Number(slippage),
+                pendingNonce,
+                maxFeePerGas: atomicFees.maxFeePerGas,
+                maxPriorityFeePerGas: atomicFees.maxPriorityFeePerGas,
+                finalityPolicy,
+                finalityChain: context.rpc,
+                signal: abort.signal,
+                journal,
+                quote: () =>
+                  atomicClient.getPlanQuote(
+                    atomicPlanQuoteRequest(request, searchBudgetMs),
+                    {
+                      signal: abort.signal,
+                      timeoutMs: searchBudgetMs + 5000,
+                    },
+                  ),
+                prepare: (request) =>
+                  atomicClient.preparePlan(request, {
+                    signal: abort.signal,
+                    timeoutMs: 25000,
+                  }),
+                recheck: (request) =>
+                  atomicClient.recheckPlan(request, {
+                    signal: abort.signal,
+                    timeoutMs: 25000,
+                  }),
+                chainId: context.rpc.chainId,
+                sign: context.wallet.signAtomic,
+                submitRawTransaction: context.rpc.submitRawTransaction,
+                receipt: context.rpc.waitCanonicalReceipt,
+                traceCanonicalTransaction:
+                  context.rpc.traceCanonicalTransaction,
+                report: (event) => console.log(JSON.stringify(event)),
+                confirm: async (kind, transaction, envelope) => {
+                  if (
+                    !(await verifyAtomicExecutor(context.rpc, trustedExecutor))
+                  )
+                    throw new Error(
+                      "Local Atomic V1 executor runtime code or limits changed. Nothing sent.",
+                    );
+                  console.error(
+                    JSON.stringify(
+                      atomicConsentDetails(kind, transaction, envelope),
+                    ),
+                  );
+                  if (values[`confirm-${kind}`] === "yes") return true;
+                  if (values["confirm-approval"] || values["confirm-swap"])
+                    return false;
+                  if (!process.stdin.isTTY) return false;
+                  const prompt = createInterface({
+                    input: process.stdin,
+                    output: process.stderr,
+                  });
+                  try {
+                    return (
+                      (await prompt.question(
+                        `Type ${kind} to sign and send this transaction: `,
+                        { signal: abort.signal },
+                      )) === kind
+                    );
+                  } finally {
+                    prompt.close();
+                  }
+                },
+              }),
+            );
+          } finally {
+            await journal.close();
+          }
         } finally {
-          await journal.close();
+          await nonceLock.close();
         }
       }
       return executionExitCode(
