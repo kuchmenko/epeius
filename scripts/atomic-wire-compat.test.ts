@@ -500,6 +500,16 @@ test("exact pre-Atomic main and current product prove additive-wire process comp
       // Connect code 12 is UNIMPLEMENTED.
       expect((error as { code?: number }).code).toBe(12);
     }
+    try {
+      await atomicPlanClient(proxy.url.toString()).evaluatePlanFees({});
+      throw new Error("baseline server accepted fee-evidence method");
+    } catch (error) {
+      expect((error as { code?: number }).code).toBe(12);
+    }
+    expect(paths.slice(-2)).toEqual([
+      "/epeius.atomic.v1.AtomicPlanService/GetPlanQuote",
+      "/epeius.atomic.v1.AtomicPlanService/EvaluatePlanFees",
+    ]);
     paths.length = 0;
     atomicResponses.length = 0;
     const currentConfig = join(directory, "current.toml");

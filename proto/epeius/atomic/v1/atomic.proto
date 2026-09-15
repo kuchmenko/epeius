@@ -8,6 +8,7 @@ service AtomicPlanService {
   rpc GetPlanQuote(PlanQuoteRequest) returns (PlanQuoteResponse);
   rpc PreparePlan(PreparePlanRequest) returns (PreparePlanResponse);
   rpc RecheckPlan(RecheckPlanRequest) returns (PreparePlanResponse);
+  rpc EvaluatePlanFees(EvaluatePlanFeesRequest) returns (EvaluatePlanFeesResponse);
 }
 
 message PlanQuoteRequest {
@@ -229,5 +230,98 @@ message PreparePlanResponse {
   UnsignedPreparation preparation = 2;
   SimulationEvidence simulation = 3;
   Erc20Approval approval = 4;
+  optional string message = 5;
+}
+
+message EvaluatePlanFeesRequest {
+  optional uint32 format_version = 1;
+  optional bytes quote_id = 2;
+  FeeExecutionSnapshotProposal fee_snapshot = 3;
+  AccountSnapshotProposal account_snapshot = 4;
+  PendingAccountProposal pending_account = 5;
+  repeated FeeCandidateProposal candidates = 6;
+  optional bytes policy_config_sha256 = 7;
+}
+
+message FeeExecutionSnapshotProposal {
+  optional bytes chain_id = 1;
+  optional bytes signer = 2;
+  PinnedBlock quote_block = 3;
+  optional bytes quote_block_timestamp = 4;
+  optional bytes observed_at_unix = 5;
+  optional bytes historical_nonce_at_block = 6;
+  optional bytes historical_native_balance_at_block = 7;
+  repeated SetupStateEntry setup_state_at_block = 8;
+  optional bytes setup_state_at_block_sha256 = 9;
+  optional bytes forecast_target_block_number = 10;
+}
+
+message AccountSnapshotProposal {
+  optional bytes chain_id = 1;
+  optional bytes signer = 2;
+  PinnedBlock account_block = 3;
+  optional bytes account_block_timestamp = 4;
+  optional bytes observed_at_unix = 5;
+  optional bytes native_balance_at_block = 6;
+  repeated SetupStateEntry setup_state_at_block = 7;
+  optional bytes setup_state_at_block_sha256 = 8;
+}
+
+message PendingAccountProposal {
+  optional bytes chain_id = 1;
+  optional bytes signer = 2;
+  optional bytes pending_nonce = 3;
+  optional bytes observed_at_unix = 4;
+  optional string method_profile = 5;
+  optional bytes terminal_pending_reservations = 6;
+  optional string block_context = 7;
+}
+
+message SetupStateEntry {
+  optional uint32 kind = 1;
+  optional bytes token = 2;
+  optional bytes owner = 3;
+  optional bytes spender = 4;
+  optional bytes value = 5;
+}
+
+message FeeCandidateProposal {
+  optional bytes candidate_id = 1;
+  optional bytes plan_id = 2;
+  optional bytes preparation_id = 3;
+  optional bytes executor_plan_hash = 4;
+  optional bytes transaction_fingerprint = 5;
+  UnsignedType2EnvelopeProposal envelope = 6;
+}
+
+message UnsignedType2EnvelopeProposal {
+  optional uint32 transaction_type = 1;
+  optional bytes chain_id = 2;
+  optional bytes nonce = 3;
+  optional bytes sender = 4;
+  optional bytes target = 5;
+  optional bytes value = 6;
+  optional bytes calldata = 7;
+  optional bytes gas_limit = 8;
+  optional bytes max_priority_fee_per_gas = 9;
+  optional bytes max_fee_per_gas = 10;
+  optional bytes access_list_rlp = 11;
+  optional bytes serialized = 12;
+}
+
+enum FeeEvidenceStatus {
+  FEE_EVIDENCE_STATUS_UNSPECIFIED = 0;
+  FEE_EVIDENCE_STATUS_COMPLETE = 1;
+  FEE_EVIDENCE_STATUS_PARTIAL = 2;
+  FEE_EVIDENCE_STATUS_UNKNOWN = 3;
+  FEE_EVIDENCE_STATUS_STALE = 4;
+  FEE_EVIDENCE_STATUS_REJECTED = 5;
+}
+
+message EvaluatePlanFeesResponse {
+  optional uint32 format_version = 1;
+  optional FeeEvidenceStatus status = 2;
+  optional bytes fee_evidence_id = 3;
+  optional bytes canonical_evidence_json = 4;
   optional string message = 5;
 }
