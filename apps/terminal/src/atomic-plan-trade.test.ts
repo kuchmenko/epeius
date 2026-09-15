@@ -9,10 +9,12 @@ import {
   encodeFunctionData,
   erc20Abi,
   hexToBytes,
+  keccak256,
   padHex,
   toHex,
   zeroHash,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { executorV2Abi } from "../../../generated/abi";
 import {
   BranchQuoteSchema,
@@ -32,9 +34,11 @@ import {
   UnsignedPreparationSchema,
   V3PoolSchema,
 } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
+import type { UnsignedTransaction } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import type {
   AtomicIntentAttempt,
   AtomicIntentJournalWriter,
+  SignedAtomicIntentAttempt,
 } from "./atomic-intent-journal";
 import { AtomicIntentJournal } from "./atomic-intent-journal";
 import {
@@ -45,6 +49,7 @@ import {
   type AtomicPlanTradeIO,
   runAtomicPlanTrade,
 } from "./atomic-plan-trade";
+import type { AtomicEnvelope } from "./atomic-signed-envelope";
 import { ExecutionOutcome } from "./execution";
 import {
   atomicV1ExecutorCalldata,
@@ -63,7 +68,10 @@ const slipstreamFixture = await Bun.file(
 const word = (value: string | bigint | number) =>
   hexToBytes(padHex(toHex(BigInt(value)), { size: 32 }));
 const address = (value: string) => hexToBytes(value as `0x${string}`);
-const signer = "0x0000000000000000000000000000000000000055";
+const account = privateKeyToAccount(
+  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+);
+const signer = account.address;
 const executor = {
   address: "0x0000000000000000000000000000000000000044",
   runtimeCodeHash:
@@ -76,7 +84,23 @@ const executor = {
   slipstreamFactory: slipstreamFixture.factory,
   slipstreamRouter: slipstreamFixture.router,
 } as const;
-const transactionHash = `0x${"d".repeat(64)}`;
+
+const sign = (
+  transaction: UnsignedTransaction,
+  envelope: AtomicEnvelope,
+): Promise<`0x${string}`> =>
+  account.signTransaction({
+    type: "eip1559",
+    chainId: Number(transaction.chainId),
+    nonce: Number(envelope.nonce),
+    maxFeePerGas: BigInt(envelope.maxFeePerGasAtomic),
+    maxPriorityFeePerGas: BigInt(envelope.maxPriorityFeePerGasAtomic),
+    gas: BigInt(transaction.gasLimit),
+    to: transaction.to as `0x${string}`,
+    value: BigInt(transaction.valueAtomic),
+    data: transaction.data as `0x${string}`,
+    accessList: [],
+  });
 
 function candidate(kind: 1 | 3 = 1) {
   const source = kind === 3 ? slipstreamFixture : fixture;
@@ -267,11 +291,14 @@ function harness(
   const approvalFlow = responses[0] === "approval";
   let receipts = 0;
   let quotes = 0;
+  let currentHash = "";
+  let currentRaw = "";
   let selected: ReturnType<typeof acceptAtomicCandidate>;
   return {
     calls,
     preparedResponses,
     selected: () => selected,
+    hash: () => currentHash,
     io: {
       request: {
         chainId: BigInt(source.chainId),
@@ -283,6 +310,9 @@ function harness(
       signer,
       executor,
       slippageBps: 50,
+      pendingNonce: 9n,
+      maxFeePerGas: 30n,
+      maxPriorityFeePerGas: 2n,
       quote: async () => {
         calls.push("quote");
         const value = quote(++quotes, kind);
@@ -332,26 +362,47 @@ function harness(
               ? { transactionFingerprint: input.transactionFingerprint }
               : {}),
             transaction: structuredClone(input.transaction),
+            envelope: structuredClone(input.envelope),
+          };
+        },
+        sign: async (
+          attempt: AtomicIntentAttempt,
+          signedEnvelope: Parameters<AtomicIntentJournalWriter["sign"]>[1],
+        ) => {
+          calls.push("journal:signed");
+          return {
+            ...structuredClone(attempt),
+            signedEnvelope: structuredClone(signedEnvelope),
           };
         },
         transition: async (
-          _attempt: AtomicIntentAttempt,
+          _attempt: AtomicIntentAttempt | SignedAtomicIntentAttempt,
           state: Parameters<AtomicIntentJournalWriter["transition"]>[1],
           _details?: Parameters<AtomicIntentJournalWriter["transition"]>[2],
         ) => {
           calls.push(`journal:${state}`);
         },
       },
-      send: async () => {
-        calls.push("send");
-        return transactionHash;
+      sign: async (
+        transaction: UnsignedTransaction,
+        envelope: AtomicEnvelope,
+      ) => {
+        calls.push("sign");
+        currentRaw = await sign(transaction, envelope);
+        currentHash = keccak256(currentRaw as `0x${string}`);
+        return currentRaw;
+      },
+      submitRawTransaction: async (raw: string) => {
+        calls.push("submitRawTransaction");
+        expect(raw).toBe(currentRaw);
+        return currentHash;
       },
       receipt: async () => {
         calls.push("receipt");
         receipts++;
         if (approvalFlow && receipts === 1)
           return {
-            transactionHash,
+            transactionHash: currentHash,
             status: "0x1",
           } as unknown as Receipt;
         throw new Error("fixture receipt unavailable");
@@ -365,6 +416,7 @@ function harness(
 
 function slipstreamReceipt(
   selected: ReturnType<typeof acceptAtomicCandidate>,
+  transactionHash: string,
 ): Receipt {
   const prepared = validateAtomicPlanPreparation(
     readyResponse(selected, 3),
@@ -493,7 +545,7 @@ test("Atomic plan trade selects explicitly and rechecks frozen bytes before send
   const result = await runAtomicPlanTrade(value.io);
   expect(result).toEqual({
     kind: ExecutionOutcome.Unknown,
-    transactionHash,
+    transactionHash: value.hash(),
   });
   expect(value.calls).toEqual([
     "quote",
@@ -502,8 +554,9 @@ test("Atomic plan trade selects explicitly and rechecks frozen bytes before send
     "confirm:swap",
     "recheck",
     "chainId",
-    "journal:handoff_started",
-    "send",
+    "sign",
+    "journal:signed",
+    "submitRawTransaction",
     "journal:submitted",
     "receipt",
     "journal:receipt_unavailable",
@@ -514,12 +567,12 @@ test("Slipstream Atomic trade journals economic pass only after accepted native 
   const value = harness(["ready"], 3);
   value.io.receipt = async () => {
     value.calls.push("receipt");
-    return slipstreamReceipt(value.selected());
+    return slipstreamReceipt(value.selected(), value.hash());
   };
   value.io.traceCanonicalTransaction = async (hash, receipt) => {
     value.calls.push("trace");
-    expect(hash).toBe(transactionHash);
-    expect(receipt.transactionHash).toBe(transactionHash);
+    expect(hash).toBe(value.hash());
+    expect(receipt.transactionHash).toBe(value.hash());
     return {
       type: "CALL",
       from: signer,
@@ -541,7 +594,7 @@ test("Slipstream Atomic trade journals economic pass only after accepted native 
   value.io.report = (event) => reports.push(event);
   expect(await runAtomicPlanTrade(value.io)).toEqual({
     kind: ExecutionOutcome.SwapVerified,
-    transactionHash,
+    transactionHash: value.hash(),
   });
   expect(value.calls.slice(-3)).toEqual([
     "receipt",
@@ -552,7 +605,7 @@ test("Slipstream Atomic trade journals economic pass only after accepted native 
     value.calls.indexOf("journal:receipt_passed"),
   );
   expect(reports.at(-1)).toMatchObject({
-    transactionHash,
+    transactionHash: value.hash(),
     verification: { outcome: VerificationOutcome.Passed },
   });
 });
@@ -561,11 +614,11 @@ test("Slipstream Atomic trade journals unavailable when native trace is unsuppor
   const value = harness(["ready"], 3);
   value.io.receipt = async () => {
     value.calls.push("receipt");
-    return slipstreamReceipt(value.selected());
+    return slipstreamReceipt(value.selected(), value.hash());
   };
   expect(await runAtomicPlanTrade(value.io)).toEqual({
     kind: ExecutionOutcome.Unknown,
-    transactionHash,
+    transactionHash: value.hash(),
   });
   expect(value.calls).toContain("journal:receipt_unavailable");
   expect(value.calls).not.toContain("journal:receipt_passed");
@@ -579,8 +632,9 @@ test("Atomic plan trade obtains a new quote after exact approval", async () => {
     "prepare",
     "journal:prepared:approval",
     "confirm:approval",
-    "journal:handoff_started",
-    "send",
+    "sign",
+    "journal:signed",
+    "submitRawTransaction",
     "journal:submitted",
     "receipt",
     "journal:receipt_passed",
@@ -590,8 +644,9 @@ test("Atomic plan trade obtains a new quote after exact approval", async () => {
     "confirm:swap",
     "recheck",
     "chainId",
-    "journal:handoff_started",
-    "send",
+    "sign",
+    "journal:signed",
+    "submitRawTransaction",
     "journal:submitted",
     "receipt",
     "journal:receipt_unavailable",
@@ -605,7 +660,8 @@ test("Atomic plan trade never sends after cancellation or changed recheck", asyn
     kind: ExecutionOutcome.Canceled,
   });
   expect(canceled.calls).toContain("journal:canceled");
-  expect(canceled.calls).not.toContain("send");
+  expect(canceled.calls).not.toContain("sign");
+  expect(canceled.calls).not.toContain("submitRawTransaction");
 
   const changed = harness();
   changed.io.recheck = async () => {
@@ -616,7 +672,8 @@ test("Atomic plan trade never sends after cancellation or changed recheck", asyn
     return response;
   };
   await expect(runAtomicPlanTrade(changed.io)).rejects.toThrow();
-  expect(changed.calls).not.toContain("send");
+  expect(changed.calls).not.toContain("sign");
+  expect(changed.calls).not.toContain("submitRawTransaction");
 });
 
 test("Atomic journal stores separate approval and swap attempts with exact protobuf bytes and identities", async () => {
@@ -639,17 +696,21 @@ test("Atomic journal stores separate approval and swap attempts with exact proto
       .map((line) => JSON.parse(line));
     expect(records.map((record) => record.state)).toEqual([
       "prepared",
-      "handoff_started",
+      "signed",
       "submitted",
       "receipt_passed",
       "prepared",
-      "handoff_started",
+      "signed",
       "submitted",
       "receipt_unavailable",
     ]);
     expect(records[0].action).toBe("approval");
     expect(records[4].action).toBe("swap");
     expect(records[0].attemptId).not.toBe(records[4].attemptId);
+    expect(records[1].signedEnvelope.nonce).toBe("9");
+    expect(records[5].signedEnvelope.nonce).toBe("10");
+    expect(records[1].signedEnvelope.rawTransaction).toMatch(/^0x02[0-9a-f]+$/);
+    expect(records[5].signedEnvelope.rawTransaction).toMatch(/^0x02[0-9a-f]+$/);
     const approvalBytes = new Uint8Array(
       hexToBytes(records[0].payloadBinaryHex),
     );
@@ -673,12 +734,13 @@ test("Atomic journal stores separate approval and swap attempts with exact proto
     expect(records[4].transactionFingerprint).toMatch(/^0x[0-9a-f]{64}$/);
     expect(records[4].transaction).toEqual({
       chainId: fixture.chainId,
-      from: signer,
+      from: signer.toLowerCase(),
       to: executor.address,
       valueAtomic: "0",
-      data: expect.stringMatching(/^0x[0-9a-f]+$/),
+      data: records[4].transaction.data,
       gasLimit: "1000000",
     });
+    expect(records[4].transaction.data).toMatch(/^0x[0-9a-f]+$/);
     const frozen = fromBinary(UnsignedPreparationSchema, preparationBytes);
     expect(`0x${Buffer.from(frozen.planId ?? []).toString("hex")}`).toBe(
       records[4].planId,
@@ -715,7 +777,7 @@ test("Atomic journal stores separate approval and swap attempts with exact proto
   }
 });
 
-test("journal failures enforce zero sends before durable handoff and at most one after", async () => {
+test("journal failures enforce zero submissions before durable signed bytes and at most one after", async () => {
   const beforeConsent = harness();
   beforeConsent.io.journal.prepare = async () => {
     throw new Error("prepare append failed");
@@ -724,31 +786,27 @@ test("journal failures enforce zero sends before durable handoff and at most one
     "prepare append failed",
   );
   expect(beforeConsent.calls).not.toContain("confirm:swap");
-  expect(beforeConsent.calls).not.toContain("send");
+  expect(beforeConsent.calls).not.toContain("sign");
+  expect(beforeConsent.calls).not.toContain("submitRawTransaction");
 
-  const beforeHandoff = harness();
-  const beforeHandoffTransition = beforeHandoff.io.journal.transition;
-  beforeHandoff.io.journal.transition = async (
-    attempt: Parameters<JournalTransition>[0],
-    state: Parameters<JournalTransition>[1],
-    details?: Parameters<JournalTransition>[2],
-  ) => {
-    if (state === "handoff_started") throw new Error("handoff sync failed");
-    return beforeHandoffTransition(attempt, state, details);
+  const beforeSigned = harness();
+  beforeSigned.io.journal.sign = async () => {
+    throw new Error("signed append failed");
   };
-  await expect(runAtomicPlanTrade(beforeHandoff.io)).rejects.toThrow(
-    "handoff sync failed",
+  await expect(runAtomicPlanTrade(beforeSigned.io)).rejects.toThrow(
+    "signed append failed",
   );
-  expect(beforeHandoff.calls).not.toContain("send");
+  expect(beforeSigned.calls).toContain("sign");
+  expect(beforeSigned.calls).not.toContain("submitRawTransaction");
 
-  for (const failure of ["send", "submitted", "receipt"] as const) {
+  for (const failure of ["submit", "submitted", "receipt"] as const) {
     const value = harness();
-    let sends = 0;
-    value.io.send = async () => {
-      value.calls.push("send");
-      sends++;
-      if (failure === "send") throw new Error("cast failed");
-      return transactionHash;
+    let submissions = 0;
+    const submit = value.io.submitRawTransaction;
+    value.io.submitRawTransaction = async (raw) => {
+      submissions++;
+      if (failure === "submit") throw new Error("RPC failed");
+      return submit(raw);
     };
     const transition = value.io.journal.transition;
     value.io.journal.transition = async (
@@ -769,24 +827,42 @@ test("journal failures enforce zero sends before durable handoff and at most one
     };
     expect(await runAtomicPlanTrade(value.io)).toMatchObject({
       kind: ExecutionOutcome.Unknown,
-      transactionHash: failure === "send" ? null : transactionHash,
+      transactionHash: value.hash(),
     });
-    expect(sends).toBe(1);
+    expect(submissions).toBe(1);
     expect(reports.at(-1)).toMatchObject({
       verification: { outcome: VerificationOutcome.Unavailable },
-      ...(failure === "send"
+      ...(failure === "submit"
         ? { submission: "unknown" }
         : { message: expect.stringContaining("journal is incomplete") }),
     });
   }
 });
 
+test("Cast and signed-envelope admission failures submit nothing", async () => {
+  for (const mode of ["cast", "malformed"] as const) {
+    const value = harness();
+    let submissions = 0;
+    value.io.sign = async () => {
+      if (mode === "cast") throw new Error("Cast failed");
+      return "0x02";
+    };
+    value.io.submitRawTransaction = async () => {
+      submissions++;
+      throw new Error("must not submit");
+    };
+    await expect(runAtomicPlanTrade(value.io)).rejects.toThrow();
+    expect(submissions).toBe(0);
+    expect(value.calls).not.toContain("journal:signed");
+  }
+});
+
 test("invalid returned hash is submission_unknown and never reads receipt or retries", async () => {
   const value = harness();
-  let sends = 0;
+  let submissions = 0;
   let receipts = 0;
-  value.io.send = async () => {
-    sends++;
+  value.io.submitRawTransaction = async () => {
+    submissions++;
     return "not-a-hash";
   };
   value.io.receipt = async () => {
@@ -795,9 +871,9 @@ test("invalid returned hash is submission_unknown and never reads receipt or ret
   };
   expect(await runAtomicPlanTrade(value.io)).toEqual({
     kind: ExecutionOutcome.Unknown,
-    transactionHash: null,
+    transactionHash: value.hash(),
   });
-  expect(sends).toBe(1);
+  expect(submissions).toBe(1);
   expect(receipts).toBe(0);
   expect(value.calls).toContain("journal:submission_unknown");
 });
@@ -807,14 +883,14 @@ test("failed receipt is durably distinct from submission and economic pass", asy
   value.io.receipt = async () => {
     value.calls.push("receipt");
     return {
-      transactionHash,
+      transactionHash: value.hash(),
       status: "0x0",
       logs: [],
     };
   };
   expect(await runAtomicPlanTrade(value.io)).toEqual({
     kind: ExecutionOutcome.Failed,
-    transactionHash,
+    transactionHash: value.hash(),
   });
   expect(value.calls).toContain("journal:submitted");
   expect(value.calls).toContain("journal:receipt_failed");

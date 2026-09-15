@@ -8,6 +8,7 @@ import {
   isHash,
   isHex,
   keccak256,
+  toHex,
   zeroHash,
 } from "viem";
 import type { Receipt, TransactionCallTrace } from "./receipt";
@@ -47,6 +48,28 @@ export function readChain(rpcUrl: string, signal: AbortSignal) {
   };
   return {
     chainId: async () => String(await rpc("eth_chainId")).toLowerCase(),
+    pendingNonce: async (address: string) => {
+      const value = String(
+        await rpc("eth_getTransactionCount", [address, "pending"]),
+      );
+      if (!isHex(value, { strict: true }) || value.length <= 2)
+        throw new Error("Pending account nonce is unavailable.");
+      const nonce = hexToBigInt(value as Hex);
+      if (
+        toHex(nonce) !== value.toLowerCase() ||
+        nonce > 0xffff_ffff_ffff_ffffn
+      )
+        throw new Error("Pending account nonce is invalid.");
+      return nonce;
+    },
+    submitRawTransaction: async (raw: string) => {
+      if (!/^0x02[0-9a-f]+$/.test(raw) || raw.length % 2 !== 0)
+        throw new Error("Signed transaction bytes are invalid.");
+      const hash = String(await rpc("eth_sendRawTransaction", [raw]));
+      if (!validHash(hash))
+        throw new Error("RPC returned an invalid transaction hash.");
+      return hash;
+    },
     codeHash: async (address: string) => {
       const code = String(await rpc("eth_getCode", [address, "latest"]));
       if (!isHex(code, { strict: true }) || code === "0x")

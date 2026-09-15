@@ -5,6 +5,59 @@ import { readChain } from "./chain";
 const hash = `0x${"ab".repeat(32)}`;
 const blockHash = `0x${"cd".repeat(32)}`;
 
+test("RPC reads one exact pending nonce and submits one exact raw type-2 transaction", async () => {
+  const requests: Array<{ method: string; params: unknown[] }> = [];
+  const raw = `0x02${"11".repeat(100)}`;
+  const account = `0x${"1".repeat(40)}`;
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const body = await request.json();
+      requests.push(body);
+      return Response.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: body.method === "eth_getTransactionCount" ? "0x9" : hash,
+      });
+    },
+  });
+  try {
+    const chain = readChain(server.url.href, new AbortController().signal);
+    expect(await chain.pendingNonce(account)).toBe(9n);
+    expect(await chain.submitRawTransaction(raw)).toBe(hash);
+    expect(requests).toMatchObject([
+      {
+        method: "eth_getTransactionCount",
+        params: [account, "pending"],
+      },
+      { method: "eth_sendRawTransaction", params: [raw] },
+    ]);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("RPC rejects malformed and oversized pending nonces", async () => {
+  for (const result of ["0x", "0x00", "0x01", "0x10000000000000000"]) {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const body = await request.json();
+        return Response.json({ jsonrpc: "2.0", id: body.id, result });
+      },
+    });
+    try {
+      expect(
+        readChain(server.url.href, new AbortController().signal).pendingNonce(
+          `0x${"1".repeat(40)}`,
+        ),
+      ).rejects.toThrow("nonce");
+    } finally {
+      server.stop(true);
+    }
+  }
+});
+
 test("RPC derives configured contract runtime code hash without batching", async () => {
   const requests: Array<{ method: string; params: unknown[] }> = [];
   const code = "0x6001600055";

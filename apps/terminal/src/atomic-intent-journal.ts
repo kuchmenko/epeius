@@ -4,14 +4,20 @@ import { type FileHandle, lstat, open, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { isAddress, isHash, isHex } from "viem";
 import type { UnsignedTransaction } from "../../../generated/ts/epeius/quote/v1/quote_pb";
+import type {
+  AtomicEnvelope,
+  SignedAtomicEnvelope,
+} from "./atomic-signed-envelope";
+import { admitSignedAtomicEnvelope } from "./atomic-signed-envelope";
 
-export const ATOMIC_INTENT_JOURNAL_VERSION = 1;
+export const ATOMIC_INTENT_JOURNAL_VERSION = 2;
 
 export type AtomicIntentAction = "approval" | "swap";
 export type AtomicIntentState =
   | "prepared"
   | "canceled"
   | "handoff_started"
+  | "signed"
   | "submitted"
   | "receipt_passed"
   | "receipt_failed"
@@ -25,13 +31,17 @@ type Intent = {
   executorPlanHash?: string;
   transactionFingerprint?: string;
   transaction: UnsignedTransaction;
+  envelope: AtomicEnvelope;
 };
 
 export type AtomicIntentAttempt = Intent;
+export type SignedAtomicIntentAttempt = Intent & {
+  signedEnvelope: SignedAtomicEnvelope;
+};
 
 export type AtomicIntentJournalWriter = Pick<
   AtomicIntentJournal,
-  "prepare" | "transition"
+  "prepare" | "sign" | "transition"
 >;
 
 type Prepared = Intent & {
@@ -44,11 +54,18 @@ type Prepared = Intent & {
 type Transition = Intent & {
   schemaVersion: typeof ATOMIC_INTENT_JOURNAL_VERSION;
   state: Exclude<AtomicIntentState, "prepared">;
+  signedEnvelope?: SignedAtomicEnvelope;
   transactionHash?: string;
   verification?: "receipt_success" | "economic_pass" | "failed" | "unavailable";
 };
 
-type JournalRecord = Prepared | Transition;
+type V1JournalRecord = Omit<
+  Prepared | Transition,
+  "schemaVersion" | "envelope"
+> & {
+  schemaVersion: 1;
+};
+type JournalRecord = Prepared | Transition | V1JournalRecord;
 
 export type AtomicIntentJournalHooks = {
   before?: (
@@ -72,9 +89,18 @@ const baseKeys = [
   "executorPlanHash",
   "transactionFingerprint",
   "transaction",
+  "envelope",
 ] as const;
 const preparedKeys = [...baseKeys, "payloadType", "payloadBinaryHex"];
-const transitionKeys = [...baseKeys, "transactionHash", "verification"];
+const transitionKeys = [
+  ...baseKeys,
+  "signedEnvelope",
+  "transactionHash",
+  "verification",
+];
+const v1BaseKeys = baseKeys.filter((key) => key !== "envelope");
+const v1PreparedKeys = [...v1BaseKeys, "payloadType", "payloadBinaryHex"];
+const v1TransitionKeys = [...v1BaseKeys, "transactionHash", "verification"];
 const transactionKeys = [
   "chainId",
   "from",
@@ -83,7 +109,28 @@ const transactionKeys = [
   "valueAtomic",
   "gasLimit",
 ];
-const transitions: Record<AtomicIntentState, AtomicIntentState[]> = {
+const envelopeKeys = [
+  "type",
+  "nonce",
+  "maxFeePerGasAtomic",
+  "maxPriorityFeePerGasAtomic",
+  "accessList",
+];
+const signedEnvelopeKeys = [
+  ...envelopeKeys,
+  "chainId",
+  "signer",
+  "to",
+  "valueAtomic",
+  "data",
+  "gasLimit",
+  "yParity",
+  "r",
+  "s",
+  "rawTransaction",
+  "transactionHash",
+];
+const transitionsV1: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
   prepared: ["canceled", "handoff_started"],
   canceled: [],
   handoff_started: ["submitted", "submission_unknown"],
@@ -93,8 +140,19 @@ const transitions: Record<AtomicIntentState, AtomicIntentState[]> = {
   receipt_unavailable: [],
   submission_unknown: [],
 };
+const transitionsV2: Partial<Record<AtomicIntentState, AtomicIntentState[]>> = {
+  prepared: ["canceled", "signed"],
+  canceled: [],
+  signed: ["submitted", "submission_unknown"],
+  submitted: ["receipt_passed", "receipt_failed", "receipt_unavailable"],
+  receipt_passed: [],
+  receipt_failed: [],
+  receipt_unavailable: [],
+  submission_unknown: [],
+};
 const blocksNewAttempt = new Set<AtomicIntentState>([
   "handoff_started",
+  "signed",
   "submitted",
   "receipt_unavailable",
   "submission_unknown",
@@ -193,7 +251,7 @@ export class AtomicIntentJournal {
         }
       }
       const raw = await file.readFile({ encoding: "utf8" });
-      const states = parseAtomicIntentJournal(raw);
+      const states = await parseAtomicIntentJournal(raw);
       return new AtomicIntentJournal(
         file,
         lockPath,
@@ -223,6 +281,7 @@ export class AtomicIntentJournal {
     executorPlanHash?: string;
     transactionFingerprint?: string;
     transaction: UnsignedTransaction;
+    envelope: AtomicEnvelope;
   }): Promise<AtomicIntentAttempt> {
     this.#assertOpen();
     if (
@@ -244,6 +303,7 @@ export class AtomicIntentJournal {
         ? { transactionFingerprint: input.transactionFingerprint }
         : {}),
       transaction: journalTransaction(input.transaction),
+      envelope: structuredClone(input.envelope),
     };
     const record: Prepared = {
       schemaVersion: ATOMIC_INTENT_JOURNAL_VERSION,
@@ -252,7 +312,7 @@ export class AtomicIntentJournal {
       payloadType: input.payloadType,
       payloadBinaryHex: `0x${Buffer.from(input.payloadBinary).toString("hex")}`,
     };
-    validateRecord(record);
+    await validateRecord(record);
     if (this.#states.has(attempt.attemptId))
       throw new Error("Atomic intent journal attempt ID is already present.");
     await this.#append(record);
@@ -260,14 +320,49 @@ export class AtomicIntentJournal {
     return attempt;
   }
 
-  async transition(
+  async sign(
     attempt: AtomicIntentAttempt,
-    state: Exclude<AtomicIntentState, "prepared">,
+    signedEnvelope: SignedAtomicEnvelope,
+  ): Promise<SignedAtomicIntentAttempt> {
+    this.#assertOpen();
+    const previous = this.#states.get(attempt.attemptId);
+    if (
+      !previous ||
+      previous.schemaVersion !== ATOMIC_INTENT_JOURNAL_VERSION ||
+      previous.state !== "prepared"
+    )
+      throw new Error("Atomic intent journal signed transition is invalid.");
+    const signedAttempt = {
+      ...structuredClone(attempt),
+      signedEnvelope: structuredClone(signedEnvelope),
+    };
+    const record: Transition = {
+      schemaVersion: ATOMIC_INTENT_JOURNAL_VERSION,
+      ...signedAttempt,
+      state: "signed",
+    };
+    await validateRecord(record);
+    assertSameIntent(previous, record);
+    await this.#append(record);
+    this.#states.set(attempt.attemptId, record);
+    return signedAttempt;
+  }
+
+  async transition(
+    attempt: AtomicIntentAttempt | SignedAtomicIntentAttempt,
+    state: Exclude<
+      AtomicIntentState,
+      "prepared" | "handoff_started" | "signed"
+    >,
     details: Pick<Transition, "transactionHash" | "verification"> = {},
   ) {
     this.#assertOpen();
     const previous = this.#states.get(attempt.attemptId);
-    if (!previous || !transitions[previous.state].includes(state))
+    if (
+      !previous ||
+      previous.schemaVersion !== ATOMIC_INTENT_JOURNAL_VERSION ||
+      !(transitionsV2[previous.state] ?? []).includes(state)
+    )
       throw new Error("Atomic intent journal transition is invalid.");
     const record: Transition = {
       schemaVersion: ATOMIC_INTENT_JOURNAL_VERSION,
@@ -275,8 +370,9 @@ export class AtomicIntentJournal {
       state,
       ...details,
     };
-    validateRecord(record);
+    await validateRecord(record);
     assertSameIntent(previous, record);
+    assertSameSignedEnvelope(previous, record);
     assertSameTransactionHash(previous, record);
     await this.#append(record);
     this.#states.set(attempt.attemptId, record);
@@ -305,7 +401,7 @@ export class AtomicIntentJournal {
   }
 }
 
-export function parseAtomicIntentJournal(raw: string) {
+export async function parseAtomicIntentJournal(raw: string) {
   const states = new Map<string, JournalRecord>();
   if (!raw) return states;
   if (!raw.endsWith("\n"))
@@ -319,18 +415,25 @@ export function parseAtomicIntentJournal(raw: string) {
     } catch {
       throw new Error("Atomic intent journal contains malformed JSON.");
     }
-    validateRecord(record);
+    await validateRecord(record);
     const current = record as JournalRecord;
     const previous = states.get(current.attemptId);
     if (current.state === "prepared") {
       if (previous)
         throw new Error("Atomic intent journal contains a duplicate attempt.");
     } else {
-      if (!previous || !transitions[previous.state].includes(current.state))
+      if (
+        !previous ||
+        previous.schemaVersion !== current.schemaVersion ||
+        !(transitionsFor(current.schemaVersion)[previous.state] ?? []).includes(
+          current.state,
+        )
+      )
         throw new Error(
           "Atomic intent journal transition sequence is invalid.",
         );
       assertSameIntent(previous, current);
+      assertSameSignedEnvelope(previous, current);
       assertSameTransactionHash(previous, current);
     }
     states.set(current.attemptId, current);
@@ -338,11 +441,13 @@ export function parseAtomicIntentJournal(raw: string) {
   return states;
 }
 
-function validateRecord(value: unknown): asserts value is JournalRecord {
+async function validateRecord(value: unknown): Promise<void> {
   if (!plainObject(value))
     throw new Error("Atomic intent journal record must be an object.");
-  if (value.schemaVersion !== ATOMIC_INTENT_JOURNAL_VERSION)
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2)
     throw new Error("Atomic intent journal schema version is unsupported.");
+  const version = value.schemaVersion;
+  const validStates = version === 1 ? transitionsV1 : transitionsV2;
   if (
     typeof value.attemptId !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
@@ -350,11 +455,20 @@ function validateRecord(value: unknown): asserts value is JournalRecord {
     ) ||
     (value.action !== "approval" && value.action !== "swap") ||
     typeof value.state !== "string" ||
-    !Object.hasOwn(transitions, value.state)
+    !Object.hasOwn(validStates, value.state)
   )
     throw new Error("Atomic intent journal record identity is invalid.");
   const state = value.state as AtomicIntentState;
-  exactKeys(value, state === "prepared" ? preparedKeys : transitionKeys);
+  exactKeys(
+    value,
+    state === "prepared"
+      ? version === 1
+        ? v1PreparedKeys
+        : preparedKeys
+      : version === 1
+        ? v1TransitionKeys
+        : transitionKeys,
+  );
   for (const name of [
     "planId",
     "executorPlanHash",
@@ -363,6 +477,7 @@ function validateRecord(value: unknown): asserts value is JournalRecord {
     if (value[name] !== undefined && !isHash(value[name] as string))
       throw new Error("Atomic intent journal hash identity is invalid.");
   validateTransaction(value.transaction);
+  if (version === 2) validateEnvelope(value.envelope);
   if (state === "prepared") {
     if (
       (value.payloadType !== "approval_response" &&
@@ -382,6 +497,25 @@ function validateRecord(value: unknown): asserts value is JournalRecord {
     )
       throw new Error("Atomic intent journal prepared payload is invalid.");
     return;
+  }
+  if (version === 2) {
+    const signedRequired = state !== "canceled";
+    if (signedRequired !== (value.signedEnvelope !== undefined))
+      throw new Error("Atomic intent journal signed envelope is missing.");
+    if (value.signedEnvelope !== undefined) {
+      const record = value as unknown as Transition;
+      validateSignedEnvelope(record.signedEnvelope);
+      assertEnvelopeMatchesRecord(record, record.signedEnvelope);
+      const admitted = await admitSignedAtomicEnvelope(
+        record.signedEnvelope.rawTransaction,
+        record.transaction,
+        record.envelope,
+      );
+      if (JSON.stringify(admitted) !== JSON.stringify(record.signedEnvelope))
+        throw new Error(
+          "Atomic intent journal signed envelope is inconsistent.",
+        );
+    }
   }
   const hashRequired = [
     "submitted",
@@ -434,6 +568,93 @@ function validateTransaction(value: unknown) {
     throw new Error("Atomic intent journal transaction fields are invalid.");
 }
 
+function validateEnvelope(value: unknown): asserts value is AtomicEnvelope {
+  if (!plainObject(value))
+    throw new Error("Atomic intent journal envelope is invalid.");
+  exactKeys(value, envelopeKeys);
+  validateEnvelopeFields(value);
+}
+
+function validateEnvelopeFields(value: Record<string, unknown>) {
+  if (
+    value.type !== 2 ||
+    typeof value.nonce !== "string" ||
+    !/^(0|[1-9][0-9]*)$/.test(value.nonce) ||
+    BigInt(value.nonce) > 0xffff_ffff_ffff_ffffn ||
+    typeof value.maxFeePerGasAtomic !== "string" ||
+    !/^[1-9][0-9]*$/.test(value.maxFeePerGasAtomic) ||
+    BigInt(value.maxFeePerGasAtomic) >
+      0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffffn ||
+    typeof value.maxPriorityFeePerGasAtomic !== "string" ||
+    !/^(0|[1-9][0-9]*)$/.test(value.maxPriorityFeePerGasAtomic) ||
+    BigInt(value.maxPriorityFeePerGasAtomic) >
+      BigInt(value.maxFeePerGasAtomic) ||
+    !Array.isArray(value.accessList) ||
+    value.accessList.length !== 0
+  )
+    throw new Error("Atomic intent journal envelope fields are invalid.");
+}
+
+function validateSignedEnvelope(
+  value: unknown,
+): asserts value is SignedAtomicEnvelope {
+  if (!plainObject(value))
+    throw new Error("Atomic intent journal signed envelope is invalid.");
+  exactKeys(value, signedEnvelopeKeys);
+  validateEnvelopeFields(value);
+  if (
+    typeof value.chainId !== "string" ||
+    !/^[1-9][0-9]*$/.test(value.chainId) ||
+    typeof value.signer !== "string" ||
+    !isAddress(value.signer, { strict: false }) ||
+    typeof value.to !== "string" ||
+    !isAddress(value.to, { strict: false }) ||
+    typeof value.valueAtomic !== "string" ||
+    !/^(0|[1-9][0-9]*)$/.test(value.valueAtomic) ||
+    typeof value.data !== "string" ||
+    !isHex(value.data, { strict: true }) ||
+    typeof value.gasLimit !== "string" ||
+    !/^[1-9][0-9]*$/.test(value.gasLimit) ||
+    (value.yParity !== 0 && value.yParity !== 1) ||
+    typeof value.r !== "string" ||
+    !/^0x[0-9a-f]{64}$/.test(value.r) ||
+    typeof value.s !== "string" ||
+    !/^0x[0-9a-f]{64}$/.test(value.s) ||
+    typeof value.rawTransaction !== "string" ||
+    !/^0x02[0-9a-f]+$/.test(value.rawTransaction) ||
+    typeof value.transactionHash !== "string" ||
+    !isHash(value.transactionHash)
+  )
+    throw new Error(
+      "Atomic intent journal signed envelope fields are invalid.",
+    );
+}
+
+function assertEnvelopeMatchesRecord(
+  record: Transition,
+  signed: SignedAtomicEnvelope,
+) {
+  const same = (left: string, right: string) =>
+    left.toLowerCase() === right.toLowerCase();
+  if (
+    JSON.stringify(record.envelope) !==
+      JSON.stringify({
+        type: signed.type,
+        nonce: signed.nonce,
+        maxFeePerGasAtomic: signed.maxFeePerGasAtomic,
+        maxPriorityFeePerGasAtomic: signed.maxPriorityFeePerGasAtomic,
+        accessList: signed.accessList,
+      }) ||
+    record.transaction.chainId !== signed.chainId ||
+    !same(record.transaction.from, signed.signer) ||
+    !same(record.transaction.to, signed.to) ||
+    record.transaction.valueAtomic !== signed.valueAtomic ||
+    record.transaction.data.toLowerCase() !== signed.data ||
+    record.transaction.gasLimit !== signed.gasLimit
+  )
+    throw new Error("Atomic intent journal signed envelope changed authority.");
+}
+
 function journalTransaction(
   transaction: UnsignedTransaction,
 ): UnsignedTransaction {
@@ -470,6 +691,27 @@ function assertSameIntent(previous: JournalRecord, current: JournalRecord) {
     throw new Error(
       "Atomic intent journal transaction changed within an attempt.",
     );
+  if (
+    previous.schemaVersion === 2 &&
+    current.schemaVersion === 2 &&
+    JSON.stringify(previous.envelope) !== JSON.stringify(current.envelope)
+  )
+    throw new Error(
+      "Atomic intent journal envelope changed within an attempt.",
+    );
+}
+
+function assertSameSignedEnvelope(
+  previous: JournalRecord,
+  current: JournalRecord,
+) {
+  const prior =
+    "signedEnvelope" in previous ? previous.signedEnvelope : undefined;
+  const next = "signedEnvelope" in current ? current.signedEnvelope : undefined;
+  if (prior !== undefined && JSON.stringify(prior) !== JSON.stringify(next))
+    throw new Error(
+      "Atomic intent journal signed bytes changed within an attempt.",
+    );
 }
 
 function assertSameTransactionHash(
@@ -477,14 +719,28 @@ function assertSameTransactionHash(
   current: JournalRecord,
 ) {
   if (
+    current.schemaVersion === 2 &&
+    current.state === "submitted" &&
+    "signedEnvelope" in current &&
+    current.signedEnvelope?.transactionHash !== current.transactionHash
+  )
+    throw new Error(
+      "Atomic intent journal submitted hash differs from signed bytes.",
+    );
+  if (
     current.state.startsWith("receipt_") &&
     previous.state === "submitted" &&
+    "transactionHash" in previous &&
     "transactionHash" in current &&
     previous.transactionHash !== current.transactionHash
   )
     throw new Error(
       "Atomic intent journal transaction hash changed within an attempt.",
     );
+}
+
+function transitionsFor(version: 1 | 2) {
+  return version === 1 ? transitionsV1 : transitionsV2;
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]) {

@@ -15,7 +15,7 @@ import type {
   ExecutionResult,
   Verification,
 } from "./execution";
-import { executionExitCode } from "./main";
+import { atomicConsentDetails, executionExitCode } from "./main";
 import { configureChain } from "./protocols";
 import { decimalToAtomic, parseAtomic, resolveToken } from "./tokens";
 
@@ -48,6 +48,47 @@ test("CLI exit mapping covers every execution outcome; verification is action-sp
     evidence: { outcome: "receipt_success" },
   };
   void invalid;
+});
+
+test("Atomic consent shows every exact type-2 authority field and bounded exposure", () => {
+  expect(
+    atomicConsentDetails(
+      "swap",
+      {
+        $typeName: "epeius.quote.v1.UnsignedTransaction",
+        chainId: "8453",
+        from: `0x${"1".repeat(40)}`,
+        to: `0x${"2".repeat(40)}`,
+        valueAtomic: "7",
+        data: "0x661983c5",
+        gasLimit: "1000000",
+      },
+      {
+        type: 2,
+        nonce: "9",
+        maxFeePerGasAtomic: "30",
+        maxPriorityFeePerGasAtomic: "2",
+        accessList: [],
+      },
+    ),
+  ).toEqual({
+    action: "swap",
+    transactionType: 2,
+    chainId: "8453",
+    nonce: "9",
+    sender: `0x${"1".repeat(40)}`,
+    target: `0x${"2".repeat(40)}`,
+    valueAtomic: "7",
+    gasLimit: "1000000",
+    calldataHash:
+      "0x32cc32aa3c800c56504f35be253f8c3d8b6efca21e2f6cf6f1d8030387756e13",
+    maxFeePerGasAtomic: "30",
+    maxPriorityFeePerGasAtomic: "2",
+    maxExecutionGasExposureAtomic: "30000000",
+    totalMaximumAtomic: null,
+    feeNotice:
+      "OP/Base L1-data and operator charges are not capped by these execution-gas fee caps; total maximum is unknown.",
+  });
 });
 
 test("decimal amounts convert exactly at 0, 6, and 18 decimals", () => {
@@ -476,6 +517,60 @@ test("CLI resolves symbols and addresses, sends exact amounts, and handles compl
     expect(missingJournal.code).toBe(1);
     expect(missingJournal.err).toContain("explicit --atomic-journal path");
     expect(requests).toHaveLength(requestsBeforeJournalAdmission);
+    const atomicPrefix = [
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--execution-mode",
+      "atomic-v1",
+      "--candidate-index",
+      "1",
+      "--atomic-journal",
+      "intent.jsonl",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ];
+    for (const feeArgs of [
+      [],
+      ["--max-fee-per-gas-atomic", "1"],
+      ["--max-priority-fee-per-gas-atomic", "0"],
+      [
+        "--max-fee-per-gas-atomic",
+        "0",
+        "--max-priority-fee-per-gas-atomic",
+        "0",
+      ],
+      [
+        "--max-fee-per-gas-atomic",
+        "01",
+        "--max-priority-fee-per-gas-atomic",
+        "0",
+      ],
+      [
+        "--max-fee-per-gas-atomic",
+        "1",
+        "--max-priority-fee-per-gas-atomic",
+        "2",
+      ],
+      [
+        "--max-fee-per-gas-atomic",
+        (1n << 256n).toString(),
+        "--max-priority-fee-per-gas-atomic",
+        "0",
+      ],
+    ]) {
+      const before = requests.length;
+      const invalidFee = await run([...atomicPrefix, ...feeArgs]);
+      expect(invalidFee.code).toBe(1);
+      expect(invalidFee.err).toContain("Atomic V1");
+      expect(requests).toHaveLength(before);
+    }
     const misplacedJournal = await run([
       "trade",
       "--in",
@@ -497,6 +592,28 @@ test("CLI resolves symbols and addresses, sends exact amounts, and handles compl
     expect(misplacedJournal.err).toContain(
       "only valid with trade --execution-mode atomic-v1",
     );
+    expect(requests).toHaveLength(requestsBeforeJournalAdmission);
+    const misplacedFees = await run([
+      "trade",
+      "--in",
+      "AAA",
+      "--out",
+      "BBB",
+      "--amount-atomic",
+      "1",
+      "--route-id",
+      "r1",
+      "--max-fee-per-gas-atomic",
+      "1",
+      "--max-priority-fee-per-gas-atomic",
+      "0",
+      "--keystore",
+      "missing.json",
+      "--password-file",
+      "missing.txt",
+    ]);
+    expect(misplacedFees.code).toBe(1);
+    expect(misplacedFees.err).toContain("only valid with trade");
     expect(requests).toHaveLength(requestsBeforeJournalAdmission);
     const unavailableUrl = server.url.toString();
     await server.stop(true);

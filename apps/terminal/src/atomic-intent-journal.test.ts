@@ -11,25 +11,50 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create } from "@bufbuild/protobuf";
+import { privateKeyToAccount } from "viem/accounts";
 import { UnsignedTransactionSchema } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import {
   AtomicIntentJournal,
   parseAtomicIntentJournal,
 } from "./atomic-intent-journal";
+import {
+  admitSignedAtomicEnvelope,
+  atomicEnvelope,
+} from "./atomic-signed-envelope";
 
 const id = "12345678-1234-4123-8123-123456789abc";
 const planId = `0x${"1".repeat(64)}`;
 const executorPlanHash = `0x${"2".repeat(64)}`;
 const transactionFingerprint = `0x${"3".repeat(64)}`;
 const transactionHash = `0x${"4".repeat(64)}`;
+const account = privateKeyToAccount(
+  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+);
 const transaction = create(UnsignedTransactionSchema, {
   chainId: "8453",
-  from: `0x${"5".repeat(40)}`,
+  from: account.address,
   to: `0x${"6".repeat(40)}`,
   valueAtomic: "0",
   data: "0x123456",
   gasLimit: "987654",
 });
+const envelope = atomicEnvelope(9n, 30n, 2n);
+
+async function signedEnvelope() {
+  const raw = await account.signTransaction({
+    type: "eip1559",
+    chainId: 8453,
+    nonce: 9,
+    maxFeePerGas: 30n,
+    maxPriorityFeePerGas: 2n,
+    gas: 987654n,
+    to: transaction.to as `0x${string}`,
+    value: 0n,
+    data: transaction.data as `0x${string}`,
+    accessList: [],
+  });
+  return admitSignedAtomicEnvelope(raw, transaction, envelope);
+}
 
 async function temporary() {
   const directory = await mkdtemp(join(tmpdir(), "epeius-atomic-journal-"));
@@ -64,11 +89,14 @@ test("journal creates mode 0600, fsyncs file and directory, and preserves exact 
       executorPlanHash,
       transactionFingerprint,
       transaction,
+      envelope,
     });
-    await journal.transition(attempt, "handoff_started");
-    await journal.transition(attempt, "submitted", { transactionHash });
-    await journal.transition(attempt, "receipt_passed", {
-      transactionHash,
+    const signed = await journal.sign(attempt, await signedEnvelope());
+    await journal.transition(signed, "submitted", {
+      transactionHash: signed.signedEnvelope.transactionHash,
+    });
+    await journal.transition(signed, "receipt_passed", {
+      transactionHash: signed.signedEnvelope.transactionHash,
       verification: "economic_pass",
     });
     await journal.close();
@@ -91,13 +119,13 @@ test("journal creates mode 0600, fsyncs file and directory, and preserves exact 
     const records = lines(await readFile(t.path, "utf8"));
     expect(records.map((record) => record.state)).toEqual([
       "prepared",
-      "handoff_started",
+      "signed",
       "submitted",
       "receipt_passed",
     ]);
     for (const record of records) {
       expect(record).toMatchObject({
-        schemaVersion: 1,
+        schemaVersion: 2,
         attemptId: id,
         action: "swap",
         planId,
@@ -111,6 +139,7 @@ test("journal creates mode 0600, fsyncs file and directory, and preserves exact 
           data: "0x123456",
           gasLimit: "987654",
         },
+        envelope,
       });
       expect(record.transaction).not.toHaveProperty("$typeName");
     }
@@ -119,11 +148,11 @@ test("journal creates mode 0600, fsyncs file and directory, and preserves exact 
       payloadBinaryHex: "0x0001027f80ff",
     });
     expect(records[3]).toMatchObject({
-      transactionHash,
+      transactionHash: signed.signedEnvelope.transactionHash,
       verification: "economic_pass",
     });
     const raw = await readFile(t.path, "utf8");
-    expect(() => parseAtomicIntentJournal(raw)).not.toThrow();
+    await expect(parseAtomicIntentJournal(raw)).resolves.toBeDefined();
     expect(await Bun.file(`${t.path}.lock`).exists()).toBe(false);
   } finally {
     await t.cleanup();
@@ -190,9 +219,12 @@ test("parser rejects malformed, partial, unknown, reordered, duplicate, and mism
       executorPlanHash,
       transactionFingerprint,
       transaction,
+      envelope,
     });
-    await journal.transition(attempt, "handoff_started");
-    await journal.transition(attempt, "submitted", { transactionHash });
+    const signed = await journal.sign(attempt, await signedEnvelope());
+    await journal.transition(signed, "submitted", {
+      transactionHash: signed.signedEnvelope.transactionHash,
+    });
     await journal.close();
     const valid = lines(await readFile(t.path, "utf8"));
     const encode = (records: unknown[]) =>
@@ -200,10 +232,11 @@ test("parser rejects malformed, partial, unknown, reordered, duplicate, and mism
     const mutations: string[] = [
       "{",
       JSON.stringify(valid[0]),
-      encode([{ ...valid[0], schemaVersion: 2 }]),
+      encode([{ ...valid[0], schemaVersion: 3 }]),
       encode([{ ...valid[0], mode: "atomic-v2" }]),
       encode([valid[1]]),
       encode([valid[0], valid[0]]),
+      encode([valid[0], valid[1], valid[1]]),
       encode([valid[0], valid[2]]),
       encode([
         valid[0],
@@ -242,8 +275,38 @@ test("parser rejects malformed, partial, unknown, reordered, duplicate, and mism
         },
       ]),
     ];
+    const signedMutations: Record<string, unknown>[] = [
+      { type: 3 },
+      { nonce: "10" },
+      { maxFeePerGasAtomic: "31" },
+      { maxPriorityFeePerGasAtomic: "3" },
+      { accessList: [{}] },
+      { chainId: "1" },
+      { signer: `0x${"9".repeat(40)}` },
+      { to: `0x${"9".repeat(40)}` },
+      { valueAtomic: "1" },
+      { data: "0x12" },
+      { gasLimit: "987655" },
+      { yParity: valid[1].signedEnvelope.yParity === 0 ? 1 : 0 },
+      { r: `0x${"0".repeat(64)}` },
+      { s: `0x${"0".repeat(64)}` },
+      {
+        rawTransaction: `${valid[1].signedEnvelope.rawTransaction.slice(0, -2)}00`,
+      },
+      { transactionHash: `0x${"9".repeat(64)}` },
+    ];
+    for (const mutation of signedMutations)
+      mutations.push(
+        encode([
+          valid[0],
+          {
+            ...valid[1],
+            signedEnvelope: { ...valid[1].signedEnvelope, ...mutation },
+          },
+        ]),
+      );
     for (const mutation of mutations)
-      expect(() => parseAtomicIntentJournal(mutation)).toThrow();
+      await expect(parseAtomicIntentJournal(mutation)).rejects.toThrow();
   } finally {
     await t.cleanup();
   }
@@ -287,6 +350,7 @@ test("open and append failures stop before authority can advance", async () => {
           payloadBinary: Uint8Array.of(1),
           planId,
           transaction,
+          envelope,
         }),
       ).rejects.toThrow(`fail ${failAt}`);
       await journal.close();
@@ -308,8 +372,9 @@ test("unresolved handoff history blocks every new attempt on reopen", async () =
       payloadBinary: Uint8Array.of(1),
       planId,
       transaction,
+      envelope,
     });
-    await journal.transition(attempt, "handoff_started");
+    await journal.sign(attempt, await signedEnvelope());
     await journal.close();
     const reopened = await AtomicIntentJournal.open(t.path);
     await expect(
@@ -319,9 +384,71 @@ test("unresolved handoff history blocks every new attempt on reopen", async () =
         payloadBinary: Uint8Array.of(2),
         planId,
         transaction,
+        envelope,
       }),
     ).rejects.toThrow("do not resend");
     await reopened.close();
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("complete schema-v1 history remains valid without reinterpretation", async () => {
+  const t = await temporary();
+  try {
+    const base = {
+      schemaVersion: 1,
+      attemptId: id,
+      action: "swap",
+      planId,
+      executorPlanHash,
+      transactionFingerprint,
+      transaction: {
+        chainId: transaction.chainId,
+        from: transaction.from,
+        to: transaction.to,
+        data: transaction.data,
+        valueAtomic: transaction.valueAtomic,
+        gasLimit: transaction.gasLimit,
+      },
+    };
+    const records = [
+      {
+        ...base,
+        state: "prepared",
+        payloadType: "unsigned_preparation",
+        payloadBinaryHex: "0x01",
+      },
+      { ...base, state: "handoff_started" },
+      { ...base, state: "submitted", transactionHash },
+      {
+        ...base,
+        state: "receipt_failed",
+        transactionHash,
+        verification: "failed",
+      },
+    ];
+    const raw = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+    await expect(parseAtomicIntentJournal(raw)).resolves.toBeDefined();
+    await writeFile(t.path, raw, { mode: 0o600 });
+    const journal = await AtomicIntentJournal.open(t.path, {
+      attemptId: () => "abcdefab-cdef-4abc-8def-abcdefabcdef",
+    });
+    await expect(
+      journal.prepare({
+        action: "approval",
+        payloadType: "approval_response",
+        payloadBinary: Uint8Array.of(2),
+        planId,
+        transaction,
+        envelope,
+      }),
+    ).resolves.toBeDefined();
+    await journal.close();
+    const appended = lines(await readFile(t.path, "utf8"));
+    expect(appended.map(({ schemaVersion }) => schemaVersion)).toEqual([
+      1, 1, 1, 1, 2,
+    ]);
   } finally {
     await t.cleanup();
   }

@@ -2,12 +2,13 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { toJsonString } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
-import { getAddress, hexToBigInt, isHex } from "viem";
+import { getAddress, type Hex, hexToBigInt, isHex, keccak256 } from "viem";
 import { PlanQuoteResponseSchema } from "../../../generated/ts/epeius/atomic/v1/atomic_pb";
 import {
   ChainStatusSchema,
   GetStatusResponseSchema,
   QuoteFinalSchema,
+  type UnsignedTransaction,
 } from "../../../generated/ts/epeius/quote/v1/quote_pb";
 import { buildEngine, engineBinary } from "../../../scripts/tasks";
 import { AtomicIntentJournal } from "./atomic-intent-journal";
@@ -17,6 +18,7 @@ import {
   validateAtomicPlanQuote,
 } from "./atomic-plan-quote";
 import { runAtomicPlanTrade } from "./atomic-plan-trade";
+import type { AtomicEnvelope } from "./atomic-signed-envelope";
 import { atomicPlanClient, quoteClient } from "./client";
 import { MAX_BUDGET, readConfig, validateEngineUrl } from "./config";
 import { ExecutionOutcome, type ExecutionResult } from "./execution";
@@ -53,6 +55,32 @@ export function executionExitCode(result: ExecutionResult) {
   }
 }
 
+export function atomicConsentDetails(
+  kind: "approval" | "swap",
+  transaction: UnsignedTransaction,
+  envelope: AtomicEnvelope,
+) {
+  return {
+    action: kind,
+    transactionType: envelope.type,
+    chainId: transaction.chainId,
+    nonce: envelope.nonce,
+    sender: transaction.from,
+    target: transaction.to,
+    valueAtomic: transaction.valueAtomic,
+    gasLimit: transaction.gasLimit,
+    calldataHash: keccak256(transaction.data as Hex),
+    maxFeePerGasAtomic: envelope.maxFeePerGasAtomic,
+    maxPriorityFeePerGasAtomic: envelope.maxPriorityFeePerGasAtomic,
+    maxExecutionGasExposureAtomic: (
+      BigInt(transaction.gasLimit) * BigInt(envelope.maxFeePerGasAtomic)
+    ).toString(),
+    totalMaximumAtomic: null,
+    feeNotice:
+      "OP/Base L1-data and operator charges are not capped by these execution-gas fee caps; total maximum is unknown.",
+  };
+}
+
 const help = `Epeius — EVM quote terminal
 
 Usage:
@@ -61,7 +89,7 @@ Usage:
   bun run terminal -- status [--engine-url URL] [--json]
   bun run terminal -- tokens [--chain KEY] [--engine-url URL] [--json]
   bun run terminal -- quote [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) [--execution-mode atomic-v1] [--search-budget-ms N] [--engine-url URL] [--json]
-  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH ([--route-id ID] | --execution-mode atomic-v1 --candidate-index N --atomic-journal PATH) [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
+  bun run terminal -- trade [--chain KEY] --in TOKEN --out TOKEN (--amount DECIMAL | --amount-atomic INTEGER) --keystore PATH --password-file PATH ([--route-id ID] | --execution-mode atomic-v1 --candidate-index N --atomic-journal PATH --max-fee-per-gas-atomic INTEGER --max-priority-fee-per-gas-atomic INTEGER) [--slippage-bps N] [--search-budget-ms N] [--confirm-approval yes | --confirm-swap yes] [--config PATH]
   bun run terminal -- prepare|execute --chain KEY (--preparation-id ID --slippage-bps N | --quote-id ID (--route-id ID | --allocations JSON) [--execution-mode atomic-v1] [--slippage-bps N]) --keystore PATH --password-file PATH [--confirm-approval yes | --confirm-swap yes] [--config PATH]
 
 Default config: ./epeius.toml. Execution must be explicitly enabled in chain config.
@@ -109,6 +137,25 @@ function options(args: string[], names: string[]) {
   } catch {
     throw new Error("Invalid arguments. Run bun run terminal --help.");
   }
+}
+
+function parseAtomicFeeCaps(values: Record<string, string | undefined>) {
+  const max = values["max-fee-per-gas-atomic"];
+  const priority = values["max-priority-fee-per-gas-atomic"];
+  if (!max || priority === undefined)
+    throw new Error(
+      "Atomic V1 trade requires --max-fee-per-gas-atomic and --max-priority-fee-per-gas-atomic.",
+    );
+  if (!/^[1-9][0-9]*$/.test(max) || !/^(0|[1-9][0-9]*)$/.test(priority))
+    throw new Error(
+      "Atomic V1 fee caps must be canonical decimal atomic values.",
+    );
+  const maxFeePerGas = BigInt(max);
+  const maxPriorityFeePerGas = BigInt(priority);
+  const uint256Max = (1n << 256n) - 1n;
+  if (maxFeePerGas > uint256Max || maxPriorityFeePerGas > maxFeePerGas)
+    throw new Error("Atomic V1 priority fee must not exceed the max fee.");
+  return { maxFeePerGas, maxPriorityFeePerGas };
 }
 
 async function goCommand(args: string[], json: boolean, signal: AbortSignal) {
@@ -317,6 +364,8 @@ export async function main(rawArgs: string[]) {
                     "keystore",
                     "password-file",
                     "atomic-journal",
+                    "max-fee-per-gas-atomic",
+                    "max-priority-fee-per-gas-atomic",
                     "slippage-bps",
                     "execution-mode",
                     "confirm-approval",
@@ -325,6 +374,7 @@ export async function main(rawArgs: string[]) {
                 : []),
             ],
     );
+    let atomicFees: ReturnType<typeof parseAtomicFeeCaps> | undefined;
     if (command === "trade") {
       const atomic = values["execution-mode"] === "atomic-v1";
       if (atomic && !values["atomic-journal"])
@@ -335,6 +385,14 @@ export async function main(rawArgs: string[]) {
         throw new Error(
           "--atomic-journal is only valid with trade --execution-mode atomic-v1.",
         );
+      const hasFeeCaps =
+        values["max-fee-per-gas-atomic"] !== undefined ||
+        values["max-priority-fee-per-gas-atomic"] !== undefined;
+      if (!atomic && hasFeeCaps)
+        throw new Error(
+          "Atomic fee caps are only valid with trade --execution-mode atomic-v1.",
+        );
+      if (atomic) atomicFees = parseAtomicFeeCaps(values);
     }
     const engineUrl = parsed.engineUrl
       ? validateEngineUrl(parsed.engineUrl)
@@ -456,6 +514,9 @@ export async function main(rawArgs: string[]) {
           `RPC network must match configured chain ID ${context.expectedChainId}.`,
         );
       if (values["execution-mode"] === "atomic-v1") {
+        if (!atomicFees)
+          throw new Error("Atomic V1 fee caps were not admitted.");
+        const pendingNonce = await context.rpc.pendingNonce(context.signer);
         const candidateIndex = Number(values["candidate-index"]);
         const slippage = values["slippage-bps"] ?? "50";
         if (
@@ -493,6 +554,9 @@ export async function main(rawArgs: string[]) {
               signer: context.signer,
               executor: trustedExecutor,
               slippageBps: Number(slippage),
+              pendingNonce,
+              maxFeePerGas: atomicFees.maxFeePerGas,
+              maxPriorityFeePerGas: atomicFees.maxPriorityFeePerGas,
               journal,
               quote: () =>
                 atomicClient.getPlanQuote(
@@ -513,25 +577,20 @@ export async function main(rawArgs: string[]) {
                   timeoutMs: 25000,
                 }),
               chainId: context.rpc.chainId,
-              send: context.wallet.send,
+              sign: context.wallet.signAtomic,
+              submitRawTransaction: context.rpc.submitRawTransaction,
               receipt: context.rpc.waitCanonicalReceipt,
               traceCanonicalTransaction: context.rpc.traceCanonicalTransaction,
               report: (event) => console.log(JSON.stringify(event)),
-              confirm: async (kind, transaction) => {
+              confirm: async (kind, transaction, envelope) => {
                 if (!(await verifyAtomicExecutor(context.rpc, trustedExecutor)))
                   throw new Error(
                     "Local Atomic V1 executor runtime code or limits changed. Nothing sent.",
                   );
                 console.error(
-                  JSON.stringify({
-                    action: kind,
-                    chainId: transaction.chainId,
-                    from: transaction.from,
-                    to: transaction.to,
-                    valueAtomic: transaction.valueAtomic,
-                    gasLimit: transaction.gasLimit,
-                    data: transaction.data,
-                  }),
+                  JSON.stringify(
+                    atomicConsentDetails(kind, transaction, envelope),
+                  ),
                 );
                 if (values[`confirm-${kind}`] === "yes") return true;
                 if (values["confirm-approval"] || values["confirm-swap"])
